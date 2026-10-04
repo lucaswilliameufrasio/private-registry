@@ -1,9 +1,12 @@
 # Plano de desenvolvimento — Registry privado de pacotes e artefatos
 
-**Data:** 02/10/2026  
-**Estado:** especificação para iniciar o desenvolvimento com Codex  
+**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026
+
+**Estado:** especificação revisada; fase 0 em execução, com primeiro spike local comprovado
+
 **Nome de trabalho:** Private Registry; nome comercial ainda não escolhido  
 **Repositório sugerido:** `artifact-registry` — sugestão técnica, sem pressupor disponibilidade
+**Distribuição atual:** repositório privado, sem licença definida; definir termos antes de distribuir para terceiros
 
 ## 1. Objetivo e decisões consolidadas
 
@@ -34,6 +37,15 @@ A primeira instalação atende aos projetos do proprietário. O produto deve ser
 | Emails temporários | Bloqueio opcional, lista atualizável, regras manuais e exceções |
 | Automação | Contas de serviço, tokens restritos e publicação confiável via OIDC de CI |
 | Segurança | Imutabilidade, auditoria, detecção de anomalias, alertas por email e políticas de supply chain |
+| Escopo da v1 | Os sete formatos: Pub, Go, Cargo, npm, Hex, OCI e genéricos; entregas parciais não são a v1 completa |
+| Rede isolada | Instalação, atualização, operação e recuperação offline são requisitos da v1 |
+| Plataformas do servidor | Linux amd64/arm64, por Docker Compose ou binário/systemd |
+| CLI de publicação | Linux, Windows e macOS; compatibilidade comprovada por testes |
+| Provisionamento corporativo | OIDC + SCIM 2.0, com Authentik como primeira integração de referência, opcional |
+| MFA | TOTP, códigos de recuperação e passkeys na v1 |
+| Revisão humana | Opcional por repositório, sem autoaprovação, distinta de recebimento e publicação |
+| Limites de tráfego/downloads | Fora da v1; métricas e análise autorizada de consumo entram na v1 |
+| Recursos adiados | Registro explícito em [roadmap.md](roadmap.md), com motivo e condição de retomada |
 
 ### 1.2 Princípios
 
@@ -41,19 +53,21 @@ A primeira instalação atende aos projetos do proprietário. O produto deve ser
 2. Compatibilidade é comprovada com clientes reais, não apenas com respostas HTTP semelhantes.
 3. Credenciais humanas e de automação são diferentes.
 4. Permissão de operar a instalação não equivale a permissão de ler pacotes privados.
-5. Uma versão aceita nunca muda de bytes.
+5. Uma versão publicada nunca muda de bytes; recebimento não equivale a publicação.
 6. Backup enviado e backup restaurado são estados distintos.
 7. Origem aparente de rede é um sinal de risco, não identidade comprovada.
 8. Recursos futuros não justificam microserviços, filas externas ou infraestrutura desnecessária no início.
 9. Integrações externas devem ter disponibilidade e comportamento de falha explícitos.
 10. Logs, alertas e métricas não podem expor segredos ou nomes privados a pessoas sem acesso.
+11. Restrição de política para operações futuras e aplicação ao estado existente são ações diferentes.
+12. Recursos não entregues têm limitações honestas e registro no roadmap; não há opções de segurança sem efeito.
 
 ## 2. Terminologia e escopo do produto
 
 | Termo | Significado |
 | --- | --- |
 | Instalação | Instância self-hosted com banco, configuração e armazenamento próprios |
-| Workspace | Fronteira de colaboração e autorização; exemplo: pessoal ou TixNow |
+| Workspace | Fronteira de colaboração e autorização; exemplo: pessoal ou TixNow; participar não concede leitura automática |
 | Repositório | Coleção de um formato, dentro de um workspace; não é um repositório Git |
 | Pacote | Identidade lógica do pacote, crate, módulo ou coleção de assets |
 | Versão | Identificador aceito segundo as regras do formato |
@@ -63,6 +77,9 @@ A primeira instalação atende aos projetos do proprietário. O produto deve ser
 | Publicador confiável | Identidade de CI explicitamente vinculada a um destino de publicação |
 | Proveniência | Declaração verificável da origem e produção de um artefato |
 | Quarentena | Restrição de distribuição por incidente ou verificação pendente |
+| Conta gerenciada | Conta cujo estado de acesso é controlado por integração de diretório SCIM |
+| Concessão delegável | Autorização explícita para conceder uma capacidade; distinta de poder exercê-la |
+| Recebimento | Envio aceito para processamento/revisão, sem garantir publicação ou download disponível |
 
 ### 2.1 Resultado esperado
 
@@ -84,8 +101,14 @@ A primeira instalação atende aos projetos do proprietário. O produto deve ser
 - Cluster SQLite, active-active, sharding e múltiplos escritores em hosts distintos.
 - Garantia de que uma dependência não é utilizada em nenhum projeto externo.
 - Garantia de ausência de malware ou vulnerabilidades só por possuir assinatura.
+- Scanners de vulnerabilidades, segredos e SBOM; verificação de assinaturas/proveniência não substitui scanners.
+- Limites de downloads/tráfego, papéis personalizados e transferências entre workspaces.
+- Servidor oficialmente suportado em Windows/macOS; isso não exclui a CLI nessas plataformas.
+- Trusted publishing Gitea sem segredo persistente, enquanto não houver mecanismo comprovado.
 
 Essas exclusões não removem as interfaces de extensão necessárias, mas não devem gerar infraestrutura antecipada.
+
+Toda funcionalidade discutida e adiada deve constar no [roadmap](roadmap.md). Este registro não promete prazo nem transforma um recurso futuro em suporte atual. Rede isolada, passkeys, aprovação humana, verificador externo e sincronização contínua de usuários/grupos pertencem à v1 e não podem ser adiados silenciosamente.
 
 ## 3. Stack e decisões técnicas
 
@@ -203,6 +226,13 @@ Paths são propostas internas; os adapters devem obedecer às rotas reais de seu
 
 Assets HTML/JS e documentação enviados por usuários ficam fora da origem da administração. Rejeitar configuração que coloque conteúdo executável de clientes na mesma origem das sessões administrativas.
 
+### 4.3 Identidades, nomes e endereços
+
+- Nome de exibição de workspace/repositório é editável; slug usado nas URLs é imutável após criação. Avisar antes de criar.
+- IDs opacos continuam sendo a identidade de autorização, independentemente de nomes e paths.
+- Renomear identidade de pacote obedece às regras do formato; não há redirecionamento genérico entre nomes na v1.
+- Trocar responsáveis dentro do workspace é permitido e auditado. Mover pacote/repositório entre workspaces não entra na v1; URLs, permissões, quotas e credenciais não são transferidas implicitamente.
+
 ## 5. Modelagem e invariantes
 
 ### 5.1 Entidades
@@ -238,7 +268,7 @@ O modelo comum é complementado por metadados próprios de cada formato. Não ex
 ### 5.3 Invariantes
 
 1. Download autorizado aponta apenas para objeto completo e verificado.
-2. A mesma identidade de versão não aceita conteúdo diferente, mesmo depois de exclusão.
+2. Depois de publicada, a mesma identidade de versão não aceita conteúdo diferente, mesmo depois de exclusão. Tentativa rejeitada antes da publicação não torna a versão permanentemente consumida.
 3. Um blob conhecido globalmente não concede direito de baixar seu conteúdo.
 4. Operações por digest, busca, listas e mensagens de erro respeitam isolamento.
 5. Upload sem commit não entra nos índices dos clientes.
@@ -258,9 +288,9 @@ Preferir deduplicação dentro do workspace no início. Deduplicação entre wor
 3. Criar sessão de upload com expiração e identificador opaco.
 4. Receber conteúdo em streaming, calcular digest e impor limites reais.
 5. Validar arquivo, metadados e correspondência de nome/versão.
-6. Aplicar verificações e exigências de assinatura/proveniência.
+6. Aplicar verificações e exigências de assinatura/proveniência; se houver revisão humana, persistir a pendência e só liberar após aprovação e revalidação.
 7. Tornar objetos duráveis e verificar disponibilidade no storage.
-8. Em transação, reservar definitivamente a versão, registrar referências, auditoria e outbox.
+8. Ao publicar, em transação, tornar definitiva a reserva da versão, registrar referências, auditoria e outbox. Reserva enquanto pendente é recuperável por rejeição anterior à publicação.
 9. Expor a versão nos endpoints nativos e disparar jobs derivados.
 
 ### 6.2 Estados
@@ -288,6 +318,7 @@ Depreciação e retirada da resolução são atributos específicos de ecossiste
 
 - Upload concluído no S3, mas commit SQL falhou: objeto órfão fica retido por grace period e é reconciliado.
 - Dois publicadores enviaram a mesma versão: constraint decide um vencedor; retry só é idempotente com os mesmos bytes e metadados protegidos.
+- Enquanto uma publicação estiver pendente, reservar a identidade de versão para impedir disputa concorrente. Rejeição anterior à publicação libera essa identidade para envio corrigido, preservando histórico e recibos da tentativa. Repetição de um recibo rejeitado não ressuscita a tentativa antiga.
 - Timeout depois do commit: operação pode consultar recibo ou repetir de forma idempotente.
 - Multipart abandonado: job aborta, libera quota e registra resultado.
 - Usuário perdeu permissão durante upload: finalização negada.
@@ -296,9 +327,22 @@ Depreciação e retirada da resolução são atributos específicos de ecossiste
 
 O registry nunca executa `npm install`, `mix compile`, `cargo build`, hooks de pacote ou comandos arbitrários de README. Extração e inspeção são operações limitadas, preferencialmente em ambiente isolado.
 
+### 6.4 Aprovação humana
+
+- Política opcional por repositório, desativada por padrão; aprovação exige capacidade específica.
+- Publicador não aprova a própria publicação; rejeição exige motivo e auditoria.
+- Conteúdo pendente não aparece nos índices nativos nem pode ser baixado. Checks obrigatórios continuam necessários; aprovação humana não os substitui.
+- Revalidar políticas e autorizações atuais imediatamente antes de publicar. Alteração de política ou revogação de acesso invalida a elegibilidade anterior; checks desatualizados precisam ser refeitos. Não há direito adquirido às regras do recebimento.
+- Usuário desativado ou sem autorização vigente não tem sua publicação pendente liberada; a UI explica o impedimento e preserva o histórico.
+- Quando o protocolo permitir com segurança, confirmar recebimento sem prometer disponibilidade; status fica disponível na UI/API/CLI. O comando não espera uma decisão humana indefinidamente.
+- Testar esse comportamento com clientes reais de cada formato, inclusive OCI. Se o cliente/protocolo não permitir separar recebimento de publicação com segurança, declarar a limitação e usar envio pela CLI/API; não responder sucesso de publicação nativa fictício.
+- Desativar aprovação vale para novos envios, sem liberar a fila existente. Liberação em lote é ação separada, com prévia, confirmação, autorização, auditoria e revalidação das demais exigências.
+
 ## 7. Compatibilidade por formato
 
 Cada adapter precisa de contrato, fixtures, testes com cliente e matriz de versões suportadas. O dashboard deve declarar comandos compatíveis e limitações concretas; não usar um selo genérico de suporte antes desses testes.
+
+A matriz da v1 será fixada antes da release, usando a versão estável atual e a linha anterior ainda mantida quando houver, respeitando o ciclo próprio de cada cliente. Não há requisito de compatibilidade com versões antigas dos projetos do proprietário. Versões fora da matriz podem funcionar, mas não recebem garantia; novas versões entram após testes reais.
 
 ### 7.1 Dart e Flutter — Pub
 
@@ -400,11 +444,13 @@ O formato interno do storage OCI não se mistura implicitamente ao CAS dos demai
 - URLs de versões imutáveis com cache longo para conteúdo público; aliases mutáveis têm cache curto e proteção própria.
 - CORS e Content-Type configurados com defaults restritos; `nosniff`.
 - HTML/JS/SVG enviados por usuários nunca na origem da administração.
-- URL privada exige credencial compatível ou link assinado de vida curta. Nunca colocar token permanente num `<script src>`.
+- URL privada exige credencial compatível ou link assinado de vida curta. Nunca colocar token permanente num `<script src>`. Visibilidade é herdada do repositório, não escolhida individualmente por arquivo.
 - UI oferece URL de cada arquivo, snippet, hash/SRI quando aplicável e opção de download.
 - Origem própria pode estar atrás de CDN externa, sem cache compartilhado de conteúdo privado por default.
 
 Aceite: servir bundle pré-construído do Scalar e um widget próprio por versão, validar integridade, Range e separação de origem. O registry não precisa resolver dependências nem transformar arquivos. Referência contextual: [R13].
+
+Downloads privados passam pelo registry por padrão, com autorização vigente. Links assinados diretos são opção explícita por repositório: validade padrão de 5 minutos, teto inicial de 15 minutos configurável pelo administrador da instalação; workspace pode reduzir, não ultrapassar o teto. Quem obtiver o link pode usá-lo enquanto válido. Revogação/quarentena pode não invalidar links emitidos, e expiração normalmente impede novas requisições, não necessariamente um download já iniciado. Exibir essa janela e não prometer bloqueio imediato universal.
 
 ## 8. Autenticação humana e cadastro
 
@@ -418,6 +464,10 @@ Aceite: servir bundle pré-construído do Scalar e um widget próprio por versã
 
 Cadastro fechado por padrão. Opções: somente administradores, convites, ou cadastro aberto. Convites têm expiração, escopo, uso único e estado verificável. Convites para workspaces diferentes não concedem acesso à instalação inteira.
 
+Cadastro e criação de workspaces são configurações independentes do administrador da instalação. Criação de workspaces pode ser restrita ao administrador, a usuários explicitamente autorizados ou a qualquer usuário cadastrado, sujeita aos limites definidos. Abrir cadastro não libera automaticamente criação de workspace.
+
+Cadastro aberto local, com senha/passkey, exige email verificado e transporte de email funcional; impedir sua ativação sem esse transporte. Login federado pode aceitar email verificado pelo IdP conforme política explícita. Contas criadas por administrador e convites seguem política separada, permitindo operação interna sem email. Verificação não concede acesso a workspace nem vincula contas automaticamente.
+
 ### 8.2 Métodos
 
 | Método | Requisito |
@@ -427,7 +477,7 @@ Cadastro fechado por padrão. Opções: somente administradores, convites, ou ca
 | Google | Adapter configurável com identidade estável e callbacks registrados |
 | Apple | Adapter com configurações e rotação de credenciais próprias do provedor |
 | GitHub | OAuth configurável; consultar identidade estável e email verificado quando exigido |
-| Passkeys/TOTP | Segundo fator e/ou autenticação local conforme implementação |
+| Passkeys/TOTP | Ambos na v1; passkey pode autenticar sem senha com verificação do usuário; TOTP com senha e códigos de recuperação |
 
 OIDC próprio significa integrar um provedor externo controlado pelo operador, como um IdP corporativo. Não significa construir um servidor de identidade próprio. GitHub para login humano e OIDC de GitHub Actions são integrações distintas.
 
@@ -437,18 +487,51 @@ Fluxos de login: authorization code, PKCE onde suportado, `state`, `nonce` em OI
 
 - Vinculação de provedor exige sessão recente e confirmação explícita.
 - Nunca mesclar contas automaticamente só porque o email coincide.
-- Grupos OIDC podem mapear para equipes; mapeamentos são allowlists controladas.
+- Grupos do diretório podem mapear para equipes; mapeamentos são allowlists controladas, com origem de cada concessão registrada. OIDC autentica; SCIM mantém continuamente o provisionamento de contas gerenciadas, sem depender de novo login.
 - Exigir regras explícitas para privilégios elevados; não interpretar qualquer claim como administração.
 - Desativar senha somente após testar login alternativo de administrador e confirmar recuperação local.
 - Verificação de email quando a política exigir; suporte a email relay da Apple sem classificá-lo automaticamente como temporário.
 - Sessões revogáveis, cookie Secure/HttpOnly/SameSite e defesa CSRF nos endpoints humanos.
 - Rotacionar sessão no login, MFA e mudança de privilégio.
-- Duração inicial sugerida: 12 horas absolutas e 1 hora de inatividade; ajustável.
+- Duração padrão: 12 horas absolutas e 1 hora de inatividade; ajustável.
 - Reautenticação recente para alterar IdP, credenciais, permissões, backups, chaves e visibilidade.
-- Banimento/suspensão revoga sessões e acessos dependentes, com ações explícitas sobre contas de serviço administradas pelo usuário.
+- Banimento/suspensão revoga sessões, tokens pessoais e acessos dependentes. Contas de serviço independentes não são suspensas automaticamente; alertar para designar responsável e avaliar rotação quando o usuário suspenso era o único responsável ativo.
 - Não confiar em logout federado como única revogação local.
 
-### 8.4 CAPTCHA e domínio temporário
+### 8.4 MFA, passkeys e recuperação
+
+- Administrador da instalação pode exigir MFA de todos; por padrão, exigir de administradores da instalação e proprietários/administradores de workspace.
+- TOTP, passkeys e códigos de recuperação entram na v1. Contas de serviço usam políticas de credencial próprias, não MFA humano.
+- Passkey pode substituir senha + segundo fator quando a autenticação exigir e comprovar verificação do usuário pelo autenticador, como PIN/biometria. Presença/toque sem essa verificação não satisfaz MFA.
+- MFA federado só satisfaz a política com evidência verificável do IdP segundo configuração explícita, não por inferência de que qualquer login externo é multifator.
+- Recuperação começa por códigos de uso único. Sem códigos, administrador da instalação pode iniciar reset local de MFA com reautenticação própria, justificativa, auditoria e notificação ao usuário.
+- Reset não entrega sessão; usuário comprova identidade novamente e cadastra novo fator. Email sozinho não remove MFA.
+- Fatores do IdP são recuperados nele; o registry não os reseta. Último administrador sem acesso usa procedimento local autorizado de recuperação.
+- Conta local de emergência é separada e não gerenciada por SCIM; preservar seu uso auditado para falhas de integração.
+
+### 8.5 Provisionamento contínuo de usuários e grupos
+
+- OIDC + endpoint SCIM 2.0 interoperável na v1. Authentik é a primeira integração testada e documentada, opcional; não é dependência obrigatória da instalação.
+- SCIM provisiona usuários, grupos, associação e desativação independentemente do login. Não confundir suporte SCIM de entrada de um IdP com capacidade de enviar mudanças para aplicações.
+- Testar mudanças incrementais, reconciliação completa, remoção de grupos, desativação, retries e recuperação de conectividade com versão fixada do Authentik.
+- Correlacionar identidades por identificadores estáveis e vínculo explícito validado; não adotar conta local existente apenas por coincidência de email/nome. Credencial SCIM é de alto privilégio, restrita à integração e a mapeamentos autorizados; não concede administração global arbitrária.
+- Remoção de grupo retira concessões originadas daquele mapeamento, preservando concessões manuais independentes. Desativação da conta gerenciada bloqueia todos os seus métodos de login, inclusive senha, passkey e outro provedor vinculado.
+- Aplicar mudança recebida imediatamente; meta de entrega e aplicação em condições normais: até 1 minuto, a comprovar em testes. Documentar limitações reais, sem garantia instantânea universal.
+- Desativação revoga sessões e tokens pessoais e impede liberação de publicações pendentes sob aquela identidade. Contas de serviço independentes exigem avaliação própria, não suspensão automática.
+- Outros IdPs são possíveis por protocolos interoperáveis, mas suporte oficial depende de testes; conectores específicos adicionais têm registro no roadmap.
+
+### 8.6 Falha de sincronização e bloqueios
+
+- Silêncio sem eventos não prova falha. Medir saúde por reconciliação/sinal verificável, com contrato técnico e teste de falha; ausência de eventos não serve de heartbeat.
+- Falha comprovada gera alerta e, após prazo configurável com default de 1 hora, bloqueia acessos humanos das contas gerenciadas pela integração, incluindo sessões, tokens pessoais e métodos alternativos da mesma conta.
+- Não apagar usuários nem interpretar falha de comunicação como remoção de grupos. Não permitir expansão de acesso baseada em estado incompleto.
+- Área de saúde das integrações e bloqueios mostra causa, integração, última reconciliação completa bem-sucedida, início da falha, prazo, usuários afetados e ações para testar/reconciliar/desbloquear.
+- Reconciliação completa bem-sucedida remove automaticamente apenas bloqueios de indisponibilidade, respeitando estado/permissões atuais. Usuários desativados continuam bloqueados; sessões revogadas não são reativadas, exigindo novo login.
+- Exceção durante a falha exige administrador local autorizado, reautenticação, justificativa, validade e auditoria. Não restaura acesso comprovadamente revogado.
+- Conta local de emergência, contas de serviço independentes, outros usuários não afetados e downloads públicos continuam funcionando. Links privados assinados já emitidos respeitam a janela de validade documentada.
+- Comprovar observação de saúde e recuperação sem transformar o requisito em polling genérico fictício: SCIM sozinho não garante detecção de canal indisponível, e o mecanismo do Authentik precisa ser validado no spike.
+
+### 8.7 CAPTCHA e domínio temporário
 
 - Providers: Turnstile, reCAPTCHA e hCaptcha; opção de desligar.
 - Seleção de versão/modalidade do reCAPTCHA é explícita e testada; não tratar v2, v3 e Enterprise como equivalentes.
@@ -468,8 +551,8 @@ Referências de CAPTCHA: [R15], [R16], [R17].
 | Papel | Capacidades |
 | --- | --- |
 | Administrador da instalação | Saúde, configurações, armazenamento, backups e operação |
-| Proprietário do workspace | Membros, repositórios e políticas do workspace |
-| Administrador do workspace | Gestão delegada conforme configuração |
+| Proprietário do workspace | Ler e gerir todos os repositórios do workspace; autoridade máxima para concessões explícitas |
+| Administrador do workspace | Ler e gerir todos os repositórios do workspace, com delegação restrita de permissões |
 | Leitor | Listar e baixar conteúdo autorizado |
 | Publicador | Publicar em pacotes permitidos; sem gerir membros ou apagar versões |
 | Mantenedor | Depreciar, retirar da resolução e gerir referências dentro do escopo |
@@ -477,7 +560,39 @@ Referências de CAPTCHA: [R15], [R16], [R17].
 
 Permissões específicas: criar pacote, publicar versão, mover alias, mudar visibilidade, transferir ownership, quarentenar, restaurar, excluir definitivamente e gerir credenciais. Papéis prontos reduzem configuração repetitiva; exceções por pacote são possíveis, não obrigatórias.
 
-### 9.2 Regras
+Na v1, papéis predefinidos têm capacidades fixas e são combináveis por escopo; permissões específicas, como publicar/aprovar, podem ser concedidas separadamente. Papéis personalizados ficam no roadmap. A UI explica acesso efetivo e origem de cada concessão.
+
+Proprietário e administrador do workspace não recebem publicação automaticamente: precisam de concessão própria. Demais membros não recebem leitura só por participar. Permissões por workspace/repositório/pacote são aditivas, sem negação por pacote; conteúdo mais restrito deve ficar em outro repositório.
+
+Usar e delegar uma permissão são capacidades distintas. Gestão de membros não autoriza autoelevação: administrador só concede capacidades explicitamente delegáveis por ele, não qualquer capacidade que possua. Concessões acima disso exigem proprietário. Proprietário pode conceder a si próprio por ação explícita e auditada, sem herança automática de publicação.
+
+### 9.2 Propriedade e continuidade do workspace
+
+- Permitir vários proprietários; exigir ao menos um ativo.
+- Último proprietário não pode sair, ser rebaixado/removido ou excluir sua conta sem transferir propriedade ou usar o fluxo de exclusão do workspace.
+- Suspensão de segurança continua permitida, mesmo se atingir o último proprietário. Recuperação de propriedade é explícita e auditada; não concede automaticamente acesso a conteúdo ao administrador da instalação.
+- Criação de pacote é capacidade separada de publicar versão. UI/API podem reservar a identidade; primeira publicação humana pode criá-la apenas com ambas as permissões.
+- Automação por conta de serviço/trusted publisher só publica em identidades previamente reservadas por alguém autorizado. Permissão de publicar não reserva nomes novos nem autoriza namespace arbitrário.
+
+### 9.3 Visibilidade e descoberta
+
+Visibilidade é definida no repositório inteiro; pacotes, versões e arquivos herdam. Permissões específicas por pacote não mudam visibilidade pública. Modos da v1:
+
+| Modo | Acesso e descoberta |
+| --- | --- |
+| Privado | Só conteúdo autorizado; nenhuma descoberta anônima |
+| Público não listado | Acesso anônimo pelo endereço/protocolo, sem inclusão em catálogo/busca públicos |
+| Público listado | Acesso, navegação e busca anônimos |
+
+Não listado não é segredo: endereço conhecido pode ser acessado e compartilhado; endpoints nativos necessários continuam funcionando. Novos repositórios são privados.
+
+Administrador da instalação define modos disponíveis: somente privado; privado + público não listado; ou os três. Restringir opções impede novas escolhas proibidas, sem converter existentes; a UI mostra exceções. Aplicar restrição aos existentes é operação adicional explícita, com prévia dos afetados, aviso de quebra de consumidores, reautenticação, confirmação, auditoria e notificação aos responsáveis.
+
+Na conversão explícita, modos proibidos passam ao mais permissivo ainda permitido: listado → não listado quando permitido; qualquer público → privado quando somente privado. Aplicar controles/invalidação de cache da instalação; cópias externas não podem ser recolhidas. Reabilitar modo não republica conteúdo automaticamente.
+
+Alterar visibilidade exige capacidade própria, inicialmente exclusiva do proprietário e explicitamente delegável; administrador/mantenedor não a recebe automaticamente. Tornar público exige reautenticação e confirmação do alcance. Em incidente localizado, usar quarentena ou mudança do repositório, não converter toda a instalação por acidente.
+
+### 9.4 Regras
 
 - Negar por padrão e resolver contexto antes de qualquer leitura de storage.
 - Administração da instalação não concede download automático de conteúdo privado.
@@ -495,13 +610,15 @@ Permissões específicas: criar pacote, publicar versão, mover alias, mudar vis
 
 - Secret aleatório de alta entropia com prefixo/ID identificável e segredo exibido uma vez.
 - Hash/HMAC verificável para armazenamento; tokens de alta entropia não precisam do mesmo KDF lento das senhas.
-- Validade obrigatória por padrão; sugestão inicial 30 dias, teto configurável.
+- Validade obrigatória por padrão; default de 30 dias, teto configurável.
 - Separar leitura, publicação e manutenção; sem emissão de token administrativo amplo por default.
 - Escopos por workspace/repository/package e operações permitidas.
 - Restrições opcionais de CIDR, janela de horário e ambientes esperados.
 - Rotação com breve sobreposição explicitamente configurada; revogação independente das chaves antigas.
 - Last-used atualizado de forma agregada para evitar uma escrita SQL por download.
 - Nenhum token em logs, URLs, exemplos persistidos, emails ou respostas posteriores.
+
+Tokens pessoais restritos são permitidos para publicação manual com clientes nativos, sem exigir conta de serviço por desenvolvedor. São diferentes de credenciais de automação e limitados tanto pelo escopo emitido quanto pelas permissões atuais do usuário. Revogar/remover acesso humano retira acesso correspondente dos tokens; nunca registrar autoria de token pessoal como serviço independente. Pipelines usam contas de serviço ou trusted publishing.
 
 ### 10.2 OIDC de CI
 
@@ -512,7 +629,7 @@ Permissões específicas: criar pacote, publicar versão, mover alias, mudar vis
 5. Emitir credencial curta compatível com o cliente de publicação.
 6. Restringir credencial ao pacote/repositório e operação necessária.
 
-Default sugerido: 5 minutos, com limite máximo ajustável de 15 minutos. Prever duração suficiente para uploads autorizados sem prolongar a credencial arbitrariamente; rechecagem no commit e autorização limitada da sessão de upload.
+Default: 5 minutos, com limite máximo ajustável de 15 minutos. Prever duração suficiente para uploads autorizados sem prolongar a credencial arbitrariamente; rechecagem no commit e autorização limitada da sessão de upload.
 
 - Não aceitar qualquer repository da mesma organização automaticamente.
 - Regras para PRs e forks são restritas por padrão; releases confiáveis vêm de refs autorizadas.
@@ -523,6 +640,14 @@ Default sugerido: 5 minutos, com limite máximo ajustável de 15 minutos. Prever
 - Credencial emitida não permite alterar configurações, criar outra credencial ou trocar visibilidade.
 
 Referência GitHub: [R18]. Clientes com tokens próprios recebem a credencial curta no formato suportado; não precisam aprender OIDC diretamente.
+
+### 10.3 Provedores de CI da v1 e gap Gitea
+
+- GitHub Actions: trusted publishing via OIDC, incluindo runners self-hosted com as mesmas verificações de identidade/claims.
+- Gitea Actions: publicação com token restrito de conta de serviço armazenado nos secrets do pipeline, com exemplos e testes reais.
+- **Gap explícito:** publicação Gitea sem segredo persistente não é entregue na v1. Compatibilidade com workflows GitHub não comprova emissão de JWT OIDC de job. Confirmar capacidade na versão adotada antes de prometer integração.
+- Headers declarados pelo runner, IP e User-Agent não substituem evidência criptográfica. Mecanismo futuro sem segredo persistente fica no roadmap, com contrato e testes de identidade, escopo e replay.
+- OIDC de login humano e OIDC de CI permanecem integrações distintas.
 
 ## 11. Detecção de abuso e notificações de segurança
 
@@ -590,6 +715,9 @@ Baseline começa em modo de observação; mostrar quando não há dados suficien
 - Verificar identidade, cadeia de confiança e política de builder antes de aceitar como verificada.
 - Campos declarados pelo próprio publicador, como commit SHA, não recebem selo de origem verificada sem evidência.
 - Permitir política por repositório: opcional, alertar ou obrigatória.
+- Default de novos repositórios: opcional. Distinguir sem evidência, evidência fornecida não verificada e evidência verificada sob política de confiança explícita. Não oferecer exigência obrigatória onde ainda não houver verificação funcional.
+- Essa política trata evidências adicionais de supply chain; não desativa assinaturas nativas necessárias ao formato, como metadata Hex, nem validação obrigatória de integridade/digest.
+- OIDC de CI autentica o publicador, mas sozinho não comprova artefato assinado nem proveniência verificada.
 - Escolher ecossistema de verificação interoperável, como Sigstore/in-toto/SLSA, depois de spike e threat model.
 - Suportar verificação offline com bundles quando apropriado; não tornar transparency log público um vazamento obrigatório de metadata privada.
 - Proveniência comprova afirmações verificadas sobre origem; não garante ausência de vulnerabilidade.
@@ -597,11 +725,11 @@ Baseline começa em modo de observação; mostrar quando não há dados suficien
 
 Referência de modelo de ameaça: [R20]. O produto não deve anunciar nível SLSA sem avaliação dos requisitos aplicáveis ao processo de build da fonte.
 
-### 12.3 Scanners opcionais
+### 12.3 Scanners — pós-v1
 
-Integrações futuras para vulnerabilidades, segredos e SBOM. Um worker separado e isolado inspeciona conteúdo sem executar scripts do pacote. Definir versão do scanner, timestamp da base, resultados, bypass autorizado com prazo e comportamento de falha.
+Integrações para vulnerabilidades, segredos e SBOM ficam fora da v1, com registro no roadmap. A v1 não afirma detectar malware, segredos ou vulnerabilidades. Um worker futuro separado e isolado inspeciona conteúdo sem executar scripts do pacote. Definir versão do scanner, timestamp da base, resultados, atualização offline, bypass autorizado com prazo e comportamento de falha.
 
-Scanners obrigatórios para um repositório impedem publicação até resultado válido; resultados desconhecidos não viram aprovação. O núcleo pode estar pronto antes desses scanners, mas a interface não oferece uma opção sem efeito.
+Quando implementados, scanners obrigatórios para um repositório impedem publicação até resultado válido; resultados desconhecidos não viram aprovação. Na v1, a interface não oferece opção de exigir um scanner inexistente.
 
 ### 12.4 Cadeia de entrega do próprio registry
 
@@ -628,9 +756,12 @@ Interface mínima: abrir, escrever staging, finalizar objeto, HEAD/verificar, le
 ### 13.2 Quotas e contabilização
 
 - Quota de workspace/repositório, upload individual e concorrência.
-- Contabilizar bytes lógicos e físicos separadamente; referências deduplicadas não somam storage físico fictício.
+- Administrador pode limitar workspaces criados por usuário, membros/repositórios por workspace, armazenamento, upload individual e uploads simultâneos. Tetos da instalação prevalecem; limites de workspace podem ser menores ou receber exceção explicitamente autorizada.
+- Reduzir limite abaixo do uso atual não apaga dados: bloquear apenas operações que ampliem o excesso, apresentando motivo e uso atual.
+- Quota de armazenamento usa bytes lógicos: cada versão conta seu conteúdo completo, mesmo com blobs compartilhados. Mostrar bytes físicos reais separadamente, sem somar storage físico fictício por referência deduplicada.
+- Publicações pendentes e exclusões recuperáveis continuam consumindo quota; backups têm contabilização própria, separada da quota de conteúdo do workspace.
 - Reservar orçamento de upload; ajustar pelo tamanho real e liberar em abort/reject.
-- Cotas de tráfego e requisições opcionais; defaults não podem inviabilizar builds normais.
+- Limites de downloads/tráfego ficam fora da v1. Métricas de consumo entram na v1; limites operacionais de segurança/requisições não equivalem a quota de tráfego.
 - Billing não é implementado; métricas não precisam de precisão financeira.
 
 ### 13.3 Mudança de storage
@@ -742,7 +873,7 @@ Banco, manifest sensível e objetos são criptografados. Metadados externos mín
 
 ### 15.7 Operação e defaults
 
-Sugestões iniciais, ajustáveis: backup completo diário; retenção de 7 diários, 4 semanais e 3 mensais; validação automática completa do mais recente ao menos semanal e antes de upgrade destrutivo. As regras selecionam backups por ID sem duplicar desnecessariamente.
+Defaults configuráveis: backup completo diário; retenção de 7 diários, 4 semanais e 3 mensais; validação automática completa do mais recente ao menos semanal quando houver verificador, e validação antes de upgrade destrutivo. As regras selecionam backups por ID sem duplicar desnecessariamente.
 
 - Informar custo estimado em bytes e dependência de tráfego, sem inventar preço do provider.
 - Destino separado e credenciais restritas; configuração de write e prune pode usar credenciais diferentes.
@@ -750,6 +881,10 @@ Sugestões iniciais, ajustáveis: backup completo diário; retenção de 7 diár
 - Object Lock/versionamento quando disponíveis são proteção adicional, não dependência universal.
 - Não rodar prune se não houver backup válido e recuperável mais recente conforme política.
 - Notificar falha, atraso e ausência de restauração validada; job interrompido nunca vira sucesso.
+
+### 15.8 Prontidão para produção
+
+Instalação e testes são permitidos sem backup, com aviso persistente de recuperação não configurada/validada. Declarar a instalação pronta para produção exige destino, material de recuperação e primeira restauração validada. Falha posterior gera alerta crítico, mas não bloqueia automaticamente publicação/download. Upgrade destrutivo continua bloqueado sem backup completo validado conforme a política.
 
 ## 16. Restauração e comprovação de recuperação
 
@@ -760,6 +895,13 @@ Sugestões iniciais, ajustáveis: backup completo diário; retenção de 7 diár
 Estados de falha/cancelamento com motivo e etapa. `completed` significa upload concluído; `validated` exige leitura do backup remoto e restauração real. Validação parcial é marcada como parcial.
 
 ### 16.2 Verificador isolado
+
+Dois modos na v1:
+
+- **Chave offline:** validação completa manual quando o operador fornecer a chave por canal seguro; não anunciar validação automática nesse modo.
+- **Verificador externo:** validação automática agendada com chave protegida fora da instalação e acesso apenas ao destino de backup e ambiente isolado de restauração. Não guardar a chave privada de recuperação no próprio registry por padrão. Verificador funciona também em rede isolada com destinos internos autorizados.
+
+Sem verificador configurado, a UI distingue backup enviado de restauração validada. A configuração, distribuição e autenticação do verificador têm contrato e testes próprios; acesso a chave não concede administração da produção.
 
 - Baixar ciphertext do destino remoto, não reutilizar apenas o snapshot local.
 - Decriptar com credencial de recuperação e verificar todos os arquivos/digests.
@@ -804,12 +946,12 @@ RPO inicial depende do backup diário: até 24 horas para dados posteriores ao �
 | Depreciar | Permitido a mantenedor; registrar motivo |
 | Retirar da resolução | Conforme semântica suportada pelo cliente |
 | Quarentenar | Bloquear distribuição pela instalação e referências públicas locais |
-| Apagar versão | Marcar exclusão pendente, com recuperação sugerida de 30 dias |
+| Apagar versão | Marcar exclusão pendente, com recuperação padrão de 30 dias |
 | Apagar definitivamente | Permissão específica, reautenticação e justificativa; respeitar pins |
 | Apagar pacote inteiro | Mesmos controles, reserva de nome preservada |
 | Alias de produção | Proteção configurável contra movimentação/exclusão |
 | Retenção de bibliotecas | Preservar por padrão; sem expurgo por ausência de downloads |
-| Upload incompleto | Expirar automaticamente; sugestão de 24 horas |
+| Upload incompleto | Expirar automaticamente; default de 24 horas |
 | Artefato descartável | Política explícita por coleção/repositório |
 
 Retirada da resolução não é garantia universal de comportamento idêntico em Pub, Cargo, npm, Go e Hex. Implementar o mecanismo próprio do formato e explicar seu efeito. Quarentena pode bloquear até downloads fixados em lockfile. Cópias em caches externos não podem ser recolhidas pelo registry.
@@ -831,6 +973,14 @@ Mostrar referências conhecidas dentro da instalação, versões/digests e backu
 
 Em incidente, bloquear distribuição imediatamente sem exigir exclusão física. Remoção de um segredo presente num pacote envolve também cópias, backups e retenção configurada; não oferecer um botão que prometa recolher todas as cópias.
 
+### 17.4 Exclusão de workspace e repositório
+
+- Exclusão recuperável também para workspace/repositório, com default de 30 dias.
+- Bloquear imediatamente acesso, publicação e emissão de novas credenciais; manter conteúdo contabilizado e protegido contra GC durante recuperação.
+- Restauração exige proprietário autorizado, reautenticação e auditoria, por fluxo de gestão que não libere leitura do conteúdo excluído antes da restauração.
+- Restaurar não reativa credenciais revogadas nem torna repositórios públicos automaticamente.
+- Exclusão definitiva preserva reserva de slug/nome e respeita pins; backups seguem sua política própria, sem remoção automática fora dela.
+
 ## 18. Interface e experiência de uso
 
 ### 18.1 Áreas
@@ -838,7 +988,7 @@ Em incidente, bloquear distribuição imediatamente sem exigir exclusão física
 | Área | Funcionalidades |
 | --- | --- |
 | Início | Workspaces acessíveis, atividade, consumo e avisos |
-| Repositórios | Criar formato, visibilidade, políticas, quotas e membros |
+| Repositórios | Criar formato, visibilidade herdada, políticas, quotas e membros; prévia de conversões em lote |
 | Pacote | README sanitizado, versões, dependências, arquivos e instalação |
 | Versão | Digest, publicador, evidências, checks, retirada/quarentena e download |
 | Configurar cliente | Snippets corretos para cada cliente, sem token incorporado |
@@ -849,6 +999,9 @@ Em incidente, bloquear distribuição imediatamente sem exigir exclusão física
 | Administração | Saúde, banco, storage, jobs, notificações e configuração |
 | Backups | Agendamento, recipients, destino, histórico e validação |
 | Recuperação | Fluxo controlado de nova instalação e compatibilidade |
+| Revisão | Fila pendente, checks, aprovar/rejeitar, motivos e liberação explícita em lote |
+| Diretório e bloqueios | Saúde OIDC/SCIM, reconciliação, contas afetadas, prazo de falha e desbloqueio auditado |
+| Consumo | Downloads/bytes, totais e maiores consumidores, com detalhamento autorizado |
 
 ### 18.2 Fluxos essenciais
 
@@ -881,7 +1034,43 @@ Configuração operacional cotidiana pela UI: providers de login/CAPTCHA, regras
 - Dump de suporte sempre redigido; panic/report não inclui variáveis de ambiente completas.
 - Backup inclui material recuperável necessário conforme seção 15, sem circularidade da chave de decriptação.
 
-### 19.3 Email
+### 19.3 Rede isolada e política de saída
+
+- Operação em rede isolada é requisito da v1: instalação, atualização, publicação/consumo, administração, backup e recuperação sem downloads públicos obrigatórios.
+- Núcleo funciona com contas locais/passkeys, filesystem ou S3 interno, SMTP interno quando configurado e backups em destino interno separado. IdP/SCIM externo à aplicação pode estar na mesma rede isolada.
+- Saída de rede do servidor é negada por padrão. Administrador libera explicitamente destinos para S3, SMTP, IdPs, discovery/JWKS, CAPTCHA e atualizações de bases.
+- Validar destino e limites de SSRF em redirects/resolução/conexões; acesso legítimo a MinIO/IdP privado exige autorização explícita, não bypass global. Workers/verificador obedecem ao escopo de rede de seu papel.
+- Falhas de integrações opcionais não bloqueiam operações independentes; fluxos protegidos seguem sua política de falha. CAPTCHA público/social login indisponível em isolamento não impede métodos locais configurados.
+- Bases GeoIP, listas de domínios e evidências/bundles de assinatura podem ser importados offline quando o recurso permitir, com versão, origem/integridade e data. Não anunciar funcionalidade offline sem caminho de atualização/verificação testado.
+- Dependências públicas são responsabilidade dos clientes; registry não as consulta, resolve, baixa nem espelha. Testes de isolamento observam também tráfego inesperado.
+- Releases e documentação incluem procedimento offline, ferramentas compatíveis necessárias e checksums/assinaturas verificáveis sem fetch obrigatório na inicialização. Pacotes de instalação não precisam incluir toolchains de clientes de todos os formatos.
+
+### 19.4 Defaults consolidados da v1
+
+Os valores abaixo foram aceitos como defaults configuráveis, não apenas sugestões. Alterações preservam as garantias de isolamento, recuperação e autorização descritas no plano.
+
+| Política | Default |
+| --- | --- |
+| Cadastro | Fechado; criação de workspace configurada independentemente |
+| Novo repositório | Privado; aprovação humana desativada; assinatura/proveniência opcional |
+| MFA | Obrigatório para administradores da instalação e proprietários/administradores de workspace; pode ser exigido de todos |
+| Sessão humana | 12 horas absolutas; 1 hora de inatividade |
+| Token persistente | 30 dias; validade obrigatória por padrão e teto configurável |
+| Credencial OIDC de CI | 5 minutos; teto ajustável inicialmente de 15 minutos |
+| Link privado assinado | 5 minutos; teto inicial de 15 minutos controlado pela instalação, workspace só pode reduzir |
+| Upload incompleto | Expiração em 24 horas |
+| Exclusão recuperável | 30 dias para versões, repositórios e workspaces |
+| Eventos detalhados de rede | Retenção de 30 dias |
+| Auditoria administrativa | Retenção de 180 dias |
+| Backup | Completo diário; 7 diários, 4 semanais e 3 mensais |
+| Validação completa de backup | Semanal com verificador automático; também antes de upgrade destrutivo; modo com chave offline exige fornecimento manual |
+| Sincronização corporativa saudável | Meta de até 1 minuto para entregar/aplicar mudanças, a comprovar nos testes |
+| Bloqueio por sincronização | Após 1 hora de falha comprovada; prazo configurável |
+| Saída de rede do servidor | Negada; destinos liberados explicitamente |
+
+Valores concretos de quota de armazenamento, upload, concorrência e colaboração são configuração operacional; limites seguros de recursos e capacidade serão medidos nos benchmarks, não deduzidos apenas do hardware de referência.
+
+### 19.5 Email
 
 Interface de transporte desacoplada. SMTP é caminho genérico inicial; adapters HTTP de provedores podem ser adicionados sem alterar regras de domínio. Cada adapter precisa de teste de envio, timeout, idempotência quando suportada e status claro.
 
@@ -901,13 +1090,20 @@ Links usam a URL canônica e levam a telas autenticadas quando apropriado. Token
 - Jobs longos reportam progresso e permitem cancelamento seguro.
 - Shutdown para aceitar novas requisições e drenar trabalho; multipart/backup retêm estado recuperável.
 
-### 20.2 Auditoria
+### 20.2 Pressão de recursos e operação compartilhada
+
+- Downloads e operações interativas têm prioridade. Sob pressão de CPU/memória/I/O, reduzir concorrência de backup, GC e verificações, sem dispensar checks obrigatórios nem comprometer consistência.
+- Falta de espaço seguro bloqueia novos uploads com erro claro; não apaga conteúdo existente para abrir espaço automaticamente.
+- Jobs adiados aparecem com motivo, progresso e prazo; atraso acima da política gera alerta, especialmente backup/validação. Não deixar trabalho pesado adiado indefinidamente sem sinalização.
+- Documentar comportamento, limites operacionais, diagnóstico e ações de recuperação nos runbooks, incluindo coexistência com outros serviços.
+
+### 20.3 Auditoria
 
 Append-only no fluxo normal, com retenção configurada. Registrar ator humano/serviço, autorização aplicada, recurso, resultado, IP confiável e request ID. Não registrar segredos.
 
 Administrador do host/banco pode alterar dados: tabela append-only não é prova inviolável. Para requisitos mais fortes, exportar lotes assinados/checkpoints a destino separado protegido. Hash chain sem ancoragem externa não impede reescrita completa por operador privilegiado.
 
-### 20.3 Saúde e métricas
+### 20.4 Saúde e métricas
 
 - `/livez`: processo vivo; `/readyz`: condições mínimas de servir, sem expor detalhes sensíveis.
 - Dependência opcional de email indisponível não impede downloads; storage necessário indisponível afeta readiness apropriada.
@@ -915,8 +1111,17 @@ Administrador do host/banco pode alterar dados: tabela append-only não é prova
 - SQLite: tamanho de DB/WAL, busy/lock wait e duração de checkpoint; PostgreSQL: pool e queries lentas.
 - Labels sem token, package path privado, email, IP ou cardinalidade ilimitada.
 - Logs de download agregados onde possível; segurança preserva contexto mínimo para investigação.
-- Retenção inicial sugerida: eventos detalhados de rede 30 dias, auditoria administrativa 180 dias, ajustáveis ao volume e necessidade.
+- Retenção padrão: eventos detalhados de rede 30 dias, auditoria administrativa 180 dias, ajustáveis ao volume e necessidade.
 - Não ligar analytics/telemetria para serviço externo por padrão.
+
+### 20.5 Métricas de downloads e tráfego
+
+- Na v1, medir quantidade de downloads e bytes transferidos por período, com totais e identificação dos maiores consumidores. Não implementar quota de downloads/tráfego.
+- Administrador da instalação vê totais por workspace e instalação, sem nomes de pacotes privados nem identidade dos consumidores quando não tiver concessão explícita de acesso.
+- Proprietário/administrador do workspace vê detalhamento autorizado por repositório/pacote/versão, usuário/conta de serviço quando identificado e país/ASN aproximados. Localização não é identidade; acesso público anônimo não é atribuído a usuário inventado.
+- Dados detalhados ficam no domínio de métricas autorizado, não em labels Prometheus de alta cardinalidade ou que exponham nomes privados.
+- Definir contrato de contagem para GET/HEAD/Range, retries, cache e download parcial nos testes; não confundir egress efetivo do registry com tamanho lógico do artefato.
+- Para links S3/CDN diretos, emissão de link não prova download. Usar dados verificáveis do storage quando disponíveis; caso contrário marcar cobertura parcial e separar estimativa de bytes realmente observados. Não prometer total completo de tráfego externo invisível.
 
 ## 21. APIs e CLI
 
@@ -959,7 +1164,10 @@ Nomes são especificação a implementar, não comandos já existentes. Segredos
 | Clientes | Pub/Flutter, Go, Cargo, npm, Mix e Docker |
 | Artefatos | Biblioteca simples, transitive private deps, archive inválido e pacote grande |
 | Recuperação | Cada engine e storage usados pelo produto |
-| Auth | Senha, IdP OIDC de teste, OAuth adapters e CAPTCHA mocks/integração controlada |
+| Auth | Senha, TOTP, passkeys, códigos de recuperação, IdP OIDC de teste, Authentik/SCIM, OAuth adapters e CAPTCHA integração controlada |
+| Revisão | Recebimento pendente, proibição de autoaprovação, mudança de política e liberação em lote |
+| Offline | Instalação/upgrade/restore em rede isolada, saída negada e destinos internos explicitamente permitidos |
+| Plataformas | Servidor Linux amd64/arm64; CLI Linux/Windows/macOS e instalação Compose/systemd |
 | Concorrência | Publicação mesma versão, quota, revogação durante upload, GC e backup |
 
 PRs executam suítes afetadas e base dos dois bancos; releases executam matriz de formatos/bancos/storages suportados. Suítes mais pesadas podem ser agendadas, mas nenhuma combinação anunciada fica sem cobertura de release.
@@ -978,6 +1186,13 @@ PRs executam suítes afetadas e base dos dois bancos; releases executam matriz d
 - Mudança privado/público segue confirmação e controles de cache.
 - Artifact digest/attestation divergentes são rejeitados.
 - Conta de serviço não amplia próprio escopo nem aceita publisher arbitrário.
+- Cadastro aberto não libera criação de workspace nem acesso; email verificado não vincula conta automaticamente.
+- Administrador não se autoeleva nem delega capacidade não autorizada; proprietário publica só com concessão explícita.
+- Automação não cria pacote não reservado; rejeição pré-publicação libera versão sem perder histórico; versão publicada/excluída não pode mudar de bytes.
+- Modos de visibilidade indisponíveis não alteram existentes; conversão em lote é explícita e reabilitar opção não republica conteúdo.
+- SCIM remove apenas concessões do mapeamento afetado; desativação não é contornada por passkey/senha/outro provedor ou token pessoal.
+- Falha comprovada de sincronização bloqueia após prazo; silêncio sem eventos não bloqueia; reconciliação não reativa sessões/contas revogadas; exceção temporária é auditada.
+- Revogação/quarentena de download privado via link direto respeita a janela documentada; expiração não é garantia de interromper conexão aberta.
 
 ### 22.3 Cenários de falha e recuperação
 
@@ -990,6 +1205,10 @@ PRs executam suítes afetadas e base dos dois bancos; releases executam matriz d
 - Migration falha, schema incompatível e tentativa de downgrade não autorizado.
 - Verificador não envia email/webhook nem conecta ao bucket de produção para reparar dados faltantes.
 - Motor OCI restaurado consegue pull de imagem multiplataforma com os mesmos digests.
+- Restaurar workspace/repositório não reativa credenciais nem visibilidade pública; reserva de slug permanece após exclusão definitiva.
+- Verificador externo não depende da produção, usa chave fora da instalação e funciona com S3 interno em rede isolada; modo offline manual não recebe status automático fictício.
+- Falta de espaço bloqueia uploads sem apagar conteúdo; pressão de recursos adia jobs de forma visível e gera alerta por atraso.
+- Falha IdP/SCIM não interrompe conteúdo público, conta local de emergência ou contas de serviço independentes.
 
 ### 22.4 Performance
 
@@ -997,9 +1216,15 @@ Medir, não assumir capacidade pelo número de requests. Registrar CPU/RAM, tipo
 
 Critério estrutural: memória de upload/download limitada por buffers/concurrency, sem crescer proporcionalmente ao tamanho total do artefato. Definir orçamento concreto de latência e throughput após benchmark do hardware-alvo; resultados com memória/cache quente não substituem testes frios.
 
+Referência de benchmark: Linux com orçamento de 4 vCPU/8 GiB de RAM, SSD local para SQLite, filesystem e S3 medidos separadamente. Não é requisito mínimo nem garantia de capacidade. Incluir perfis menores/maiores e coexistência com outros serviços.
+
+Benchmarks podem rodar na máquina de desenvolvimento com recursos limitados e sem interromper trabalho existente. Inventário observado durante a revisão: Ryzen 9 7900, 12 núcleos/24 threads e aproximadamente 61 GiB de RAM total; uso/swap variam e devem ser recapturados a cada execução. Registrar carga concorrente, pressão de memória/swap, condições de disco e limites efetivos. Nenhum teste de carga ou capacidade foi executado durante a definição do plano.
+
 ## 23. Roteiro de implementação por entregas
 
 Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstrando publicação e consumo reais, e ampliar depois. Datas dependem de implementação e dos spikes; não estimar cronograma fictício.
+
+As fases são entregas internas incrementais. A v1 completa exige os sete formatos e os requisitos consolidados, inclusive rede isolada, passkeys, revisão humana, verificador externo e sincronização contínua. Não anunciar entrega parcial como v1 completa nem adiar recurso acordado por conveniência técnica. Recursos pós-v1 e gaps têm registro explícito no roadmap.
 
 ### Fase 0 — spikes e contratos
 
@@ -1008,6 +1233,9 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 - Provar snapshot PostgreSQL e envio criptografado.
 - Spike OCI de autorização/revogação/backup/GC e Hex de consumo assinado.
 - Fixtures por formato e threat model inicial.
+- Contrato de OIDC/SCIM com Authentik: identidade estável, mudanças/reconciliação, saúde verificável, atraso e recuperação de falha.
+- Compatibilidade dos clientes com publicação pendente de aprovação, incluindo limites do gateway OCI.
+- Contratos de rede isolada, saída autorizada, passkeys/MFA, métricas de links diretos e verificador externo.
 
 **Aceite:** relatório técnico com limitações, testes reproduzíveis e escolhas justificadas; nenhuma incompatibilidade encoberta.
 
@@ -1015,6 +1243,8 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 
 - Projeto Go/SvelteKit, migrations SQLite/PostgreSQL, config, logs e CI.
 - Bootstrap, usuários locais, sessões, workspace e autorização.
+- Políticas independentes de cadastro/criação de workspace; propriedade, permissões aditivas e delegação sem autoelevação.
+- Slugs imutáveis, limites de colaboração e visibilidade com três modos/restrição de opções independente de conversão.
 - Jobs/outbox e primeiros eventos de auditoria.
 - Health endpoints e instalação local em volume persistente.
 
@@ -1025,6 +1255,8 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 - Drivers filesystem/S3, staging, digest, quota, commit idempotente e reconciliação.
 - Assets em origem separada, download e aliases protegidos.
 - Catálogo básico e publicação CLI/API.
+- Reserva prévia de pacote para automação, tokens pessoais, revisão humana e recibos distintos de publicação.
+- Quota lógica, exclusão recuperável e métricas autorizadas de consumo; links privados assinados opcionais com janela explícita.
 
 **Aceite:** upload privado e público, distribuição de bundle pronto, falhas recuperáveis e ausência de buffering integral.
 
@@ -1032,6 +1264,8 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 
 - Snapshot dos dois engines, pins/GC, criptografia age e destino separado.
 - Agendamento, retenção, kit de recuperação e verificador.
+- Verificador externo automático e modo manual com chave offline, incluindo destinos internos em rede isolada.
+- Aviso de recuperação pendente e critério de prontidão para produção sem bloqueio automático por falha posterior.
 - Recovery mode e suspensão de credenciais restauradas.
 
 **Aceite:** recuperar em instalação vazia usando apenas o backup remoto e o kit; corromper/remover um objeto deve reprovar validação.
@@ -1059,15 +1293,18 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 ### Fase 7 — identidades externas e proteção de acesso
 
 - OIDC próprio, Google, Apple, GitHub, vinculação e MFA.
+- TOTP, passkeys com verificação do usuário, códigos e reset de MFA auditado sem bypass por email.
+- SCIM 2.0 contínuo com Authentik, saúde/reconciliação, prazo de bloqueio, área de bloqueios, recuperação e conta local de emergência.
 - Senha opcional, convites/email, CAPTCHA providers e lista temporária.
 - Testes antes de ativar e recuperação local auditada.
 
-**Aceite:** configuração errada não elimina último acesso administrativo; fluxos externos verificados e seguros.
+**Aceite:** configuração errada não elimina acesso local de emergência; fluxos externos/MFA verificados; desativação e grupos sincronizam sem novo login; falha comprovada bloqueia no prazo, reconciliação libera apenas contas elegíveis e nenhum método alternativo contorna o bloqueio.
 
 ### Fase 8 — trusted publishing e alertas
 
 - OIDC de CI, tokens curtos, regras de rede, baseline e incidentes.
 - Emails de segurança com retries, cooldown e gestão.
+- GitHub Actions OIDC e Gitea Actions com token restrito, com documentação explícita do gap Gitea sem segredo persistente.
 
 **Aceite:** publisher autorizado publica; outro repo/workflow falha; token suspeito gera incidente/email sem vazar segredo; violação de CIDR bloqueia.
 
@@ -1092,15 +1329,19 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 ### Fase 12 — políticas avançadas de supply chain
 
 - Assinaturas/proveniência verificáveis, exigências por repository, evidências e proteção de releases.
-- Scanners opcionais isolados, quando escolhidos.
+- Default opcional, status de evidência honesto e exigência somente onde houver implementação interoperável; testar bundles offline quando suportados.
+- Scanners de vulnerabilidades/segredos/SBOM são pós-v1 e não aparecem como exigência funcional na interface.
 
-**Aceite:** artefato alterado ou origem não confiável é negado sob política obrigatória; falha de scanner não libera publicação.
+**Aceite:** artefato alterado ou origem não confiável é negado sob política obrigatória; OIDC não recebe selo indevido de assinatura/proveniência; nenhum scanner inexistente é anunciado como ativo.
 
 ### Fase 13 — operação e release instalável
 
 - Admin completo, retenção/GC, quotas, export redigido de suporte e runbooks.
 - Builds amd64/arm64, imagem container assinada e instalação systemd/Docker Compose.
 - Upgrades/migrations, matriz de compatibilidade e restauração em ambiente limpo.
+- Servidor Linux amd64/arm64, CLI também Windows/macOS; procedimentos de instalação/upgrade/restore offline.
+- Runbooks de pressão de recursos, falha SCIM/bloqueio/desbloqueio, aprovação, mudança de visibilidade e cobertura de métricas diretas.
+- Benchmarks com orçamento 4 vCPU/8 GiB, perfis menores/maiores e carga compartilhada; limitações e resultados publicados sem garantia fictícia.
 
 **Aceite:** operador consegue instalar, configurar, publicar, investigar, atualizar e recuperar seguindo documentação.
 
@@ -1112,7 +1353,8 @@ Nenhuma fase está marcada como implementada. Entregar verticalmente, demonstran
 | Uso pessoal com dados importantes | Fases 0–6 concluídas, backup validado e acesso restrito |
 | Uso por equipe com autenticação externa | Fases 7–8 mais testes de autorização e operação |
 | Suporte a cada formato adicional | Respectiva fase com matriz de cliente e recovery |
-| Produto instalável anunciado | Fase 13 e documentação correspondente ao suporte efetivo |
+| V1 completa | Fases 0–13, sete formatos e todos os requisitos acordados comprovados; sem exclusão silenciosa de formato |
+| Distribuição/instalação por terceiros | V1 comprovada e termos/licença definidos antes de distribuição; repositório atualmente privado |
 
 Identidade/segurança pode ser antecipada conforme exposição da instalação. Não expor uma fase incompleta à internet para depois adicionar proteção.
 
@@ -1120,21 +1362,35 @@ Identidade/segurança pode ser antecipada conforme exposição da instalação. 
 
 - [ ] SQLite padrão e PostgreSQL opcionais com paridade demonstrada.
 - [ ] Filesystem/S3 testados, digests e quotas consistentes.
-- [ ] Sete formatos do plano entregues ou explicitamente excluídos do escopo anunciado.
+- [ ] Sete formatos do plano entregues: Pub, Go, Cargo, npm, Hex, OCI e genéricos; entrega parcial não é v1 completa.
 - [ ] Publicação feita pela fonte, sem build de código de cliente no servidor.
 - [ ] Controle de acesso em metadata, blobs, search e todos os endpoints.
-- [ ] OIDC próprio, Google/Apple/GitHub e opções de senha/MFA conforme suporte declarado.
+- [ ] OIDC próprio, Google/Apple/GitHub, senha opcional, TOTP, passkeys e recuperação de MFA auditada.
+- [ ] Authentik OIDC/SCIM testado: usuários/grupos sincronizados continuamente, estado de conta vinculante, saúde verificável, bloqueio após prazo e desbloqueio auditado sem bypass.
+- [ ] Cadastro e criação de workspace independentes; email verificado para cadastro aberto local.
+- [ ] Papéis fixos, permissões aditivas, publicação explícita, delegação separada e proteção do último proprietário.
+- [ ] Três modos de visibilidade herdados do repositório, política da instalação e conversão de existentes como ação separada.
 - [ ] CAPTCHA providers e domínio temporário configuráveis e testados.
 - [ ] Contas de serviço, revogação, tokens curtos e publishers OIDC restritos.
+- [ ] Tokens pessoais restritos, pacote reservado para automação, GitHub Actions OIDC e Gitea com token; gap sem segredo persistente documentado.
+- [ ] Revisão humana sem autoaprovação, recebimento distinto de publicação, política vigente revalidada e liberação em lote explícita.
 - [ ] Incidentes, emails de segurança, agrupamento/retries e contexto confiável.
 - [ ] Imutabilidade, quarentena, exclusão recuperável, nomes reservados e GC coordenado.
+- [ ] Slugs imutáveis; exclusão recuperável de versões/workspaces/repositórios sem reativação automática de credenciais/visibilidade.
 - [ ] Backup remoto completo criptografado e restaurado num ambiente vazio.
 - [ ] Chaves recuperáveis sem depender da instalação original.
+- [ ] Chave offline com validação manual e verificador externo automático, sem chave privada no registry por padrão.
 - [ ] Restore não reativa credenciais antigas por padrão.
 - [ ] Migrations/upgrades testados e compatibilidade de schema declarada.
 - [ ] Assets executáveis separados da administração; cache privado correto.
+- [ ] Links privados assinados opcionais, TTL configurado e janela de revogação explicitada.
+- [ ] Quota lógica, limites de colaboração/upload, métricas de downloads/tráfego e detalhamento sem exposição a administrador não autorizado.
+- [ ] Pressão de recursos prioriza operações interativas, adia jobs com alerta e bloqueia uploads sem apagar dados.
+- [ ] Instalação/upgrade/operação/restore em rede isolada, saída negada por padrão e destinos explicitamente autorizados.
+- [ ] Linux amd64/arm64 e CLI Linux/Windows/macOS com matriz de clientes fixada e testada.
 - [ ] Assinaturas/proveniência com status honesto e sem selo de garantia absoluta.
 - [ ] Releases próprias assinadas, dependências fixadas e runbooks entregues.
+- [ ] Roadmap registra todos os recursos/gaps adiados; scanners e demais itens pós-v1 não aparecem como suporte implementado.
 
 ## 25. ADRs e riscos que precisam de resolução técnica
 
@@ -1144,7 +1400,11 @@ Identidade/segurança pode ser antecipada conforme exposição da instalação. 
 | Motor OCI | Distribution/gateway ou alternativa | Isolamento, gate, GC e restore demonstrados |
 | Hex publicação | API/CLI primeiro; nativo só com contrato completo | Cliente real e docs sem flags inventadas |
 | Criptografia | age recipients + gestão de root secrets | Kit recupera instalação nova |
-| Verificador automático | Local/externo e posse da chave | Restauração do remoto sem acesso indevido |
+| Verificador automático | Externo automático + chave offline manual; mecanismo de autenticação/isolamento | Restauração do remoto sem acesso indevido |
+| SCIM e saúde Authentik | Contrato de reconciliação/health verificável, identidade e revogação | Testes de mudança, atraso, canal interrompido e recuperação sem login |
+| Aprovação nativa | Separar recebimento/revisão/publicação por protocolo | Cliente real, sem sucesso falso nem conteúdo pendente distribuído |
+| Métricas diretas | Downloads/bytes observados em S3/CDN e cobertura parcial | Comparar tráfego observado com dados do storage, sem contar emissão como download |
+| Rede isolada | Empacotamento, atualização offline e controle de saída | Instalação/upgrade/restore sem rede pública e com egress observado |
 | Frontend | Static embed ou SSR justificado | Deep links, CSP e instalação testados |
 | Proveniência | Biblioteca/ecossistema de verificação | Políticas de identidade e digest verificadas |
 | PostgreSQL tools | Distribuir ou exigir ferramentas compatíveis | Doctor e imagem de release testados |
@@ -1153,6 +1413,8 @@ Identidade/segurança pode ser antecipada conforme exposição da instalação. 
 | SaaS/gerenciado | Futuro após validação de uso | ADR de negócio, sem afetar bootstrap inicial |
 
 Esses itens não são perguntas pendentes ao usuário para iniciar desenvolvimento. São tarefas técnicas delimitadas, com direção e critérios de aceite. Se um spike contrariar uma garantia, corrigir arquitetura antes de marcar o recurso como suportado.
+
+Decisões de produto já fechadas não são substituídas pelos spikes: verificador externo e chave offline, frontend estático como direção, Authentik/SCIM contínuo, sete formatos, rede isolada e MFA com passkeys permanecem requisitos. O spike define o mecanismo e comprova limites; se inviabilizar um requisito, discutir mudança de escopo antes de anunciar a v1.
 
 ## 26. Orientações para iniciar pelo Codex
 
@@ -1166,23 +1428,32 @@ Esses itens não são perguntas pendentes ao usuário para iniciar desenvolvimen
 8. Para cada entrega, registrar mudanças, testes, limitações e próxima etapa.
 9. Manter README de instalação, desenvolvimento, testes, backup, recuperação e upgrade atualizados.
 10. Não implementar SaaS/billing/proxy público sem nova decisão de escopo.
+11. Manter `docs/roadmap.md` atualizado para todo recurso discutido e adiado, distinguindo gap conhecido, escopo pós-v1 e tarefa técnica ainda necessária à v1.
 
 ### Primeira sequência concreta de tarefas
 
 - [ ] Criar projeto e contratos de configuração/DB/storage.
-- [ ] Spike SQLite online backup e recuperação criptografada.
+- [x] Spike SQLite online backup com escritas entre passos e recuperação age local; [evidência e limites](spikes/sqlite-backup.md). S3, pins/GC e recuperação completa continuam pendentes.
 - [ ] Spike PostgreSQL dump/restore e compatibilidade de tools.
 - [ ] ADR do motor OCI e formato de export/backup.
+- [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
 - [ ] Serviço de publicação genérica com constraints/idempotência/quotas.
 - [ ] Drivers local/S3, reconciliação e download autorizado.
 - [ ] Backup completo com manifest/pins/criptografia/S3.
 - [ ] Verificador isolado que lê e restaura o backup remoto.
+- [ ] Caminhos de verificação externa automática e manual com chave offline; contratos de saída de rede.
+
+### Progresso comprovado — 04/10/2026
+
+Primeira fatia executada: módulo Go e experimento isolado de backup SQLite pela API do driver modernc, criptografia age em streaming e restauração local com digests, integridade/foreign keys e escritas/leitura durante a cópia. Build sem CGO, formatação, vet, testes reais repetidos três vezes e race detector passaram. O spike não é o serviço de backup completo, não acessa S3 e não marca validação remota; nenhuma fase inteira nem suporte de protocolo é anunciado como concluído.
 
 ## 27. Referências técnicas
 
 Fontes consultadas em 02/10/2026. Especificações fundamentam compatibilidade; requisitos de operação e defaults deste documento são decisões de projeto. Fixar versões e repetir os testes ao atualizar clientes/bibliotecas.
+
+Referências adicionais de Gitea/Authentik/Keycloak consultadas durante a revisão de 03–04/10/2026. Confirmar capacidades na versão efetivamente fixada; suporte anunciado pelo IdP não comprova, sozinho, o contrato ponta a ponta do registry.
 
 - **[R1]** Dart — custom repositories: https://dart.dev/tools/pub/custom-package-repositories
 - **[R2]** Pub — Hosted Repository Specification: https://github.com/dart-lang/pub/blob/master/doc/repository-spec-v2.md
@@ -1208,8 +1479,10 @@ Fontes consultadas em 02/10/2026. Especificações fundamentam compatibilidade; 
 - **[R22]** SQLite — Online Backup API: https://www.sqlite.org/backup.html
 - **[R23]** PostgreSQL — `pg_dump`: https://www.postgresql.org/docs/current/app-pgdump.html
 - **[R24]** age — biblioteca/formato: https://pkg.go.dev/filippo.io/age
+- **[R25]** Gitea Actions — diferenças e permissões: https://docs.gitea.com/usage/actions/comparison/
+- **[R26]** Authentik — SCIM provider de saída e reconciliação: https://docs.goauthentik.io/add-secure-apps/providers/scim
+- **[R27]** Keycloak — API SCIM de realm em preview, distinta de provisionamento de saída: https://www.keycloak.org/2026/07/keycloak-2670-released
 
 ---
 
 Este plano especifica o produto a desenvolver. Nenhum protocolo, teste ou garantia operacional aqui descrito deve ser apresentado como já implementado antes da evidência de aceite correspondente.
-
