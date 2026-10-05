@@ -1441,6 +1441,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Prova inicial Distribution 3.1.2/ORAS 1.3.4: push/pull de artefato, escopos e gate experimental de revogação por requisição; [evidência e limites](spikes/oci-auth.md). Não conclui ADR nem aceite OCI: quotas, gate de manifest/revisão, concorrência de commit, Docker/multiplataforma, export/restore e GC pendentes.
 - [x] Export/restore de raiz OCI amd64/arm64 com seis blobs e digests preservados, seleção de plataformas e GC conservador em read-only; [evidência e limites](spikes/oci-recovery-gc.md). Inventário global/referrers, Docker real e coordenação online durável de publicação/backup/GC continuam pendentes; não conclui ADR/aceite OCI.
 - [x] Prova de limites de revisão OCI/ORAS: negar manifest falha nativamente, mas blob pendente continua legível; gate experimental de alcance publicado mitiga GET/HEAD e exige permissão atual após aprovação. [Evidência](spikes/oci-review.md). Workflow real, autoaprovação/auditoria, projeção durável, matriz Docker/métodos e composição segura continuam obrigatórios.
+- [x] Prova de mount OCI: motor liga blob pendente e o expõe no destino; gate experimental exige permissões nas duas pontas e fonte publicada, sem conceder distribuição pelo simples mount. [Evidência](spikes/oci-mount.md). Composição JWT/RBAC/revisão/alcance durável e revalidação durante commit continuam pendentes.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1471,6 +1472,10 @@ Spikes 0.2–0.6 commitados em `a514b6d` e enviados para `origin/main` após ver
 Sétima fatia: ORAS/Distribution reais sob gate experimental de manifest. Publicação sem aprovação falha nativamente e tag fica ausente, mas blob pendente pôde ser baixado por digest — gate só de manifest é insuficiente. Gate experimental por alcance publicado qualificado pelo repositório oculta GET/HEAD de pendentes, preserva conteúdo antigo e exige aprovação mais permissão atual para retry bem-sucedido. Não implementa fila/reviewer/autoaprovação/auditoria nem projeção durável ou atomicidade com o motor; composição completa continua pendente. Detalhes no [spike 0.7](spikes/oci-review.md).
 
 Verificação completa da sétima fatia passou após falhas intermediárias documentadas: retry limitado/cleanup de container criado no bind RootlessKit compartilhado, com regressão determinística; conexão PostgreSQL terminada não reproduzida, causa ainda desconhecida, captura de logs/estado antes de cleanup adicionada. Não repetir operações SQL para mascarar estado de commit incerto. Continuação 0.7 permanece posterior ao commit `a514b6d`.
+
+Sétima fatia e ajustes de fixtures commitados em `0b90614`, enviados para `origin/main` após nova verificação completa; ai-memory atualizado após push. Notas anteriores de continuação não commitada são históricas.
+
+Oitava fatia: mount real Distribution comprovou que blob pendente pode ser ligado e baixado no destino (201/200), sem conhecer revisão. Digest ausente usa fallback 202, não mount/publicação. Gate experimental nega ausência de permissão em qualquer ponta, origem não autorizada/query ambígua e conteúdo pendente; permite mount publicado mas mantém GET/HEAD do destino ocultos sem publicação ali. Downloads da origem preservados; revogação atual nega novo mount. Flags/descritor sintéticos, não composição JWT/RBAC/durable reachability; ADR/aceite OCI permanecem abertos. Detalhes no [spike 0.8](spikes/oci-mount.md).
 
 ## 27. Referências técnicas
 
