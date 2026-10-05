@@ -2,7 +2,7 @@
 
 **Data original:** 02/10/2026; decisões consolidadas em 04/10/2026
 
-**Estado:** especificação revisada; fase 0 em execução, com primeiro spike local comprovado
+**Estado:** especificação revisada; fase 0 em execução, com spikes SQLite local e roundtrip S3/Floci comprovados; atomicidade concorrente do storage ainda pendente
 
 **Nome de trabalho:** Private Registry; nome comercial ainda não escolhido  
 **Repositório sugerido:** `artifact-registry` — sugestão técnica, sem pressupor disponibilidade
@@ -23,7 +23,7 @@ A primeira instalação atende aos projetos do proprietário. O produto deve ser
 | Frontend | SvelteKit com TypeScript |
 | Banco padrão | SQLite |
 | Banco opcional | PostgreSQL, com paridade funcional e testes próprios |
-| Artefatos | Filesystem local ou S3 compatible, incluindo R2/MinIO |
+| Artefatos | Filesystem local ou S3 compatible, incluindo R2; Floci para desenvolvimento |
 | Publicação | Responsabilidade da fonte: desenvolvedor, repositório ou pipeline prepara e envia |
 | Registry | Autentica, autoriza, valida, armazena, indexa e disponibiliza; não constrói código de clientes |
 | Pacotes privados | Necessidade principal; padrão de novos repositórios |
@@ -704,7 +704,7 @@ Baseline começa em modo de observação; mostrar quando não há dados suficien
 - Rejeitar traversal, caminhos absolutos, entradas duplicadas, links perigosos e nomes conflitantes.
 - Sanitizar README/changelog; conteúdo ativo de clientes fica em origem separada.
 - Não seguir URLs de upload/download/attestation fornecidas pelo pacote sem validação; preferir envio de bytes.
-- Configurações externas de admins exigem limites de egress/SSRF apropriados. MinIO privado legítimo é permitido explicitamente, não por bypass global.
+- Configurações externas de admins exigem limites de egress/SSRF apropriados. Storage S3 privado legítimo é permitido explicitamente, não por bypass global.
 - Separar upload, publicação aprovada e download disponível.
 - Implementar proteção de alias/tag e propriedade do pacote.
 - Mensagens e metadata de protocolo não revelam tokens nem rotas internas.
@@ -1039,7 +1039,7 @@ Configuração operacional cotidiana pela UI: providers de login/CAPTCHA, regras
 - Operação em rede isolada é requisito da v1: instalação, atualização, publicação/consumo, administração, backup e recuperação sem downloads públicos obrigatórios.
 - Núcleo funciona com contas locais/passkeys, filesystem ou S3 interno, SMTP interno quando configurado e backups em destino interno separado. IdP/SCIM externo à aplicação pode estar na mesma rede isolada.
 - Saída de rede do servidor é negada por padrão. Administrador libera explicitamente destinos para S3, SMTP, IdPs, discovery/JWKS, CAPTCHA e atualizações de bases.
-- Validar destino e limites de SSRF em redirects/resolução/conexões; acesso legítimo a MinIO/IdP privado exige autorização explícita, não bypass global. Workers/verificador obedecem ao escopo de rede de seu papel.
+- Validar destino e limites de SSRF em redirects/resolução/conexões; acesso legítimo a storage S3/IdP privado exige autorização explícita, não bypass global. Workers/verificador obedecem ao escopo de rede de seu papel.
 - Falhas de integrações opcionais não bloqueiam operações independentes; fluxos protegidos seguem sua política de falha. CAPTCHA público/social login indisponível em isolamento não impede métodos locais configurados.
 - Bases GeoIP, listas de domínios e evidências/bundles de assinatura podem ser importados offline quando o recurso permitir, com versão, origem/integridade e data. Não anunciar funcionalidade offline sem caminho de atualização/verificação testado.
 - Dependências públicas são responsabilidade dos clientes; registry não as consulta, resolve, baixa nem espelha. Testes de isolamento observam também tráfego inesperado.
@@ -1160,7 +1160,7 @@ Nomes são especificação a implementar, não comandos já existentes. Segredos
 | Dimensão | Cobertura |
 | --- | --- |
 | Banco | SQLite e PostgreSQL em regras de domínio/migrations |
-| Storage | Filesystem e S3 via MinIO em integração |
+| Storage | Filesystem e S3 via Floci em desenvolvimento/integração; garantias de backend real validadas separadamente |
 | Clientes | Pub/Flutter, Go, Cargo, npm, Mix e Docker |
 | Artefatos | Biblioteca simples, transitive private deps, archive inválido e pacote grande |
 | Recuperação | Cada engine e storage usados pelo produto |
@@ -1433,9 +1433,13 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 ### Primeira sequência concreta de tarefas
 
 - [ ] Criar projeto e contratos de configuração/DB/storage.
-- [x] Spike SQLite online backup com escritas entre passos e recuperação age local; [evidência e limites](spikes/sqlite-backup.md). S3, pins/GC e recuperação completa continuam pendentes.
-- [ ] Spike PostgreSQL dump/restore e compatibilidade de tools.
+- [x] Spike SQLite online backup com escritas entre passos e recuperação age local; [evidência e limites](spikes/sqlite-backup.md). Roundtrip remoto é comprovado separadamente na tarefa seguinte; pins/GC e recuperação completa continuam pendentes.
+- [x] Spike age em streaming → multipart S3/Floci → restore sem origem/snapshot, com digests/integridade e falhas; [evidência e limites](spikes/s3-backup.md). Atomicidade de conclusão concorrente, pins/GC e recuperação completa continuam pendentes.
+- [x] Spike PostgreSQL snapshot exportado/dump age/restore sem origem, tools do mesmo major e falhas; [evidência e limites](spikes/postgres-backup.md). Distribuição de tools, matriz de versões e backup completo continuam pendentes.
+- [x] Composição PostgreSQL age → objeto S3/Floci → banco vazio após excluir origem/ciphertext local, com falhas e digests; [evidência e limites](spikes/postgres-remote-backup.md). Fixture pequena com `PutObject` e spool ciphertext, não streaming direto pg_dump→multipart ou verificador externo completo.
 - [ ] ADR do motor OCI e formato de export/backup.
+- [x] Prova inicial Distribution 3.1.2/ORAS 1.3.4: push/pull de artefato, escopos e gate experimental de revogação por requisição; [evidência e limites](spikes/oci-auth.md). Não conclui ADR nem aceite OCI: quotas, gate de manifest/revisão, concorrência de commit, Docker/multiplataforma, export/restore e GC pendentes.
+- [x] Export/restore de raiz OCI amd64/arm64 com seis blobs e digests preservados, seleção de plataformas e GC conservador em read-only; [evidência e limites](spikes/oci-recovery-gc.md). Inventário global/referrers, Docker real e coordenação online durável de publicação/backup/GC continuam pendentes; não conclui ADR/aceite OCI.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1448,6 +1452,18 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 ### Progresso comprovado — 04/10/2026
 
 Primeira fatia executada: módulo Go e experimento isolado de backup SQLite pela API do driver modernc, criptografia age em streaming e restauração local com digests, integridade/foreign keys e escritas/leitura durante a cópia. Build sem CGO, formatação, vet, testes reais repetidos três vezes e race detector passaram. O spike não é o serviço de backup completo, não acessa S3 e não marca validação remota; nenhuma fase inteira nem suporte de protocolo é anunciado como concluído.
+
+Essa entrega foi commitada em `23257e4` e enviada para `origin/main` antes de continuar a execução; o plano no ai-memory foi atualizado com o commit. Segunda fatia: cliente AWS SDK Go v2 e fixture MinIO real, upload multipart de ciphertext em streaming e restore pelo objeto remoto após remoção da origem/snapshot. Integridade, cancelamento/aborto, corrupção, limites e proteção contra sobrescrita passaram; verificação completa inclui integração real repetida três vezes e race detector. Continuação posterior a `23257e4`, ainda sem novo commit neste registro. Backup completo/pins/GC, PostgreSQL e demais contratos permanecem abertos.
+
+Por decisão do usuário, MinIO foi substituído por Floci no desenvolvimento. Fixture atual: Floci 2.1.0 em Docker com digest fixado, limites de recursos, loopback e verificação SigV4 S3 explícita; nenhuma dependência MinIO no setup/testes atuais. Revalidado roundtrip, multipart/aborto, corrupção, autenticação e rejeição sequencial de sobrescrita. Probe concorrente reproduziu dois vencedores em uma corrida de `CompleteMultipartUpload` condicional: limitação do emulador, não garantia aprovada. Não mascarar com lock local nem considerar atomicidade concluída; validar storage real antes de produção. Esse gap permanece trabalho obrigatório da v1, não adiamento.
+
+Terceira fatia: PostgreSQL 18.6 real em container sem rede/portas, com imagem fixada e tools do mesmo major. Snapshot read-only exportado preservou 128 linhas/geração 1 após outro cliente confirmar 129 linhas/geração 2; dump custom transmitido diretamente ao age e restaurado em banco vazio após exclusão da origem. Restore autentica todo archive e digest em staging privado limitado antes de executar `pg_restore --single-transaction --exit-on-error`. Casos de corrupção, rollback, limites, cancelamento em lock e versões divergentes exercitados. Sequences não são MVCC: próximo ID foi 130, incluindo avanço posterior ao snapshot; não prometer sequência congelada/sem gaps. Sem alegar upload PostgreSQL remoto, globals, upgrades ou backup completo. Detalhes no [spike 0.3](spikes/postgres-backup.md).
+
+Quarta fatia: composição real do dump age PostgreSQL com upload S3/Floci e restore pelo objeto remoto, removendo banco original e ciphertext local antes do GET. Recuperados exatamente 128 registros/payloads e foreign key; falhas remotas rejeitadas sem criar tabelas no alvo. Transporte valida digest/limite ciphertext, restore valida age/digest plaintext antes da tool, sem plaintext staging remanescente. Usa ciphertext temporário e `PutObject` de fixture pequena; não declara streaming direto pg_dump→multipart, manifest autenticado, DR multi-host, verificador externo ou backup completo. Detalhes no [spike 0.4](spikes/postgres-remote-backup.md).
+
+Quinta fatia: Distribution/ORAS reais por Unix socket privado, com emissor JWT/gateway experimentais apenas em teste. Push/pull de artefato e scopes/issuer/audience/expiry comprovados. Revogar emissão não invalidou JWT em cache no motor; gate de estado atual negou pull e finalização de upload iniciados antes da revogação, sem afetar leitor distinto. Bypass case-sensitive de `Bearer` reproduzido e corrigido. Não comprova mudança de permissão durante requisição upstream, quotas, revisão, Docker/multiplataforma, backup ou GC; ADR/aceite do motor permanecem abertos. Detalhes no [spike 0.5](spikes/oci-auth.md).
+
+Sexta fatia: OCI layout de índice amd64/arm64 exportado com ORAS, todos os seis blobs alcançáveis verificados por digest/tamanho, backup age restaurado em motor vazio após remover storage e exports de origem. ORAS seleciona cada plataforma preservando seus três blobs. GC padrão real em servidor read-only negou upload com 405, removeu órfão (HEAD 200→404) e preservou índice/filhos/configs/layer sem restart posterior ao GC. Prova com gateway de storage pass-through separado da prova de auth; não inventário global, Docker runtime, pins/leases duráveis ou coordenação online SQL/OCI/GC. Detalhes no [spike 0.6](spikes/oci-recovery-gc.md).
 
 ## 27. Referências técnicas
 

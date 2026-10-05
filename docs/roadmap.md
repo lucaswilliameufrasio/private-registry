@@ -2,7 +2,15 @@
 
 **Atualizado:** 04/10/2026
 
-**Estado:** fase 0 em andamento; primeiro spike SQLite local comprovado, sem servidor/release utilizável
+**Estado:** fase 0 em andamento; spikes SQLite local e roundtrip S3/Floci comprovados, sem servidor/release utilizável
+
+Spike PostgreSQL lógico com tools do mesmo major também comprovado; [limites](spikes/postgres-backup.md). Distribuição de tools/aceitação das versões suportadas e backup completo continuam obrigatórios; PITR permanece adiamento separado, sem confundir os dois.
+
+Composição PostgreSQL → age → S3/Floci → restore sem origem/ciphertext local comprovada no [spike 0.4](spikes/postgres-remote-backup.md). Usa objeto pequeno e spool ciphertext; streaming direto/multipart PostgreSQL, manifest completo e verificador externo permanecem não comprovados, sem adiamento silencioso.
+
+OCI avançou com export/restore de índice amd64/arm64 e GC conservador read-only no [spike 0.6](spikes/oci-recovery-gc.md). Inventário global/referrers, Docker real, quotas/revisão/mount e coordenação durável online ainda são trabalho obrigatório, não features adiadas. Procedimento de manutenção da fixture não substitui pins/leases/barreira de produção.
+
+Gap da execução (obrigatório antes de produção, não adiamento): Floci 2.1.0 admite corrida com dois vencedores em conclusão multipart `If-None-Match: *`. Desenvolvimento usa Floci por decisão do usuário; atomicidade precisa de aceitação separada contra backend S3 real. Ver [evidência](spikes/s3-backup.md).
 
 O escopo obrigatório e os critérios da v1 estão em [development-plan.md](development-plan.md). Este roadmap registra explicitamente o que não entra na v1, por quê e o que permite retomar a discussão. Não estabelece datas, ordem de entrega nem autorização para implementar recursos futuros.
 

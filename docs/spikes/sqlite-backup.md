@@ -50,7 +50,7 @@ Não interpretar a duração desse pequeno fixture como benchmark de capacidade 
 
 ## Limitações e próximos passos
 
-- Sem S3/MinIO: arquivo age local não é validação de backup remoto. Testar upload, releitura do destino e restore sem artefatos locais/origem.
+- Este experimento é local; roundtrip S3/Floci foi comprovado separadamente no [spike 0.2](s3-backup.md), com origem/snapshot removidos. Nenhum deles é backup completo da instalação.
 - Sem inventário de blobs, pins duráveis, coordenação GC/deletes ou OCI: não é backup completo da instalação.
 - Sem agendamento/outbox/retries persistentes, orçamento de temporário, verificação prévia de espaço ou retomada após morte do processo.
 - Sem kit/chave raiz, rotação de recipients ou verificador externo automático. Não há recuperação real da instalação.
