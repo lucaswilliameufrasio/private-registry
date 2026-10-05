@@ -1440,6 +1440,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [ ] ADR do motor OCI e formato de export/backup.
 - [x] Prova inicial Distribution 3.1.2/ORAS 1.3.4: push/pull de artefato, escopos e gate experimental de revogação por requisição; [evidência e limites](spikes/oci-auth.md). Não conclui ADR nem aceite OCI: quotas, gate de manifest/revisão, concorrência de commit, Docker/multiplataforma, export/restore e GC pendentes.
 - [x] Export/restore de raiz OCI amd64/arm64 com seis blobs e digests preservados, seleção de plataformas e GC conservador em read-only; [evidência e limites](spikes/oci-recovery-gc.md). Inventário global/referrers, Docker real e coordenação online durável de publicação/backup/GC continuam pendentes; não conclui ADR/aceite OCI.
+- [x] Prova de limites de revisão OCI/ORAS: negar manifest falha nativamente, mas blob pendente continua legível; gate experimental de alcance publicado mitiga GET/HEAD e exige permissão atual após aprovação. [Evidência](spikes/oci-review.md). Workflow real, autoaprovação/auditoria, projeção durável, matriz Docker/métodos e composição segura continuam obrigatórios.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1464,6 +1465,12 @@ Quarta fatia: composição real do dump age PostgreSQL com upload S3/Floci e res
 Quinta fatia: Distribution/ORAS reais por Unix socket privado, com emissor JWT/gateway experimentais apenas em teste. Push/pull de artefato e scopes/issuer/audience/expiry comprovados. Revogar emissão não invalidou JWT em cache no motor; gate de estado atual negou pull e finalização de upload iniciados antes da revogação, sem afetar leitor distinto. Bypass case-sensitive de `Bearer` reproduzido e corrigido. Não comprova mudança de permissão durante requisição upstream, quotas, revisão, Docker/multiplataforma, backup ou GC; ADR/aceite do motor permanecem abertos. Detalhes no [spike 0.5](spikes/oci-auth.md).
 
 Sexta fatia: OCI layout de índice amd64/arm64 exportado com ORAS, todos os seis blobs alcançáveis verificados por digest/tamanho, backup age restaurado em motor vazio após remover storage e exports de origem. ORAS seleciona cada plataforma preservando seus três blobs. GC padrão real em servidor read-only negou upload com 405, removeu órfão (HEAD 200→404) e preservou índice/filhos/configs/layer sem restart posterior ao GC. Prova com gateway de storage pass-through separado da prova de auth; não inventário global, Docker runtime, pins/leases duráveis ou coordenação online SQL/OCI/GC. Detalhes no [spike 0.6](spikes/oci-recovery-gc.md).
+
+Spikes 0.2–0.6 commitados em `a514b6d` e enviados para `origin/main` após verificação completa; plano no ai-memory atualizado depois do push. As notas anteriores sem novo commit são históricas. Continuação seguinte ainda não faz parte desse commit.
+
+Sétima fatia: ORAS/Distribution reais sob gate experimental de manifest. Publicação sem aprovação falha nativamente e tag fica ausente, mas blob pendente pôde ser baixado por digest — gate só de manifest é insuficiente. Gate experimental por alcance publicado qualificado pelo repositório oculta GET/HEAD de pendentes, preserva conteúdo antigo e exige aprovação mais permissão atual para retry bem-sucedido. Não implementa fila/reviewer/autoaprovação/auditoria nem projeção durável ou atomicidade com o motor; composição completa continua pendente. Detalhes no [spike 0.7](spikes/oci-review.md).
+
+Verificação completa da sétima fatia passou após falhas intermediárias documentadas: retry limitado/cleanup de container criado no bind RootlessKit compartilhado, com regressão determinística; conexão PostgreSQL terminada não reproduzida, causa ainda desconhecida, captura de logs/estado antes de cleanup adicionada. Não repetir operações SQL para mascarar estado de commit incerto. Continuação 0.7 permanece posterior ao commit `a514b6d`.
 
 ## 27. Referências técnicas
 

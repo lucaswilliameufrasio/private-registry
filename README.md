@@ -12,6 +12,7 @@ Registry privado self-hosted em desenvolvimento. **Ainda não existe servidor ut
 - [Quarto spike: PostgreSQL criptografado → S3/Floci → restore sem origem](docs/spikes/postgres-remote-backup.md)
 - [Quinto spike: OCI Distribution/ORAS e revogação](docs/spikes/oci-auth.md)
 - [Sexto spike: export OCI multiplataforma, restore e GC read-only](docs/spikes/oci-recovery-gc.md)
+- [Sétimo spike: revisão OCI e proteção de blobs pendentes](docs/spikes/oci-review.md)
 
 O plano e o roadmap também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md` e `plans/roadmap.md`.
 
@@ -53,3 +54,5 @@ A composição PostgreSQL → age → objeto S3/Floci → banco novo também foi
 OCI inicial: `make setup-oci` prepara Distribution 3.1.2 e ORAS 1.3.4 fixados. Integração publica/consome artefato real via motor em socket Unix privado e gateway loopback; scopes e revogação de conta por requisição foram exercitados. Ainda não é gateway de produção nem aceite completo OCI (Docker/multiplataforma, quotas, review, backup/GC pendentes); ver spike 0.5.
 
 OCI recuperação: índice amd64/arm64 e seis blobs alcançáveis reconstruídos de backup age após remover origem/exports; ORAS seleciona ambas as plataformas com digests preservados. GC read-only real remove órfão sem perder conteúdo alcançável. Ainda faltam Docker real, inventário global/referrers e coordenação durável online de publicação/backup/GC; ver spike 0.6.
+
+Revisão OCI: ORAS falha se o manifest não for liberado; gate somente no manifest deixa blobs pendentes legíveis por digest. O probe 0.7 comprova mitigação por alcance publicado qualificado pelo repositório e revalidação de permissão antes de retry aprovado, sem workflow/projeção durável implementados.

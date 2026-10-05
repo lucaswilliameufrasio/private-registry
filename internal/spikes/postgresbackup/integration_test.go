@@ -71,7 +71,17 @@ func runIntegration(m *testing.M) (exitCode int) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	return m.Run()
+	exitCode = m.Run()
+	if exitCode != 0 {
+		// Preserve evidence before owned-container cleanup. Do not retry failed
+		// database operations: a server failure may have unknown commit state.
+		diagnostics, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		state, _ := exec.CommandContext(diagnostics, "docker", "inspect", "--format", "{{json .State}}", name).CombinedOutput()
+		logs, _ := exec.CommandContext(diagnostics, "docker", "logs", "--tail", "80", name).CombinedOutput()
+		fmt.Fprintf(os.Stderr, "owned PostgreSQL failure state: %s\nserver log tail:\n%s\n", state, logs)
+	}
+	return exitCode
 }
 
 func database(t *testing.T, ctx context.Context) string {

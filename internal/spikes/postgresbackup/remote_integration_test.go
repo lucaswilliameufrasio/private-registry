@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,37 +21,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"private-registry/internal/spikes/remotebackup"
+	"private-registry/internal/spikes/testinfra"
 )
-
-const flociImage = "floci/floci:2.1.0@sha256:f5aa8c18302cedb4f2385f5c4e455b3efc77fee6bf7b6e5d1712b2817ba102db"
 
 func remoteStore(t *testing.T, ctx context.Context) remotebackup.Store {
 	t.Helper()
-	var suffix [12]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatal(err)
-	}
-	id := hex.EncodeToString(suffix[:])
-	name := "private-registry-pg-floci-" + id
-	output, err := exec.CommandContext(ctx, "docker", "run", "--detach", "--pull=never", "--name", name,
-		"--user=1001:0", "--cpus=2", "--memory=512m", "--pids-limit=256", "--cap-drop=ALL",
-		"--security-opt=no-new-privileges", "--publish", "127.0.0.1::4566",
-		"--env", "LOCALSTACK_PARITY=false", "--env", "FLOCI_SERVICES_S3_ENFORCE_AUTH=true", flociImage).CombinedOutput()
+	fixture, err := testinfra.StartFloci(ctx)
 	if err != nil {
-		t.Fatalf("start owned Floci (run make setup-floci): %v %s", err, output)
+		t.Fatalf("start owned Floci (run make setup-floci): %v", err)
 	}
 	t.Cleanup(func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if output, err := exec.CommandContext(cleanup, "docker", "rm", "--force", "--volumes", name).CombinedOutput(); err != nil {
-			t.Errorf("cleanup owned Floci: %v %s", err, output)
+		if err := fixture.Stop(); err != nil {
+			t.Errorf("cleanup owned Floci: %v", err)
 		}
 	})
-	port, err := exec.CommandContext(ctx, "docker", "port", name, "4566/tcp").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoint := "http://" + strings.TrimSpace(string(port))
+	endpoint := fixture.Endpoint
 	ready, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	httpClient := &http.Client{Timeout: 200 * time.Millisecond}
@@ -78,7 +61,11 @@ func remoteStore(t *testing.T, ctx context.Context) remotebackup.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bucket := "postgres-" + id
+	var suffix [12]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		t.Fatal(err)
+	}
+	bucket := "postgres-" + hex.EncodeToString(suffix[:])
 	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatal(err)
 	}

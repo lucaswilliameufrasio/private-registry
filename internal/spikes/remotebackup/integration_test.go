@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"private-registry/internal/spikes/sqlitebackup"
+	"private-registry/internal/spikes/testinfra"
 )
 
 var fixtureEndpoint, fixtureAccess, fixtureSecret string
@@ -35,38 +35,20 @@ func TestMain(m *testing.M) { os.Exit(runIntegration(m)) }
 func runIntegration(m *testing.M) (exitCode int) {
 	// Floci's explicitly supported local credential pair, never cloud secrets.
 	fixtureAccess, fixtureSecret = "test", "test"
-	id, err := randomID()
+	startup, startupCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer startupCancel()
+	fixture, err := testinfra.StartFloci(startup)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	name := "private-registry-floci-" + id
-	command := exec.Command("docker", "run", "--detach", "--pull=never", "--name", name,
-		"--user=1001:0",
-		"--cpus=2", "--memory=512m", "--pids-limit=256", "--cap-drop=ALL",
-		"--security-opt=no-new-privileges", "--publish", "127.0.0.1::4566",
-		"--env", "LOCALSTACK_PARITY=false", "--env", "FLOCI_SERVICES_S3_ENFORCE_AUTH=true", flociImage)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "start isolated Floci (run make setup-floci): %v\n%s", err, output)
+		fmt.Fprintf(os.Stderr, "start isolated Floci (run make setup-floci): %v\n", err)
 		return 1
 	}
 	defer func() {
-		// The shared Docker daemon can take longer than the emulator to remove
-		// a container; bound cleanup without assuming dedicated host resources.
-		cleanup, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if output, err := exec.CommandContext(cleanup, "docker", "rm", "--force", "--volumes", name).CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "cleanup owned Floci container: %v\n%s", err, output)
+		if err := fixture.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "cleanup owned Floci container: %v\n", err)
 			exitCode = 1
 		}
 	}()
-	port, err := exec.Command("docker", "port", name, "4566/tcp").Output()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "inspect Floci port:", err)
-		return 1
-	}
-	fixtureEndpoint = "http://" + strings.TrimSpace(string(port))
+	fixtureEndpoint = fixture.Endpoint
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client := &http.Client{Timeout: 200 * time.Millisecond}
@@ -85,16 +67,12 @@ func runIntegration(m *testing.M) (exitCode int) {
 		select {
 		case <-ctx.Done():
 			fmt.Fprintln(os.Stderr, "isolated Floci did not become ready")
-			logs, _ := exec.Command("docker", "logs", "--tail", "30", name).CombinedOutput()
-			fmt.Fprintln(os.Stderr, string(logs))
 			return 1
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 	return m.Run()
 }
-
-const flociImage = "floci/floci:2.1.0@sha256:f5aa8c18302cedb4f2385f5c4e455b3efc77fee6bf7b6e5d1712b2817ba102db"
 
 func randomID() (string, error) {
 	var buffer [16]byte
