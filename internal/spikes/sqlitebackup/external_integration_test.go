@@ -5,6 +5,8 @@ package sqlitebackup
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"private-registry/internal/spikes/backupreceipt"
 )
 
 type externalReceipt struct {
@@ -46,6 +49,28 @@ type externalReport struct {
 	SHA      string `json:"restored_sha256"`
 	Rows     int    `json:"rows"`
 	PID      int    `json:"verifier_pid"`
+}
+
+type signedProducerInput struct {
+	producerInput
+	SigningKey   ed25519.PrivateKey `json:"signing_key"`
+	Installation string             `json:"installation"`
+	Backup       string             `json:"backup"`
+}
+
+type signedProducerOutput struct {
+	Envelope backupreceipt.Envelope `json:"envelope"`
+	PID      int                    `json:"producer_pid"`
+}
+
+type signedVerifierInput struct {
+	Directory    string                 `json:"directory"`
+	Archive      string                 `json:"archive"`
+	Identity     string                 `json:"identity"`
+	Envelope     backupreceipt.Envelope `json:"envelope"`
+	TrustedKey   ed25519.PublicKey      `json:"trusted_key"`
+	Installation string                 `json:"installation"`
+	Backup       string                 `json:"backup"`
 }
 
 func externalProduce(ctx context.Context, input producerInput) (receipt externalReceipt, err error) {
@@ -173,6 +198,30 @@ func TestExternalBackupProcessHelper(t *testing.T) {
 		if err == nil {
 			result, err = externalVerify(ctx, input)
 		}
+	case "producer_signed":
+		var input signedProducerInput
+		err = decoder.Decode(&input)
+		if err == nil {
+			var receipt externalReceipt
+			receipt, err = externalProduce(ctx, input.producerInput)
+			if err == nil {
+				var envelope backupreceipt.Envelope
+				envelope, err = backupreceipt.Sign(backupreceipt.Receipt{Version: 1, Installation: input.Installation, Backup: input.Backup,
+					PlainSHA: receipt.PlainSHA, CipherSHA: receipt.CipherSHA, CipherBytes: receipt.Size}, input.SigningKey)
+				result = signedProducerOutput{Envelope: envelope, PID: receipt.PID}
+			}
+		}
+	case "verifier_signed":
+		var input signedVerifierInput
+		err = decoder.Decode(&input)
+		if err == nil {
+			var receipt backupreceipt.Receipt
+			receipt, err = backupreceipt.Verify(input.Envelope, input.TrustedKey, input.Installation, input.Backup)
+			if err == nil {
+				result, err = externalVerify(ctx, verifierInput{Directory: input.Directory, Archive: input.Archive, Identity: input.Identity,
+					Receipt: externalReceipt{PlainSHA: receipt.PlainSHA, CipherSHA: receipt.CipherSHA, Size: receipt.CipherBytes}})
+			}
+		}
 	default:
 		err = errors.New("unknown fixture process")
 	}
@@ -185,6 +234,94 @@ func TestExternalBackupProcessHelper(t *testing.T) {
 		os.Exit(1)
 	}
 	os.Exit(0) // Functions completed deferred cleanup; omit test-harness PASS text.
+}
+
+func TestExternalVerifierAuthenticatesProducerReceipt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerRoot, verifierRoot := t.TempDir(), t.TempDir()
+	archive := filepath.Join(producerRoot, "backup.age")
+	worker := func(mode string, input any) ([]byte, error) {
+		t.Helper()
+		data, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := exec.CommandContext(ctx, executable, "-test.run=^TestExternalBackupProcessHelper$")
+		command.Env = []string{"PRIVATE_REGISTRY_EXTERNAL_HELPER=" + mode, "GOMAXPROCS=2", "GOMEMLIMIT=256MiB"}
+		command.Dir = verifierRoot
+		command.WaitDelay = 2 * time.Second
+		command.Stdin = bytes.NewReader(data)
+		var diagnostics bytes.Buffer
+		command.Stderr = &diagnostics
+		output, err := command.Output()
+		if bytes.Contains(output, []byte(identity.String())) || strings.Contains(diagnostics.String(), identity.String()) {
+			t.Fatal("signed receipt worker leaked recovery key")
+		}
+		return output, err
+	}
+	output, err := worker("producer_signed", signedProducerInput{producerInput: producerInput{Directory: producerRoot, Archive: archive, Recipient: identity.Recipient().String()},
+		SigningKey: private, Installation: "fixture", Backup: "backup-1"})
+	if err != nil {
+		t.Fatal("signed producer process failed:", err)
+	}
+	var produced signedProducerOutput
+	if err := json.Unmarshal(output, &produced); err != nil {
+		t.Fatal(err)
+	}
+	input := signedVerifierInput{Directory: verifierRoot, Archive: archive, Identity: identity.String(), Envelope: produced.Envelope,
+		TrustedKey: public, Installation: "fixture", Backup: "backup-1"}
+	output, err = worker("verifier_signed", input)
+	if err != nil {
+		t.Fatal("authenticated verifier failed:", err)
+	}
+	var report externalReport
+	if err := json.Unmarshal(output, &report); err != nil || !report.Verified || report.Rows != 128 || report.PID == produced.PID || report.PID == os.Getpid() {
+		t.Fatal("authenticated external report invalid")
+	}
+	for _, scenario := range []string{"tampered_receipt", "unsigned", "untrusted_key", "replayed_backup", "another_installation"} {
+		t.Run(scenario, func(t *testing.T) {
+			attempt := input
+			switch scenario {
+			case "tampered_receipt":
+				attempt.Envelope.Payload = append([]byte(nil), produced.Envelope.Payload...)
+				attempt.Envelope.Payload[len(attempt.Envelope.Payload)-2] ^= 1
+			case "unsigned":
+				attempt.Envelope.Signature = nil
+			case "untrusted_key":
+				other, _, err := ed25519.GenerateKey(rand.Reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				attempt.TrustedKey = other
+			case "replayed_backup":
+				attempt.Backup = "backup-2"
+			case "another_installation":
+				attempt.Installation = "other"
+			}
+			// Keep the valid archive/key: bypassing receipt authentication would
+			// otherwise restore successfully and must make this test fail.
+			if output, err := worker("verifier_signed", attempt); err == nil || len(output) != 0 {
+				t.Fatal("untrusted/replayed receipt produced a verified report")
+			}
+		})
+	}
+	if entries, err := os.ReadDir(verifierRoot); err != nil || len(entries) != 0 {
+		t.Fatal("signed verifier left plaintext staging")
+	}
+	t.Logf("producer pid=%d signed receipt; independent verifier pid=%d trusted pinned key/context before restoring 128 rows", produced.PID, report.PID)
 }
 
 func TestExternalSQLiteVerifierWithoutOriginOrProducerPrivateKey(t *testing.T) {

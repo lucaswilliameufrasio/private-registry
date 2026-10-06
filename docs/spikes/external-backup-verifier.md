@@ -44,6 +44,8 @@ Dois archives age válidos/digests corretos contêm conteúdo não SQLite ou SQL
 
 Não declarar backup completo, verificador operacional obrigatório entregue, instalação offline ou isolamento de egress apenas porque o processo local conseguiu restaurar.
 
+Autenticação de receipt foi exercitada posteriormente no [spike 0.14](signed-backup-receipt.md), em modo separado fail-closed. O modo unsigned aqui descrito continua prova histórica/local, não fallback operacional ou manifest completo.
+
 ## Verificação
 
 `GOPROXY=off GOSUMDB=off GOMAXPROCS=4 make verify` completo passou: build sem CGO, formatação, vet normal/integration, sintaxe Bash, testes sem cache, integrações reais três vezes e race detector. Tools/imagens/caches previamente preparados. Continuação0.13 posterior ao commit/push `82b4842`, ainda não commitada.

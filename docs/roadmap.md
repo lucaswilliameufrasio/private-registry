@@ -24,6 +24,8 @@ Novo limite OCI obrigatório: gate apenas no manifest não oculta blob pendente 
 
 [Spike 0.13](spikes/external-backup-verifier.md) prova restauração/validação SQLite em processo separado sem origem e sem identidade privada entregue ao produtor. Verificador externo operacional, remote GET, canal/manifest/relatório autenticados, kit e backup completo continuam obrigatórios; não adiados pela prova local.
 
+[Spike0.14](spikes/signed-backup-receipt.md) autentica receipt de snapshot via Ed25519/contexto e chave confiada separadamente. Não manifest completo/trust store/rotação, relatório autenticado/freshness/anti-rollback; esses requisitos seguem obrigatórios.
+
 Gap da execução (obrigatório antes de produção, não adiamento): Floci 2.1.0 admite corrida com dois vencedores em conclusão multipart `If-None-Match: *`. Desenvolvimento usa Floci por decisão do usuário; atomicidade precisa de aceitação separada contra backend S3 real. Ver [evidência](spikes/s3-backup.md).
 
 O escopo obrigatório e os critérios da v1 estão em [development-plan.md](development-plan.md). Este roadmap registra explicitamente o que não entra na v1, por quê e o que permite retomar a discussão. Não estabelece datas, ordem de entrega nem autorização para implementar recursos futuros.

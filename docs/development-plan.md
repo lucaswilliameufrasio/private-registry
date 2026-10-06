@@ -1447,6 +1447,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Prova de ordenação SQL entre conexões SQLite independentes: contenção real, visibilidade após commit, rollback e liberação/revogação concorrentes. [Evidência](spikes/oci-release-ordering.md). Não é prova de commit remoto, PostgreSQL ou coordenação multi-host.
 - [x] Comparação PostgreSQL real: predicado de policy não ordena escritores distintos; lock da linha compartilhada serializa liberação/revogação e preserva rollback. [Evidência](spikes/postgres-release-ordering.md). Schema/recursos limitados; coordenador produtivo e commit remoto seguem pendentes.
 - [x] Mecanismo de verificação SQLite em subprocesso separado: produtor só recebe recipient público; origem removida, chave privada por stdin do verificador, validações/digests e cleanup. [Evidência](spikes/external-backup-verifier.md). Verificador operacional/manifest autenticado/kit e backup completo seguem obrigatórios.
+- [x] Receipt de snapshot assinado/contextualizado e verificado em subprocesso com chave pública confiada separadamente. [Evidência](spikes/signed-backup-receipt.md). Não é manifest completo/trust store/relatório autenticado, freshness ou verificador operacional.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1501,6 +1502,10 @@ Fatia 0.12: PostgreSQL real read committed permitiu revogação commitada enquan
 Fatia 0.12 commitada em `82b4842`, enviada para `origin/main` após nova verificação completa; ai-memory atualizado após push. Continuação seguinte não está nesse commit.
 
 Fatia 0.13: produtor/verificador SQLite reais em subprocessos distintos; produtor só recebe recipient público e remove origem/snapshot. Verificador recebe chave privada via stdin, autentica age completo antes de abrir SQLite, compara digests, integrity/FKs/128 linhas/262144 bytes e remove staging antes do relatório. Negativas incluem age adulterado/truncado com digest recalculado, chave/digests errados, tamanho/ausência, envelope válido com conteúdo não SQLite ou FK inválida. Prova local mesmo usuário, não sandbox, verificador operacional/relatório autenticado, remote GET, kit, crash-cleanup ou backup completo. Detalhes no [spike 0.13](spikes/external-backup-verifier.md).
+
+Fatia0.13 commitada em `7996243`, enviada para `origin/main` após nova verificação completa; ai-memory atualizado após push. Continuação seguinte não está nesse commit.
+
+Fatia0.14: receipt de snapshot com Ed25519/domain/version/contexto/digests/size, chave pública de confiança fora do envelope e validação antes de aceitar archive. Produtor assina com chave distinta da privada age; verificador assinado fail-closed restaura128linhas e rejeita adulteração/unsigned/key não confiada/contextos diferentes. Schema/encoding limitado rejeita duplicatas/desconhecidos/versões/valores/trailing inválidos. Não manifest completo, trust store/rotação, relatório autenticado, anti-replay no mesmo ID ou freshness. Detalhes no [spike0.14](spikes/signed-backup-receipt.md).
 
 ## 27. Referências técnicas
 

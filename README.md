@@ -19,6 +19,7 @@ Registry privado self-hosted em desenvolvimento. **Ainda não existe servidor ut
 - [Spike 0.11: ordenação SQL de liberação e revogação](docs/spikes/oci-release-ordering.md)
 - [Spike 0.12: ordenação SQL no PostgreSQL e lock de policy](docs/spikes/postgres-release-ordering.md)
 - [Spike 0.13: verificador SQLite em processo separado sem origem](docs/spikes/external-backup-verifier.md)
+- [Spike 0.14: autenticação do receipt de snapshot](docs/spikes/signed-backup-receipt.md)
 
 O plano e o roadmap também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md` e `plans/roadmap.md`.
 
