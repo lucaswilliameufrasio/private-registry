@@ -1445,6 +1445,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Caracterização determinística da janela de revogação durante commit remoto OCI: revalidação no gateway não impede commit após revogação ocorrida no upstream. [Evidência](spikes/oci-commit-revocation.md). Lacuna reproduzida, **não resolvida**; não conclui aceite de revogação/coordenação.
 - [x] Prova SQLite de receipt/reconciliação e alcance OCI persistido: conteúdo remoto pendente oculto após reabertura, liberação com permissão atual e rollback de rotas/fase em falha SQL. [Evidência](spikes/oci-durable-release.md). Não resolve corrida remota, crash/multi-host, revisão/RBAC ou coordenação produtiva.
 - [x] Prova de ordenação SQL entre conexões SQLite independentes: contenção real, visibilidade após commit, rollback e liberação/revogação concorrentes. [Evidência](spikes/oci-release-ordering.md). Não é prova de commit remoto, PostgreSQL ou coordenação multi-host.
+- [x] Comparação PostgreSQL real: predicado de policy não ordena escritores distintos; lock da linha compartilhada serializa liberação/revogação e preserva rollback. [Evidência](spikes/postgres-release-ordering.md). Schema/recursos limitados; coordenador produtivo e commit remoto seguem pendentes.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1491,6 +1492,10 @@ Décima fatia (06/10/2026): SQLite real persiste tentativa/receipt e alcance qua
 Décima fatia commitada em `1c9f042` e enviada para `origin/main`; plano ai-memory atualizado após push. Validação intermediária perdeu container PostgreSQL (exit255/OOMKilled=false), causa desconhecida; execução completa posterior passou sem retry SQL. Continuação seguinte não está nesse commit.
 
 Fatia 0.11: duas conexões SQLite independentes exercitam ordens de commit de revogação/liberação, contenção SQLITE_BUSY, leitura WAL sem rotas não commitadas e rollback. Vinte corridas por execução admitem apenas resultados equivalentes à ordem serial commitada; nenhuma escrita em contenção é contada como revogação reconhecida. Prova SQL, não commit remoto OCI nem PostgreSQL/multi-host. Detalhes no [spike 0.11](spikes/oci-release-ordering.md).
+
+Fatia 0.11 commitada em `c1916d7`, enviada para `origin/main` após nova verificação completa; ai-memory atualizado após push. Continuação seguinte não está nesse commit.
+
+Fatia 0.12: PostgreSQL real read committed permitiu revogação commitada enquanto liberação condicional em outra linha ainda estava aberta, seguida de liberação obsoleta. `FOR UPDATE` em policy compartilhada ordenou os escritores, com espera real observada em pg_stat_activity, commit/rollback e tentativa posterior negada. Teste falhou sem lock. Não generalizar singleton de fixture para RBAC produtivo/ordem de locks nem afirmar solução da corrida remota OCI. Detalhes no [spike 0.12](spikes/postgres-release-ordering.md).
 
 ## 27. Referências técnicas
 
