@@ -1446,6 +1446,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Prova SQLite de receipt/reconciliação e alcance OCI persistido: conteúdo remoto pendente oculto após reabertura, liberação com permissão atual e rollback de rotas/fase em falha SQL. [Evidência](spikes/oci-durable-release.md). Não resolve corrida remota, crash/multi-host, revisão/RBAC ou coordenação produtiva.
 - [x] Prova de ordenação SQL entre conexões SQLite independentes: contenção real, visibilidade após commit, rollback e liberação/revogação concorrentes. [Evidência](spikes/oci-release-ordering.md). Não é prova de commit remoto, PostgreSQL ou coordenação multi-host.
 - [x] Comparação PostgreSQL real: predicado de policy não ordena escritores distintos; lock da linha compartilhada serializa liberação/revogação e preserva rollback. [Evidência](spikes/postgres-release-ordering.md). Schema/recursos limitados; coordenador produtivo e commit remoto seguem pendentes.
+- [x] Mecanismo de verificação SQLite em subprocesso separado: produtor só recebe recipient público; origem removida, chave privada por stdin do verificador, validações/digests e cleanup. [Evidência](spikes/external-backup-verifier.md). Verificador operacional/manifest autenticado/kit e backup completo seguem obrigatórios.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1496,6 +1497,10 @@ Fatia 0.11: duas conexões SQLite independentes exercitam ordens de commit de re
 Fatia 0.11 commitada em `c1916d7`, enviada para `origin/main` após nova verificação completa; ai-memory atualizado após push. Continuação seguinte não está nesse commit.
 
 Fatia 0.12: PostgreSQL real read committed permitiu revogação commitada enquanto liberação condicional em outra linha ainda estava aberta, seguida de liberação obsoleta. `FOR UPDATE` em policy compartilhada ordenou os escritores, com espera real observada em pg_stat_activity, commit/rollback e tentativa posterior negada. Teste falhou sem lock. Não generalizar singleton de fixture para RBAC produtivo/ordem de locks nem afirmar solução da corrida remota OCI. Detalhes no [spike 0.12](spikes/postgres-release-ordering.md).
+
+Fatia 0.12 commitada em `82b4842`, enviada para `origin/main` após nova verificação completa; ai-memory atualizado após push. Continuação seguinte não está nesse commit.
+
+Fatia 0.13: produtor/verificador SQLite reais em subprocessos distintos; produtor só recebe recipient público e remove origem/snapshot. Verificador recebe chave privada via stdin, autentica age completo antes de abrir SQLite, compara digests, integrity/FKs/128 linhas/262144 bytes e remove staging antes do relatório. Negativas incluem age adulterado/truncado com digest recalculado, chave/digests errados, tamanho/ausência, envelope válido com conteúdo não SQLite ou FK inválida. Prova local mesmo usuário, não sandbox, verificador operacional/relatório autenticado, remote GET, kit, crash-cleanup ou backup completo. Detalhes no [spike 0.13](spikes/external-backup-verifier.md).
 
 ## 27. Referências técnicas
 
