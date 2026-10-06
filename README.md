@@ -16,6 +16,7 @@ Registry privado self-hosted em desenvolvimento. **Ainda não existe servidor ut
 - [Oitavo spike: mount OCI entre repositórios e alcance publicado](docs/spikes/oci-mount.md)
 - [Nono spike: janela de revogação durante commit OCI](docs/spikes/oci-commit-revocation.md)
 - [Décimo spike: receipt OCI e alcance persistido/reconciliado](docs/spikes/oci-durable-release.md)
+- [Spike 0.11: ordenação SQL de liberação e revogação](docs/spikes/oci-release-ordering.md)
 
 O plano e o roadmap também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md` e `plans/roadmap.md`.
 

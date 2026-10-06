@@ -1444,6 +1444,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Prova de mount OCI: motor liga blob pendente e o expõe no destino; gate experimental exige permissões nas duas pontas e fonte publicada, sem conceder distribuição pelo simples mount. [Evidência](spikes/oci-mount.md). Composição JWT/RBAC/revisão/alcance durável e revalidação durante commit continuam pendentes.
 - [x] Caracterização determinística da janela de revogação durante commit remoto OCI: revalidação no gateway não impede commit após revogação ocorrida no upstream. [Evidência](spikes/oci-commit-revocation.md). Lacuna reproduzida, **não resolvida**; não conclui aceite de revogação/coordenação.
 - [x] Prova SQLite de receipt/reconciliação e alcance OCI persistido: conteúdo remoto pendente oculto após reabertura, liberação com permissão atual e rollback de rotas/fase em falha SQL. [Evidência](spikes/oci-durable-release.md). Não resolve corrida remota, crash/multi-host, revisão/RBAC ou coordenação produtiva.
+- [x] Prova de ordenação SQL entre conexões SQLite independentes: contenção real, visibilidade após commit, rollback e liberação/revogação concorrentes. [Evidência](spikes/oci-release-ordering.md). Não é prova de commit remoto, PostgreSQL ou coordenação multi-host.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1486,6 +1487,10 @@ Nona fatia: corrida de revogação/commit remoto reproduzida com channels e moto
 Nona fatia commitada em `68c341d` e enviada para `origin/main` após verificação completa; plano ai-memory atualizado após push. Continuação seguinte não está nesse commit.
 
 Décima fatia (06/10/2026): SQLite real persiste tentativa/receipt e alcance qualificado por repositório, mantendo conteúdo remoto oculto após fechar/reabrir banco e gateway. Reconciliação compara digest esperado e verifica grafo real; liberação transacional exige permissão atual e faz rollback de fase/rotas quando falha a segunda inserção. Rejeitado não revive com permissão restaurada; banco indisponível nega sem bypass; ORAS consome seis blobs apenas após liberação. Inputs/layout/tabelas limitados à fixture, não workflow/RBAC de produção nem crash/multi-host. Corrida remota 0.9 continua não resolvida. Detalhes no [spike 0.10](spikes/oci-durable-release.md).
+
+Décima fatia commitada em `1c9f042` e enviada para `origin/main`; plano ai-memory atualizado após push. Validação intermediária perdeu container PostgreSQL (exit255/OOMKilled=false), causa desconhecida; execução completa posterior passou sem retry SQL. Continuação seguinte não está nesse commit.
+
+Fatia 0.11: duas conexões SQLite independentes exercitam ordens de commit de revogação/liberação, contenção SQLITE_BUSY, leitura WAL sem rotas não commitadas e rollback. Vinte corridas por execução admitem apenas resultados equivalentes à ordem serial commitada; nenhuma escrita em contenção é contada como revogação reconhecida. Prova SQL, não commit remoto OCI nem PostgreSQL/multi-host. Detalhes no [spike 0.11](spikes/oci-release-ordering.md).
 
 ## 27. Referências técnicas
 

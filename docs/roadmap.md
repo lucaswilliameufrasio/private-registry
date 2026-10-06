@@ -18,6 +18,8 @@ Novo limite OCI obrigatório: gate apenas no manifest não oculta blob pendente 
 
 [Spike 0.10](spikes/oci-durable-release.md): receipt/alcance em SQLite persistem separação entre conteúdo no motor e liberação no gateway; reabertura, reconciliação de digest/grafo, permissão atual e rollback de rotas/fase foram exercitados. Não resolve corrida 0.9 nem comprova crash, multi-host ou coordenador completo. Esses requisitos continuam obrigatórios, sem adoção definitiva do motor.
 
+[Spike 0.11](spikes/oci-release-ordering.md) comprova ordenação/atomicidade SQL em conexões SQLite independentes, não a ordem do commit remoto. Contenção não equivale a revogação reconhecida. Coordenação produtiva, recovery/multi-host e PostgreSQL continuam obrigatórios.
+
 Gap da execução (obrigatório antes de produção, não adiamento): Floci 2.1.0 admite corrida com dois vencedores em conclusão multipart `If-None-Match: *`. Desenvolvimento usa Floci por decisão do usuário; atomicidade precisa de aceitação separada contra backend S3 real. Ver [evidência](spikes/s3-backup.md).
 
 O escopo obrigatório e os critérios da v1 estão em [development-plan.md](development-plan.md). Este roadmap registra explicitamente o que não entra na v1, por quê e o que permite retomar a discussão. Não estabelece datas, ordem de entrega nem autorização para implementar recursos futuros.

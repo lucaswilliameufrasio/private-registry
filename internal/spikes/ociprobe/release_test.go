@@ -32,6 +32,13 @@ func releaseVerified(ctx context.Context, db *sql.DB, attempt string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := stageVerifiedRelease(ctx, tx, attempt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func stageVerifiedRelease(ctx context.Context, tx *sql.Tx, attempt string) error {
 	result, err := tx.ExecContext(ctx, `UPDATE attempts SET phase='published'
 		WHERE id=? AND phase='verified' AND EXISTS(SELECT 1 FROM policy WHERE publisher_allowed=1)`, attempt)
 	if err != nil {
@@ -48,7 +55,7 @@ func releaseVerified(ctx context.Context, db *sql.DB, attempt string) error {
 		SELECT path,attempt FROM candidate_routes WHERE attempt=?`, attempt); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func TestOCIDurableReleaseReconcilesRemoteCommitWithoutPrematureVisibility(t *testing.T) {
