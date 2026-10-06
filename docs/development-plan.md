@@ -1442,6 +1442,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Export/restore de raiz OCI amd64/arm64 com seis blobs e digests preservados, seleção de plataformas e GC conservador em read-only; [evidência e limites](spikes/oci-recovery-gc.md). Inventário global/referrers, Docker real e coordenação online durável de publicação/backup/GC continuam pendentes; não conclui ADR/aceite OCI.
 - [x] Prova de limites de revisão OCI/ORAS: negar manifest falha nativamente, mas blob pendente continua legível; gate experimental de alcance publicado mitiga GET/HEAD e exige permissão atual após aprovação. [Evidência](spikes/oci-review.md). Workflow real, autoaprovação/auditoria, projeção durável, matriz Docker/métodos e composição segura continuam obrigatórios.
 - [x] Prova de mount OCI: motor liga blob pendente e o expõe no destino; gate experimental exige permissões nas duas pontas e fonte publicada, sem conceder distribuição pelo simples mount. [Evidência](spikes/oci-mount.md). Composição JWT/RBAC/revisão/alcance durável e revalidação durante commit continuam pendentes.
+- [x] Caracterização determinística da janela de revogação durante commit remoto OCI: revalidação no gateway não impede commit após revogação ocorrida no upstream. [Evidência](spikes/oci-commit-revocation.md). Lacuna reproduzida, **não resolvida**; não conclui aceite de revogação/coordenação.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1476,6 +1477,10 @@ Verificação completa da sétima fatia passou após falhas intermediárias docu
 Sétima fatia e ajustes de fixtures commitados em `0b90614`, enviados para `origin/main` após nova verificação completa; ai-memory atualizado após push. Notas anteriores de continuação não commitada são históricas.
 
 Oitava fatia: mount real Distribution comprovou que blob pendente pode ser ligado e baixado no destino (201/200), sem conhecer revisão. Digest ausente usa fallback 202, não mount/publicação. Gate experimental nega ausência de permissão em qualquer ponta, origem não autorizada/query ambígua e conteúdo pendente; permite mount publicado mas mantém GET/HEAD do destino ocultos sem publicação ali. Downloads da origem preservados; revogação atual nega novo mount. Flags/descritor sintéticos, não composição JWT/RBAC/durable reachability; ADR/aceite OCI permanecem abertos. Detalhes no [spike 0.8](spikes/oci-mount.md).
+
+Oitava fatia commitada em `136d61c` e enviada para `origin/main` após nova verificação completa; plano ai-memory atualizado após push. Continuação seguinte não está nesse commit.
+
+Nona fatia: corrida de revogação/commit remoto reproduzida com channels e motor real. Checagem inicial seguida de revogação reconhecida antes do envio ainda publicou; revalidar no dispatch nega revogação anterior, mas revogação após esse dispatch e antes do motor novamente publicou (201/manifest conferido). Testes 201 são caracterização de lacuna, não aceite. Nenhuma coordenação/lease local foi adotada como solução; contrato de ordenação, estado durável e reconciliação de commit incerto continuam necessários. Detalhes no [spike 0.9](spikes/oci-commit-revocation.md).
 
 ## 27. Referências técnicas
 
