@@ -16,6 +16,8 @@ Novo limite OCI obrigatório: gate apenas no manifest não oculta blob pendente 
 
 [Spike 0.9](spikes/oci-commit-revocation.md): revalidar no gateway antes de dispatch não impede commit após revogação reconhecida enquanto request está no upstream. Janela reproduzida determinísticamente, não resolvida. Contrato de ordenação/reconciliação e coordenação durável continuam obrigatórios para aceite OCI; não prometer garantia derivada de checagem isolada ou cancelamento de conexão.
 
+[Spike 0.10](spikes/oci-durable-release.md): receipt/alcance em SQLite persistem separação entre conteúdo no motor e liberação no gateway; reabertura, reconciliação de digest/grafo, permissão atual e rollback de rotas/fase foram exercitados. Não resolve corrida 0.9 nem comprova crash, multi-host ou coordenador completo. Esses requisitos continuam obrigatórios, sem adoção definitiva do motor.
+
 Gap da execução (obrigatório antes de produção, não adiamento): Floci 2.1.0 admite corrida com dois vencedores em conclusão multipart `If-None-Match: *`. Desenvolvimento usa Floci por decisão do usuário; atomicidade precisa de aceitação separada contra backend S3 real. Ver [evidência](spikes/s3-backup.md).
 
 O escopo obrigatório e os critérios da v1 estão em [development-plan.md](development-plan.md). Este roadmap registra explicitamente o que não entra na v1, por quê e o que permite retomar a discussão. Não estabelece datas, ordem de entrega nem autorização para implementar recursos futuros.

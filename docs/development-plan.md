@@ -1443,6 +1443,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Prova de limites de revisão OCI/ORAS: negar manifest falha nativamente, mas blob pendente continua legível; gate experimental de alcance publicado mitiga GET/HEAD e exige permissão atual após aprovação. [Evidência](spikes/oci-review.md). Workflow real, autoaprovação/auditoria, projeção durável, matriz Docker/métodos e composição segura continuam obrigatórios.
 - [x] Prova de mount OCI: motor liga blob pendente e o expõe no destino; gate experimental exige permissões nas duas pontas e fonte publicada, sem conceder distribuição pelo simples mount. [Evidência](spikes/oci-mount.md). Composição JWT/RBAC/revisão/alcance durável e revalidação durante commit continuam pendentes.
 - [x] Caracterização determinística da janela de revogação durante commit remoto OCI: revalidação no gateway não impede commit após revogação ocorrida no upstream. [Evidência](spikes/oci-commit-revocation.md). Lacuna reproduzida, **não resolvida**; não conclui aceite de revogação/coordenação.
+- [x] Prova SQLite de receipt/reconciliação e alcance OCI persistido: conteúdo remoto pendente oculto após reabertura, liberação com permissão atual e rollback de rotas/fase em falha SQL. [Evidência](spikes/oci-durable-release.md). Não resolve corrida remota, crash/multi-host, revisão/RBAC ou coordenação produtiva.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1481,6 +1482,10 @@ Oitava fatia: mount real Distribution comprovou que blob pendente pode ser ligad
 Oitava fatia commitada em `136d61c` e enviada para `origin/main` após nova verificação completa; plano ai-memory atualizado após push. Continuação seguinte não está nesse commit.
 
 Nona fatia: corrida de revogação/commit remoto reproduzida com channels e motor real. Checagem inicial seguida de revogação reconhecida antes do envio ainda publicou; revalidar no dispatch nega revogação anterior, mas revogação após esse dispatch e antes do motor novamente publicou (201/manifest conferido). Testes 201 são caracterização de lacuna, não aceite. Nenhuma coordenação/lease local foi adotada como solução; contrato de ordenação, estado durável e reconciliação de commit incerto continuam necessários. Detalhes no [spike 0.9](spikes/oci-commit-revocation.md).
+
+Nona fatia commitada em `68c341d` e enviada para `origin/main` após verificação completa; plano ai-memory atualizado após push. Continuação seguinte não está nesse commit.
+
+Décima fatia (06/10/2026): SQLite real persiste tentativa/receipt e alcance qualificado por repositório, mantendo conteúdo remoto oculto após fechar/reabrir banco e gateway. Reconciliação compara digest esperado e verifica grafo real; liberação transacional exige permissão atual e faz rollback de fase/rotas quando falha a segunda inserção. Rejeitado não revive com permissão restaurada; banco indisponível nega sem bypass; ORAS consome seis blobs apenas após liberação. Inputs/layout/tabelas limitados à fixture, não workflow/RBAC de produção nem crash/multi-host. Corrida remota 0.9 continua não resolvida. Detalhes no [spike 0.10](spikes/oci-durable-release.md).
 
 ## 27. Referências técnicas
 
