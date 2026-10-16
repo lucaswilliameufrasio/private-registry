@@ -1,8 +1,8 @@
 # Roadmap — recursos adiados e gaps conhecidos
 
-**Atualizado:** 04/10/2026
+**Atualizado:** 15/10/2026
 
-**Estado:** fase 0 em andamento; spikes SQLite local e roundtrip S3/Floci comprovados, sem servidor/release utilizável
+**Estado:** fase 0 em andamento; Authentik OIDC/SCIM 0.18 caracterizado em fixture, health e full-sync reconciliation após 503 não aceitos. Existe esqueleto `registry serve`, migrations v1–v2 e serviço interno de criação de workspace, mas sem bootstrap, login, APIs ou autorização de conteúdo; não há servidor/release utilizável nem suporte de protocolo anunciado.
 
 Spike PostgreSQL lógico com tools do mesmo major também comprovado; [limites](spikes/postgres-backup.md). Distribuição de tools/aceitação das versões suportadas e backup completo continuam obrigatórios; PITR permanece adiamento separado, sem confundir os dois.
 
@@ -25,6 +25,22 @@ Novo limite OCI obrigatório: gate apenas no manifest não oculta blob pendente 
 [Spike 0.13](spikes/external-backup-verifier.md) prova restauração/validação SQLite em processo separado sem origem e sem identidade privada entregue ao produtor. Verificador externo operacional, remote GET, canal/manifest/relatório autenticados, kit e backup completo continuam obrigatórios; não adiados pela prova local.
 
 [Spike0.14](spikes/signed-backup-receipt.md) autentica receipt de snapshot via Ed25519/contexto e chave confiada separadamente. Não manifest completo/trust store/rotação, relatório autenticado/freshness/anti-rollback; esses requisitos seguem obrigatórios.
+
+[Spike 0.15](spikes/remote-signed-backup-verifier.md) amplia a prova para GET real via SDK S3/Floci do receipt e ciphertext em subprocesso separado. Isso não fecha verificador externo operacional, backup total, PostgreSQL/OCI, kit, jobs/leases/crash recovery, egress ou atomicidade de S3 real; requisitos continuam obrigatórios.
+
+[Spike 0.16](spikes/postgres-remote-external-verifier.md) repete essa composição para um logical dump PostgreSQL 18 e pg_restore em database descartável. Não cobre roles/PITR/cluster, instalação, trust store operacional, isolação de produção, relatório autenticado, kit ou scheduler; os requisitos de backup/verificador completos continuam obrigatórios.
+
+[Spike 0.17](spikes/hex-signed-registry.md) prova Mix 1.19.5/Hex 2.5.1 consumindo registry read-only assinado, autenticado e transitivo, e rejeitando payload de metadata adulterado. Não implementa API de publicação, servidor Hex, gestão/rotação de chave ou aceite Rebar3/docs; itens da fase Hex permanecem obrigatórios.
+
+[Spike 0.18](spikes/authentik-oidc-scim.md) prova OIDC authorization-code + PKCE/JWKS, provisionamento Authentik 2026.8.3, remoção seletiva de membership e desativação em fixture. Sob HTTP 503, status ficou `info`, `last_successful_sync` permaneceu imóvel, uma task ficou `queued` e não houve log de erro/health. O comportamento após recuperação variou: algumas full syncs leram Users sem `PUT/PATCH` e deixaram drift; numa observação houve uma atualização e o drift foi corrigido, sem causalidade determinística demonstrada. O target SCIM permissivo reportou 4–6 cópias sintéticas excedentes de Groups; a unicidade real e a semântica de duplicatas permanecem sem prova. Health/freshness, reconciliação autoritativa, bloqueio após 1 hora e desbloqueio auditado continuam requisitos obrigatórios, sem adiamento.
+
+[Spike 0.19](spikes/go-module-proxy.md) valida um cliente Go 1.27.1 Linux/amd64 real contra um proxy HTTP privado local, com major v2, dependências transitivas, path escaping e endpoints de leitura. Isso não implementa nem anuncia Go; publicação, validação, toolchain/OS matrix e demais controles da fase Go continuam obrigatórios.
+
+[Spike 0.20](spikes/cargo-sparse-registry.md) valida Cargo 1.99.0 real em publicação via API, consumo de sparse registry autenticado, dependência transitiva/features e yank com preservação do lockfile existente. Não é adapter produtivo nem aceita Cargo; auth/RBAC/review, versão duplicada concorrente, validação robusta, restore, plataformas e credenciais de produção continuam obrigatórios.
+
+[Spike 0.21](spikes/npm-registry.md) valida Node/npm reais em publicação scoped, `npm ci` com dependência privada transitiva, integridade e dist-tag. Não é server npm nem aceite do formato; ACL de publicação/dist-tag, concorrência, revisão, fixture adversarial, restore e matriz dos clientes seguem obrigatórios.
+
+[Spike 0.22](spikes/pub-hosted-repository.md) caracteriza Dart Pub 3.13.5 publicando e consumindo pacotes sintéticos v2, incluindo transitiva e token inválido. Usa a exceção HTTP localhost e não demonstra TLS; Flutter CLI, Windows/macOS, autorização/RBAC, concorrência, aprovação e recuperação seguem obrigatórios. Não é adapter nem aceite de Pub.
 
 Gap da execução (obrigatório antes de produção, não adiamento): Floci 2.1.0 admite corrida com dois vencedores em conclusão multipart `If-None-Match: *`. Desenvolvimento usa Floci por decisão do usuário; atomicidade precisa de aceitação separada contra backend S3 real. Ver [evidência](spikes/s3-backup.md).
 

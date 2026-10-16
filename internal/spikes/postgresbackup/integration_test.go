@@ -25,8 +25,20 @@ import (
 const postgresImage = "postgres:18.6-alpine3.23@sha256:8c80c49c67052d82f9aaf4ee1f1881c8926b445a1cc916892934845eb8c24204"
 
 var fixtureTools Tools
+var fixtureContainerName string
+var fixtureDockerContext string
 
 func TestMain(m *testing.M) {
+	if os.Getenv("PRIVATE_REGISTRY_PG_EXTERNAL_HELPER") != "" {
+		fixtureContainerName = os.Getenv("PRIVATE_REGISTRY_PG_FIXTURE_CONTAINER")
+		fixtureDockerContext = os.Getenv("PRIVATE_REGISTRY_PG_DOCKER_CONTEXT")
+		if fixtureContainerName == "" || fixtureDockerContext == "" {
+			fmt.Fprintln(os.Stderr, "PostgreSQL helper requires the owned fixture container and Docker context")
+			os.Exit(2)
+		}
+		fixtureTools = Tools{Executable: "docker", Prefix: []string{"exec", "--interactive", fixtureContainerName}, ExpectedMajor: 18}
+		os.Exit(m.Run())
+	}
 	if os.Getenv("PRIVATE_REGISTRY_PG_TOOL_HELPER") != "" {
 		os.Exit(m.Run())
 	}
@@ -42,6 +54,13 @@ func runIntegration(m *testing.M) (exitCode int) {
 	name := "private-registry-postgres-" + hex.EncodeToString(suffix[:])
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	contextOutput, err := exec.CommandContext(ctx, "docker", "context", "show").Output()
+	if err != nil || strings.TrimSpace(string(contextOutput)) == "" {
+		fmt.Fprintf(os.Stderr, "inspect active Docker context: %v\n", err)
+		return 1
+	}
+	fixtureDockerContext = strings.TrimSpace(string(contextOutput))
+	fixtureContainerName = name
 	output, err := exec.CommandContext(ctx, "docker", "run", "--detach", "--pull=never", "--name", name,
 		"--network=none", "--cpus=2", "--memory=512m", "--pids-limit=256", "--security-opt=no-new-privileges",
 		"--env", "POSTGRES_HOST_AUTH_METHOD=trust", postgresImage).CombinedOutput()

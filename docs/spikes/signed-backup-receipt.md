@@ -48,3 +48,5 @@ Não concluir verificador operacional v1, backup completo ou ADR/formato definit
 ## Verificação
 
 `GOPROXY=off GOSUMDB=off GOMAXPROCS=4 make verify` completo passou: build semCGO, formatação, vet normal/integration, sintaxe Bash, testes semcache, integrações reais três vezes e race detector. Tools/imagens/caches preparados não são prova de instalação offline/egress. Continuação0.14 posterior ao commit/push `7996243`, ainda não commitada.
+
+O [spike 0.15](remote-signed-backup-verifier.md) posteriormente compõe receipt/objeto armazenados no Floci com GET e validação em outro subprocesso. Isso não altera os limites deste spike nem faz o receipt de snapshot virar manifest completo.

@@ -24,7 +24,7 @@ import (
 	"private-registry/internal/spikes/testinfra"
 )
 
-func remoteStore(t *testing.T, ctx context.Context) remotebackup.Store {
+func remoteStore(t *testing.T, ctx context.Context) (remotebackup.Store, string) {
 	t.Helper()
 	fixture, err := testinfra.StartFloci(ctx)
 	if err != nil {
@@ -69,7 +69,7 @@ func remoteStore(t *testing.T, ctx context.Context) remotebackup.Store {
 	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatal(err)
 	}
-	return remotebackup.Store{Client: client, Bucket: bucket}
+	return remotebackup.Store{Client: client, Bucket: bucket}, endpoint
 }
 
 // fetchArchive is an experiment-only download boundary: no overwrite, bounded
@@ -114,7 +114,7 @@ func TestPostgresRemoteRecoveryWithoutOriginOrLocalArchive(t *testing.T) {
 	// More time than an individual local operation, bounded on shared machines.
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	store := remoteStore(t, ctx)
+	store, _ := remoteStore(t, ctx)
 	source := database(t, ctx)
 	query(t, ctx, source, `CREATE TABLE owners(id integer PRIMARY KEY);
 		CREATE TABLE packages(id integer PRIMARY KEY, owner_id integer NOT NULL REFERENCES owners(id), payload text NOT NULL);
