@@ -1,8 +1,8 @@
 # Plano de desenvolvimento — Registry privado de pacotes e artefatos
 
-**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso registrado até 15/10/2026
+**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso registrado até 16/10/2026
 
-**Estado:** fase 0 em execução. Backup/verificação remotos SQLite/PostgreSQL, clientes Pub/Go/Cargo/npm/Hex e OIDC/SCIM básico Authentik foram exercitados em fixtures, com limites registrados. Pub usa apenas a exceção HTTP localhost e não prova TLS; sob 503 Authentik, health/freshness não sinalizou a falha e as execuções variaram entre nenhuma atualização de usuário na full sync e uma atualização acompanhada de correção do drift; isso não comprova reconciliação determinística. Coordenação OCI commit/revogação, aceitação de atomicidade S3 real, contratos restantes e implementação produtiva continuam pendentes. Existe um esqueleto local de `registry serve`, migrations v1–v2 e um serviço interno de criação de workspace; bootstrap, login, autorização de conteúdo e endpoints de registry ainda não existem. Não há servidor utilizável, release ou suporte de protocolo anunciado.
+**Estado:** fase 0 em execução. Backup/verificação remotos SQLite/PostgreSQL, clientes Pub/Go/Cargo/npm/Hex e OIDC/SCIM básico Authentik foram exercitados em fixtures, com limites registrados. Pub usa apenas a exceção HTTP localhost e não prova TLS; sob 503 Authentik, health/freshness não sinalizou a falha e as execuções variaram entre nenhuma atualização de usuário na full sync e uma atualização acompanhada de correção do drift; isso não comprova reconciliação determinística. Coordenação OCI commit/revogação, aceitação de atomicidade S3 real, contratos restantes e implementação produtiva continuam pendentes. Existe um esqueleto local de `registry serve`, migrations v1–v3, serviço interno de workspaces e CLI interativa one-shot para provisionar a conta inicial; login/sessões, autorização de conteúdo e endpoints de registry ainda não existem. Não há servidor utilizável, release ou suporte de protocolo anunciado.
 
 **Nome de trabalho:** Private Registry; nome comercial ainda não escolhido  
 **Repositório sugerido:** `artifact-registry` — sugestão técnica, sem pressupor disponibilidade
@@ -456,11 +456,13 @@ Downloads privados passam pelo registry por padrão, com autorização vigente. 
 
 ### 8.1 Bootstrap
 
-1. Instalação inicia em modo de configuração, com segredo de bootstrap entregue por canal local.
-2. Primeiro administrador define URL externa, conta inicial, banco e armazenamento.
+1. Operador com acesso local aplica migrations explicitamente e provisiona o primeiro administrador pelo terminal interativo, sem segredo de bootstrap nem endpoint HTTP.
+2. Configurar URL externa, banco e armazenamento; concluir a conta inicial conforme o procedimento operacional ainda pendente.
 3. Criar material de chave e exportar kit de recuperação.
 4. Testar configuração antes de ativar métodos externos.
 5. Encerrar bootstrap definitivamente; impedir tomada da instalação por nova visita pública.
+
+O primeiro administrador é provisionado com `registry bootstrap-admin` em terminal local interativo. Username é o identificador de login local; email é obrigatório para a conta inicial, mas fica não verificado e não exige transporte de email no bootstrap. Email não é identidade estável nem vincula contas. A credencial é armazenada como hash Argon2id. O comando não aceita senha em argumento/variável de ambiente, não expõe endpoint HTTP e não aplica migrations implicitamente.
 
 Cadastro fechado por padrão. Opções: somente administradores, convites, ou cadastro aberto. Convites têm expiração, escopo, uso único e estado verificável. Convites para workspaces diferentes não concedem acesso à instalação inteira.
 
@@ -472,7 +474,7 @@ Cadastro aberto local, com senha/passkey, exige email verificado e transporte de
 
 | Método | Requisito |
 | --- | --- |
-| Senha local | Opcional; senha forte, hash Argon2id, reset de uso único e rate limit |
+| Senha local | Opcional; username local único para login, senha forte com hash Argon2id, reset de uso único e rate limit; email é contato, não identidade |
 | OIDC próprio | Configuração de issuer, client ID/secret, scopes e mapeamento de claims |
 | Google | Adapter configurável com identidade estável e callbacks registrados |
 | Apple | Adapter com configurações e rotação de credenciais próprias do provedor |
@@ -801,7 +803,7 @@ Mudança de bucket/path não move objetos por mágica. Implementar job de cópia
 - Voltar binário é permitido somente dentro da compatibilidade declarada de schema.
 - Backup pós-upgrade e validação com cliente real completam o procedimento.
 
-**Implementação inicial (15/10/2026; não aceita para produção):** `registry migrate` aplica migrations SQL embutidas e separadas por dialeto; SHA-256, lock local SQLite/advisory PostgreSQL e histórico de tentativas são validados por testes reais. `registry serve` não migra implicitamente. O schema v1–v2 contém identidade singleton, usuários, identidades externas, policies independentes, grants de criação, workspaces, memberships e auditoria; um serviço interno aplica policy e cria o owner inicial. Bootstrap CLI, login/sessões, middleware, grants de conteúdo e APIs ainda faltam. Gate de backup para mudanças destrutivas, compatibilidade de binário/schema, execução em manutenção e procedimento de upgrade continuam pendentes.
+**Implementação inicial (16/10/2026; não aceita para produção):** `registry migrate` aplica migrations SQL embutidas e separadas por dialeto; SHA-256, lock local SQLite/advisory PostgreSQL e histórico de tentativas são validados por testes reais. `registry serve` não migra implicitamente. O schema v1–v3 contém identidade singleton, usuários, identidades externas, policies independentes, grants de criação, workspaces, memberships, auditoria e credenciais locais. Um serviço interno aplica policy de workspace; `registry bootstrap-admin` cria uma única conta local interativamente, com username e email de contato e hash Argon2id, usando transação serializada e evento de auditoria. Ainda faltam login/sessões, middleware, grants de conteúdo e APIs. Gate de backup para mudanças destrutivas, compatibilidade de binário/schema, execução em manutenção e procedimento de upgrade continuam pendentes.
 
 ### 14.4 Troca SQLite → PostgreSQL
 
@@ -1252,7 +1254,7 @@ As fases são entregas internas incrementais. A v1 completa exige os sete format
 
 **Aceite:** reiniciar sem perder dados, isolar dois workspaces e executar migrations nos dois engines.
 
-**Progresso parcial (15/10/2026; fase ainda aberta):** há um esqueleto local `registry serve` com configuração explícita, SQLite persistente, PostgreSQL via pgx, `/livez`, `/readyz` e shutdown HTTP limitado. `registry migrate` mantém identidade da instalação e instala schema v2 de usuários/identidades, policies, grants de criação, workspaces/memberships e audit events. Serviço interno cria workspaces com policy separada do cadastro, slug canônico/imutável, owner inicial e auditoria transacional. SQLite e PostgreSQL 18.6 reais passaram testes repetidos, incluindo concorrência de slug. Ainda faltam bootstrap CLI, login/sessões, autenticação, APIs, grants de conteúdo e prova de isolamento de dois workspaces; SvelteKit, CI e o aceite da fase também continuam pendentes.
+**Progresso parcial (16/10/2026; fase ainda aberta):** há um esqueleto local `registry serve` com configuração explícita, SQLite persistente, PostgreSQL via pgx, `/livez`, `/readyz` e shutdown HTTP limitado. `registry migrate` mantém identidade da instalação e instala schema v1–v3 de usuários/identidades, policies, grants de criação, workspaces/memberships, auditoria e credenciais locais. Serviço interno cria workspaces com policy separada do cadastro, slug canônico/imutável, owner inicial e auditoria transacional. `registry bootstrap-admin` exige TTY, username, email de contato e senha Argon2id, não migra implicitamente, não expõe endpoint HTTP e recusa segunda execução; atomicidade e corrida estão cobertas para SQLite e PostgreSQL. Ainda faltam login/sessões, MFA, middleware, APIs, grants de conteúdo e prova de isolamento de dois workspaces; SvelteKit, CI e o aceite da fase também continuam pendentes.
 
 ### Fase 2 — conteúdo e artefatos genéricos
 

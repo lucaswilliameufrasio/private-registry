@@ -3,13 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"os/user"
+	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
@@ -30,11 +36,14 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
-	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate") {
-		return errors.New("usage: registry {serve|migrate}")
+	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin") {
+		return errors.New("usage: registry {serve|migrate|bootstrap-admin}")
 	}
 	if logger == nil {
 		return errors.New("logger is required")
+	}
+	if args[0] == "bootstrap-admin" {
+		return runBootstrapAdmin(ctx)
 	}
 
 	cfg, err := config.Load()
@@ -74,5 +83,58 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		return errors.Join(errors.New("HTTP server failed"), err)
 	}
 	logger.Info("registry health server stopped")
+	return nil
+}
+
+func runBootstrapAdmin(ctx context.Context) (err error) {
+	if err := requireInteractiveTerminal(int(os.Stdin.Fd()), int(os.Stdout.Fd())); err != nil {
+		return err
+	}
+	currentUser, err := user.Current()
+	if err != nil || currentUser == nil || strings.TrimSpace(currentUser.Username) == "" {
+		return errors.New("local operator identity could not be determined")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, errors.New("database connection could not be closed"))
+		}
+	}()
+
+	if err := bootstrap.CheckReady(ctx, db, cfg.DatabaseDriver); err != nil {
+		return err
+	}
+	input, err := promptAdministrator(os.Stdin, os.Stdout)
+	if err != nil {
+		return err
+	}
+	defer clear(input.Password)
+	if _, err := bootstrap.CreateFirstAdmin(ctx, db, cfg.DatabaseDriver, bootstrap.AdminInput{
+		LoginName:     input.LoginName,
+		DisplayName:   input.DisplayName,
+		Email:         input.Email,
+		Password:      input.Password,
+		OperatorLabel: currentUser.Username,
+	}); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(os.Stdout, "First administrator created."); err != nil {
+		return errors.New("bootstrap result could not be written")
+	}
+	return nil
+}
+
+func requireInteractiveTerminal(inputFD, outputFD int) error {
+	if !term.IsTerminal(inputFD) || !term.IsTerminal(outputFD) {
+		return errors.New("bootstrap-admin requires an interactive terminal; no account data was read")
+	}
 	return nil
 }

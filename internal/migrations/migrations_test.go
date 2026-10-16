@@ -29,10 +29,10 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 2 || first.AppliedVersions[0] != 1 || first.AppliedVersions[1] != 2 {
+	if len(first.AppliedVersions) != 3 || first.AppliedVersions[0] != 1 || first.AppliedVersions[1] != 2 || first.AppliedVersions[2] != 3 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
-	if first.CurrentVersion != 2 || first.TargetVersion != 2 {
+	if first.CurrentVersion != 3 || first.TargetVersion != 3 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -55,15 +55,23 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 2 {
+	if succeeded != 3 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 2 {
+	if checksumCount != 3 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
+	}
+	var credentialTableExists bool
+	if err := db.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'registry_local_credentials')").Scan(&credentialTableExists); err != nil {
+		t.Fatal(err)
+	}
+	if !credentialTableExists {
+		t.Fatal("local credential table is missing after migration v3")
 	}
 }
 
@@ -226,8 +234,10 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 	for _, filename := range []string{
 		"sql/sqlite/000001_installation.sql",
 		"sql/sqlite/000002_identity_workspaces.sql",
+		"sql/sqlite/000003_local_bootstrap.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
+		"sql/postgres/000003_local_bootstrap.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {
