@@ -1,6 +1,6 @@
 # ADR 0010 — Chave mestra local e envelopes de segredos
 
-- **Status:** Aceito para a fundação de segredos; persistência de MFA e recuperação continuam pendentes
+- **Status:** Aceito; persistência TOTP integrada parcialmente; kit de recuperação e rotação continuam pendentes
 - **Data:** 2026-10-18
 
 ## Contexto
@@ -26,7 +26,7 @@ Seeds TOTP e outros segredos persistentes não devem ser armazenados em claro no
 ## Consequências e limites
 
 - Perder a chave torna irreversíveis os dados cifrados. Backup/restore da chave, recovery kit, rotação e migração entre chaves precisam de procedimentos próprios e ainda não existem.
-- O comando e o pacote criptográfico são uma fundação, não habilitam MFA: não há tabela/DAO de segredo cifrado, seed TOTP, login, sessão nem endpoint de autenticação nesta fatia.
+- A migration v4 e `internal/mfa` persistem e recuperam o seed TOTP cifrado; isso é usado pelo fluxo interno de login/MFA, mas ainda não constitui autenticação exposta ou utilizável pelo produto. Rotas HTTP e operação de backup da chave continuam ausentes.
 - Antes de persistir segredos, o servidor deverá falhar fechado se a chave estiver ausente, inválida ou inacessível. A política de startup e recuperação deve ser testada junto da persistência.
 - A chave não cifra o banco inteiro nem substitui Argon2id para senhas. O administrador do host continua tecnicamente capaz de ler arquivo, memória e dados do processo.
 

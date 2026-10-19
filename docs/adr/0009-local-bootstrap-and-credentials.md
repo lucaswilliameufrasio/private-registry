@@ -1,6 +1,6 @@
 # ADR 0009 — Bootstrap local e credenciais
 
-- **Status:** Aceito para a CLI de bootstrap; fluxo de login/sessões/MFA permanece pendente
+- **Status:** Aceito; login/MFA local interno parcial; exposição HTTP permanece pendente
 - **Data:** 2026-10-16
 
 ## Contexto
@@ -27,7 +27,7 @@ A instalação precisa de um primeiro administrador mesmo em rede isolada, sem t
 ## Consequências e limites
 
 - Migration v3 adiciona credenciais locais e representação de ator externo na auditoria, preservando os eventos existentes como ações de usuários.
-- Esta fatia cria uma credencial inicial, mas não implementa login HTTP, cookies/sessões, CSRF, rate limit, MFA, recuperação, convite ou middleware. Nenhuma rota protegida deve ser exposta antes dessas fatias.
+- A CLI de bootstrap continua separada do servidor. `internal/auth` agora verifica localmente essas credenciais e conduz o estágio inicial de MFA; isso ainda não implementa login HTTP, cookies, CSRF de navegador, convite ou middleware. Nenhuma rota protegida deve ser exposta antes de origem, sessão, CSRF, limites, MFA e autorização estarem conectados e testados.
 - Parâmetros Argon2id são versionados por registro para permitir rehash futuro; custo deve ser medido nas plataformas suportadas antes do aceite operacional.
 
 ## Evidência

@@ -29,10 +29,10 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 3 || first.AppliedVersions[0] != 1 || first.AppliedVersions[1] != 2 || first.AppliedVersions[2] != 3 {
+	if len(first.AppliedVersions) != 6 || first.AppliedVersions[0] != 1 || first.AppliedVersions[1] != 2 || first.AppliedVersions[2] != 3 || first.AppliedVersions[3] != 4 || first.AppliedVersions[4] != 5 || first.AppliedVersions[5] != 6 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
-	if first.CurrentVersion != 3 || first.TargetVersion != 3 {
+	if first.CurrentVersion != 6 || first.TargetVersion != 6 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -55,14 +55,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 3 {
+	if succeeded != 6 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 3 {
+	if checksumCount != 6 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -72,6 +72,16 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	}
 	if !credentialTableExists {
 		t.Fatal("local credential table is missing after migration v3")
+	}
+	for _, tableName := range []string{"registry_totp_credentials", "registry_mfa_recovery_codes", "registry_auth_sessions", "registry_auth_attempt_buckets"} {
+		var tableExists bool
+		if err := db.QueryRowContext(ctx,
+			"SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)", tableName).Scan(&tableExists); err != nil {
+			t.Fatal(err)
+		}
+		if !tableExists {
+			t.Fatalf("security table %q is missing after the latest migration", tableName)
+		}
 	}
 }
 
@@ -235,9 +245,15 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000001_installation.sql",
 		"sql/sqlite/000002_identity_workspaces.sql",
 		"sql/sqlite/000003_local_bootstrap.sql",
+		"sql/sqlite/000004_mfa_credentials.sql",
+		"sql/sqlite/000005_auth_sessions.sql",
+		"sql/sqlite/000006_auth_attempt_buckets.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
+		"sql/postgres/000004_mfa_credentials.sql",
+		"sql/postgres/000005_auth_sessions.sql",
+		"sql/postgres/000006_auth_attempt_buckets.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {

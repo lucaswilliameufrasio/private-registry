@@ -2,9 +2,7 @@ package bootstrap
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/mail"
@@ -14,16 +12,17 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/argon2"
 	"private-registry/internal/config"
+	"private-registry/internal/loginname"
+	"private-registry/internal/password"
 )
 
 const (
-	argon2Memory      uint32 = 64 * 1024
-	argon2Iterations  uint32 = 3
-	argon2Parallelism uint8  = 1
-	argon2SaltBytes          = 16
-	argon2KeyBytes           = 32
+	argon2Memory      uint32 = password.MemoryKiB
+	argon2Iterations  uint32 = password.Iterations
+	argon2Parallelism uint8  = password.Parallelism
+	argon2SaltBytes          = password.SaltBytes
+	argon2KeyBytes           = password.DerivedKeyBytes
 )
 
 var (
@@ -243,32 +242,11 @@ func validateAdminInput(input AdminInput) (AdminInput, error) {
 }
 
 func normalizeLoginName(loginName string) string {
-	loginName = strings.TrimSpace(loginName)
-	for _, character := range loginName {
-		if character > 0x7f {
-			return ""
-		}
-	}
-	return strings.ToLower(loginName)
+	return loginname.Normalize(loginName)
 }
 
 func validLoginName(loginName string) bool {
-	if len(loginName) < 3 || len(loginName) > 63 {
-		return false
-	}
-	for index, character := range loginName {
-		isAlphanumeric := character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
-		if index == 0 || index == len(loginName)-1 {
-			if !isAlphanumeric {
-				return false
-			}
-			continue
-		}
-		if !isAlphanumeric && character != '.' && character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
+	return loginname.Valid(loginName)
 }
 
 func validText(value string, minimum, maximum int) bool {
@@ -295,20 +273,8 @@ func validEmail(value string) bool {
 	return err == nil && address.Address == value
 }
 
-func hashPassword(password []byte) (string, error) {
-	salt := make([]byte, argon2SaltBytes)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	defer clear(salt)
-
-	derivedKey := argon2.IDKey(password, salt, argon2Iterations, argon2Memory, argon2Parallelism, argon2KeyBytes)
-	defer clear(derivedKey)
-
-	encodedSalt := base64.RawStdEncoding.EncodeToString(salt)
-	encodedKey := base64.RawStdEncoding.EncodeToString(derivedKey)
-	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
-		argon2Memory, argon2Iterations, argon2Parallelism, encodedSalt, encodedKey), nil
+func hashPassword(value []byte) (string, error) {
+	return password.Hash(value)
 }
 
 func lockInstallation(ctx context.Context, tx *sql.Tx, driver config.DatabaseDriver) (string, error) {
