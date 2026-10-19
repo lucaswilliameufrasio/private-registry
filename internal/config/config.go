@@ -22,15 +22,51 @@ const (
 type Config struct {
 	ListenAddress        string
 	DataDir              string
+	MasterKeyFile        string
 	DatabaseDriver       DatabaseDriver
 	DatabaseDSN          string
 	DatabaseMaxOpenConns int
+}
+
+type MasterKeySettings struct {
+	DataDir       string
+	MasterKeyFile string
 }
 
 type LookupEnv func(string) (string, bool)
 
 func Load() (Config, error) {
 	return LoadFrom(lookupEnvironment)
+}
+
+func LoadMasterKeySettings() (MasterKeySettings, error) {
+	return LoadMasterKeySettingsFrom(lookupEnvironment)
+}
+
+func LoadMasterKeySettingsFrom(lookup LookupEnv) (MasterKeySettings, error) {
+	if lookup == nil {
+		return MasterKeySettings{}, errors.New("environment lookup is required")
+	}
+	dataDir, err := loadDataDir(lookup)
+	if err != nil {
+		return MasterKeySettings{}, err
+	}
+	masterKeyFile, ok := lookup("REGISTRY_MASTER_KEY_FILE")
+	if !ok {
+		return MasterKeySettings{}, errors.New("REGISTRY_MASTER_KEY_FILE is required")
+	}
+	masterKeyFile = strings.TrimSpace(masterKeyFile)
+	if masterKeyFile == "" {
+		return MasterKeySettings{}, errors.New("REGISTRY_MASTER_KEY_FILE must not be empty")
+	}
+	masterKeyFile, err = filepath.Abs(masterKeyFile)
+	if err != nil {
+		return MasterKeySettings{}, errors.New("master key file path must be valid")
+	}
+	return MasterKeySettings{
+		DataDir:       dataDir,
+		MasterKeyFile: filepath.Clean(masterKeyFile),
+	}, nil
 }
 
 func LoadFrom(lookup LookupEnv) (Config, error) {
@@ -46,13 +82,22 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 
-	dataDir, err := value(lookup, "REGISTRY_DATA_DIR", "./data")
+	dataDir, err := loadDataDir(lookup)
 	if err != nil {
 		return Config{}, err
 	}
-	dataDir, err = filepath.Abs(dataDir)
-	if err != nil {
-		return Config{}, errors.New("data directory must be a valid local path")
+
+	masterKeyFile := ""
+	if rawMasterKeyFile, ok := lookup("REGISTRY_MASTER_KEY_FILE"); ok {
+		rawMasterKeyFile = strings.TrimSpace(rawMasterKeyFile)
+		if rawMasterKeyFile == "" {
+			return Config{}, errors.New("REGISTRY_MASTER_KEY_FILE must not be empty")
+		}
+		masterKeyFile, err = filepath.Abs(rawMasterKeyFile)
+		if err != nil {
+			return Config{}, errors.New("master key file path must be valid")
+		}
+		masterKeyFile = filepath.Clean(masterKeyFile)
 	}
 
 	driverValue, err := value(lookup, "REGISTRY_DATABASE_DRIVER", string(SQLite))
@@ -98,10 +143,23 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	return Config{
 		ListenAddress:        listenAddress,
 		DataDir:              filepath.Clean(dataDir),
+		MasterKeyFile:        masterKeyFile,
 		DatabaseDriver:       driver,
 		DatabaseDSN:          dsn,
 		DatabaseMaxOpenConns: maxOpenConns,
 	}, nil
+}
+
+func loadDataDir(lookup LookupEnv) (string, error) {
+	dataDir, err := value(lookup, "REGISTRY_DATA_DIR", "./data")
+	if err != nil {
+		return "", err
+	}
+	dataDir, err = filepath.Abs(dataDir)
+	if err != nil {
+		return "", errors.New("data directory must be a valid local path")
+	}
+	return filepath.Clean(dataDir), nil
 }
 
 func lookupEnvironment(key string) (string, bool) {

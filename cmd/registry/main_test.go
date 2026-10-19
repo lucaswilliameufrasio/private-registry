@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/secrets"
 )
 
 func TestRunMigrateBootstrapsLocalSQLiteInstallation(t *testing.T) {
@@ -56,7 +60,51 @@ func TestRunMigrateBootstrapsLocalSQLiteInstallation(t *testing.T) {
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
 	err := run(context.Background(), []string{"publish"}, slog.Default())
-	if err == nil || err.Error() != "usage: registry {serve|migrate|bootstrap-admin}" {
+	if err == nil || err.Error() != "usage: registry {serve|migrate|bootstrap-admin|init-master-key}" {
 		t.Fatalf("unexpected unknown-command result: %v", err)
+	}
+}
+
+func TestRunInitMasterKeyCreatesPrivateKeyWithoutDatabase(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("local master key files are supported only on Linux")
+	}
+	root := t.TempDir()
+	keyDirectory := filepath.Join(root, "keys")
+	if err := os.Mkdir(keyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(keyDirectory, "registry-master.key")
+	t.Setenv("REGISTRY_DATA_DIR", filepath.Join(root, "data-does-not-exist"))
+	t.Setenv("REGISTRY_MASTER_KEY_FILE", keyPath)
+
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	if err := run(context.Background(), []string{"init-master-key"}, logger); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logOutput.String(), "local master key initialized") {
+		t.Fatalf("initialization result was not logged: %q", logOutput.String())
+	}
+	if strings.Contains(logOutput.String(), keyPath) {
+		t.Fatalf("initialization log exposed the key file path: %q", logOutput.String())
+	}
+
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected master key permissions: %04o", info.Mode().Perm())
+	}
+
+	masterKey, err := secrets.LoadMasterKeyFile(keyPath, filepath.Join(root, "data-does-not-exist"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterKey.Destroy()
+
+	if err := run(context.Background(), []string{"init-master-key"}, logger); !errors.Is(err, secrets.ErrMasterKeyAlreadyExists) {
+		t.Fatalf("expected existing key to be preserved, got %v", err)
 	}
 }

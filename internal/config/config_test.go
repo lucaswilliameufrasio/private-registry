@@ -49,6 +49,56 @@ func TestLoadFromAcceptsPostgresDSNWithoutConnecting(t *testing.T) {
 	}
 }
 
+func TestLoadFromResolvesOptionalMasterKeyFilePath(t *testing.T) {
+	keyPath := filepath.Join("secrets", "registry-master.key")
+	absoluteKeyPath, err := filepath.Abs(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := LoadFrom(lookupMap(map[string]string{
+		"REGISTRY_MASTER_KEY_FILE": keyPath,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MasterKeyFile != absoluteKeyPath {
+		t.Fatalf("unexpected master key file path: got %q, want %q", config.MasterKeyFile, absoluteKeyPath)
+	}
+}
+
+func TestLoadMasterKeySettingsRequiresAndResolvesFilePath(t *testing.T) {
+	keyPath := filepath.Join("secrets", "registry-master.key")
+	absoluteKeyPath, err := filepath.Abs(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(t.TempDir(), "registry-data")
+
+	settings, err := LoadMasterKeySettingsFrom(lookupMap(map[string]string{
+		"REGISTRY_DATA_DIR":        dataDir,
+		"REGISTRY_MASTER_KEY_FILE": keyPath,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.MasterKeyFile != absoluteKeyPath {
+		t.Fatalf("unexpected master key file path: got %q, want %q", settings.MasterKeyFile, absoluteKeyPath)
+	}
+	if settings.DataDir != dataDir {
+		t.Fatalf("unexpected data directory: got %q, want %q", settings.DataDir, dataDir)
+	}
+
+	for _, values := range []map[string]string{
+		{},
+		{"REGISTRY_MASTER_KEY_FILE": "  "},
+	} {
+		if _, err := LoadMasterKeySettingsFrom(lookupMap(values)); err == nil {
+			t.Fatalf("expected missing or empty master key path to fail: %#v", values)
+		}
+	}
+}
+
 func TestLoadFromRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -1,8 +1,8 @@
 # Plano de desenvolvimento — Registry privado de pacotes e artefatos
 
-**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso registrado até 16/10/2026
+**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso atualizado em 18/10/2026
 
-**Estado:** fase 0 em execução. Backup/verificação remotos SQLite/PostgreSQL, clientes Pub/Go/Cargo/npm/Hex e OIDC/SCIM básico Authentik foram exercitados em fixtures, com limites registrados. Pub usa apenas a exceção HTTP localhost e não prova TLS; sob 503 Authentik, health/freshness não sinalizou a falha e as execuções variaram entre nenhuma atualização de usuário na full sync e uma atualização acompanhada de correção do drift; isso não comprova reconciliação determinística. Coordenação OCI commit/revogação, aceitação de atomicidade S3 real, contratos restantes e implementação produtiva continuam pendentes. Existe um esqueleto local de `registry serve`, migrations v1–v3, serviço interno de workspaces e CLI interativa one-shot para provisionar a conta inicial; login/sessões, autorização de conteúdo e endpoints de registry ainda não existem. Não há servidor utilizável, release ou suporte de protocolo anunciado.
+**Estado:** fase 0 em execução; fase 1 também permanece aberta. Backup/verificação remotos SQLite/PostgreSQL, clientes Pub/Go/Cargo/npm/Hex e OIDC/SCIM básico Authentik foram exercitados em fixtures, com limites registrados. Pub usa apenas a exceção HTTP localhost e não prova TLS; sob 503 Authentik, health/freshness não sinalizou a falha e as execuções variaram entre nenhuma atualização de usuário na full sync e uma atualização acompanhada de correção do drift; isso não comprova reconciliação determinística. Coordenação OCI commit/revogação, aceitação de atomicidade S3 real, contratos restantes e implementação produtiva continuam pendentes. Existe um esqueleto local de `registry serve`, migrations v1–v3, serviço interno de workspaces, bootstrap interativo do primeiro administrador e inicialização Linux da chave mestra com envelope criptográfico ainda não integrado a persistência. Login/sessões/MFA, autorização de conteúdo e endpoints de registry ainda não existem. Não há servidor utilizável, release ou suporte de protocolo anunciado.
 
 **Nome de trabalho:** Private Registry; nome comercial ainda não escolhido  
 **Repositório sugerido:** `artifact-registry` — sugestão técnica, sem pressupor disponibilidade
@@ -458,7 +458,7 @@ Downloads privados passam pelo registry por padrão, com autorização vigente. 
 
 1. Operador com acesso local aplica migrations explicitamente e provisiona o primeiro administrador pelo terminal interativo, sem segredo de bootstrap nem endpoint HTTP.
 2. Configurar URL externa, banco e armazenamento; concluir a conta inicial conforme o procedimento operacional ainda pendente.
-3. Criar material de chave e exportar kit de recuperação.
+3. Inicializar a chave mestra local fora do diretório de dados e exportar kit de recuperação. `registry init-master-key` implementa somente a geração protegida do arquivo Linux; persistência cifrada, kit e recuperação ainda não estão implementados.
 4. Testar configuração antes de ativar métodos externos.
 5. Encerrar bootstrap definitivamente; impedir tomada da instalação por nova visita pública.
 
@@ -504,6 +504,7 @@ Fluxos de login: authorization code, PKCE onde suportado, `state`, `nonce` em OI
 
 - Administrador da instalação pode exigir MFA de todos; por padrão, exigir de administradores da instalação e proprietários/administradores de workspace.
 - TOTP, passkeys e códigos de recuperação entram na v1. Contas de serviço usam políticas de credencial próprias, não MFA humano.
+- O contrato da chave mestra local e do envelope versionado está em [ADR 0010](adr/0010-local-master-key-and-secret-envelopes.md); sua existência não representa MFA/TOTP implementado.
 - Passkey pode substituir senha + segundo fator quando a autenticação exigir e comprovar verificação do usuário pelo autenticador, como PIN/biometria. Presença/toque sem essa verificação não satisfaz MFA.
 - MFA federado só satisfaz a política com evidência verificável do IdP segundo configuração explícita, não por inferência de que qualquer login externo é multifator.
 - Recuperação começa por códigos de uso único. Sem códigos, administrador da instalação pode iniciar reset local de MFA com reautenticação própria, justificativa, auditoria e notificação ao usuário.
@@ -803,7 +804,7 @@ Mudança de bucket/path não move objetos por mágica. Implementar job de cópia
 - Voltar binário é permitido somente dentro da compatibilidade declarada de schema.
 - Backup pós-upgrade e validação com cliente real completam o procedimento.
 
-**Implementação inicial (16/10/2026; não aceita para produção):** `registry migrate` aplica migrations SQL embutidas e separadas por dialeto; SHA-256, lock local SQLite/advisory PostgreSQL e histórico de tentativas são validados por testes reais. `registry serve` não migra implicitamente. O schema v1–v3 contém identidade singleton, usuários, identidades externas, policies independentes, grants de criação, workspaces, memberships, auditoria e credenciais locais. Um serviço interno aplica policy de workspace; `registry bootstrap-admin` cria uma única conta local interativamente, com username e email de contato e hash Argon2id, usando transação serializada e evento de auditoria. Ainda faltam login/sessões, middleware, grants de conteúdo e APIs. Gate de backup para mudanças destrutivas, compatibilidade de binário/schema, execução em manutenção e procedimento de upgrade continuam pendentes.
+**Implementação inicial (atualizada em 18/10/2026; não aceita para produção):** `registry migrate` aplica migrations SQL embutidas e separadas por dialeto; SHA-256, lock local SQLite/advisory PostgreSQL e histórico de tentativas são validados por testes reais. `registry serve` não migra implicitamente. O schema v1–v3 contém identidade singleton, usuários, identidades externas, policies independentes, grants de criação, workspaces, memberships, auditoria e credenciais locais. Um serviço interno aplica policy de workspace; `registry bootstrap-admin` cria uma única conta local interativamente, com username e email de contato e hash Argon2id, usando transação serializada e evento de auditoria. `registry init-master-key` gera uma chave Linux de 32 bytes em arquivo privado fora de `REGISTRY_DATA_DIR`; há envelope XChaCha20-Poly1305 versionado, mas ainda não há persistência de segredo usando-o. Ainda faltam login/sessões, MFA, middleware, grants de conteúdo e APIs. Gate de backup para mudanças destrutivas, compatibilidade de binário/schema, execução em manutenção e procedimento de upgrade continuam pendentes.
 
 ### 14.4 Troca SQLite → PostgreSQL
 
@@ -1254,7 +1255,7 @@ As fases são entregas internas incrementais. A v1 completa exige os sete format
 
 **Aceite:** reiniciar sem perder dados, isolar dois workspaces e executar migrations nos dois engines.
 
-**Progresso parcial (16/10/2026; fase ainda aberta):** há um esqueleto local `registry serve` com configuração explícita, SQLite persistente, PostgreSQL via pgx, `/livez`, `/readyz` e shutdown HTTP limitado. `registry migrate` mantém identidade da instalação e instala schema v1–v3 de usuários/identidades, policies, grants de criação, workspaces/memberships, auditoria e credenciais locais. Serviço interno cria workspaces com policy separada do cadastro, slug canônico/imutável, owner inicial e auditoria transacional. `registry bootstrap-admin` exige TTY, username, email de contato e senha Argon2id, não migra implicitamente, não expõe endpoint HTTP e recusa segunda execução; atomicidade e corrida estão cobertas para SQLite e PostgreSQL. Ainda faltam login/sessões, MFA, middleware, APIs, grants de conteúdo e prova de isolamento de dois workspaces; SvelteKit, CI e o aceite da fase também continuam pendentes.
+**Progresso parcial (atualizado em 18/10/2026; fase ainda aberta):** há um esqueleto local `registry serve` com configuração explícita, SQLite persistente, PostgreSQL via pgx, `/livez`, `/readyz` e shutdown HTTP limitado. `registry migrate` mantém identidade da instalação e instala schema v1–v3 de usuários/identidades, policies, grants de criação, workspaces/memberships, auditoria e credenciais locais. Serviço interno cria workspaces com policy separada do cadastro, slug canônico/imutável, owner inicial e auditoria transacional. `registry bootstrap-admin` exige TTY, username, email de contato e senha Argon2id, não migra implicitamente, não expõe endpoint HTTP e recusa segunda execução; atomicidade e corrida estão cobertas para SQLite e PostgreSQL. `registry init-master-key` cria arquivo binário Linux protegido, separado do diretório de dados, e o pacote `internal/secrets` oferece envelope autenticado versionado ainda sem adapter de persistência. Ainda faltam login/sessões, MFA, middleware, APIs, grants de conteúdo e prova de isolamento de dois workspaces; SvelteKit, CI e o aceite da fase também continuam pendentes.
 
 ### Fase 2 — conteúdo e artefatos genéricos
 

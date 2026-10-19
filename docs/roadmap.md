@@ -1,8 +1,8 @@
 # Roadmap — recursos adiados e gaps conhecidos
 
-**Atualizado:** 16/10/2026
+**Atualizado:** 18/10/2026
 
-**Estado:** fase 0 em andamento; Authentik OIDC/SCIM 0.18 caracterizado em fixture, health e full-sync reconciliation após 503 não aceitos. Existe esqueleto `registry serve`, migrations v1–v3, serviço interno de criação de workspace e CLI local one-shot de bootstrap do primeiro administrador; login/sessões, APIs e autorização de conteúdo ainda não existem. Não há servidor/release utilizável nem suporte de protocolo anunciado.
+**Estado:** fase 0 em andamento e fase 1 ainda aberta; Authentik OIDC/SCIM 0.18 caracterizado em fixture, health e full-sync reconciliation após 503 não aceitos. Existe esqueleto `registry serve`, migrations v1–v3, serviço interno de criação de workspace, CLI local one-shot de bootstrap do primeiro administrador e inicialização Linux da chave mestra; login/sessões/MFA, APIs e autorização de conteúdo ainda não existem. O envelope criptográfico não está integrado à persistência. Não há servidor/release utilizável nem suporte de protocolo anunciado.
 
 Spike PostgreSQL lógico com tools do mesmo major também comprovado; [limites](spikes/postgres-backup.md). Distribuição de tools/aceitação das versões suportadas e backup completo continuam obrigatórios; PITR permanece adiamento separado, sem confundir os dois.
 

@@ -19,6 +19,7 @@ import (
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
+	"private-registry/internal/secrets"
 	"private-registry/internal/server"
 )
 
@@ -36,14 +37,17 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
-	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin") {
-		return errors.New("usage: registry {serve|migrate|bootstrap-admin}")
+	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key") {
+		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key}")
 	}
 	if logger == nil {
 		return errors.New("logger is required")
 	}
 	if args[0] == "bootstrap-admin" {
 		return runBootstrapAdmin(ctx)
+	}
+	if args[0] == "init-master-key" {
+		return runInitMasterKey(logger)
 	}
 
 	cfg, err := config.Load()
@@ -83,6 +87,18 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		return errors.Join(errors.New("HTTP server failed"), err)
 	}
 	logger.Info("registry health server stopped")
+	return nil
+}
+
+func runInitMasterKey(logger *slog.Logger) error {
+	settings, err := config.LoadMasterKeySettings()
+	if err != nil {
+		return err
+	}
+	if err := secrets.InitializeMasterKey(settings.MasterKeyFile, settings.DataDir); err != nil {
+		return err
+	}
+	logger.Info("local master key initialized")
 	return nil
 }
 
