@@ -79,7 +79,11 @@ func setupAuthentikFixture(t *testing.T) {
 	}
 	fixture.project = "pr-authentik-" + hex.EncodeToString(suffix[:])
 
-	root, err := os.MkdirTemp("/tmp/opencode", "private-registry-authentik-")
+	fixtureTempDir := os.Getenv("TMPDIR")
+	if fixtureTempDir == "" {
+		fixtureTempDir = "/tmp/opencode"
+	}
+	root, err := os.MkdirTemp(fixtureTempDir, "private-registry-authentik-")
 	if err != nil {
 		t.Fatal("create private Authentik fixture directory")
 	}

@@ -57,6 +57,21 @@ func TestPostgresSessionsRotateValidateAndRevokeConcurrently(t *testing.T) {
 		return now
 	}
 
+	standard, err := store.Create(ctx, userID, LevelStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restricted, err := store.RestrictForMFAEnrollment(ctx, standard.BearerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restricted.Session.Level != LevelEnrollmentOnly {
+		t.Fatalf("PostgreSQL did not step a standard session down to restricted enrollment: %+v", restricted.Session)
+	}
+	if _, err := store.Validate(ctx, standard.BearerToken); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("PostgreSQL accepted the bearer revoked for voluntary enrollment: %v", err)
+	}
+
 	initial, err := store.Create(ctx, userID, LevelEnrollmentOnly)
 	if err != nil {
 		t.Fatal(err)

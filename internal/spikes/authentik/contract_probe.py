@@ -713,19 +713,50 @@ def main():
         recovery_state = get_target_state()
         provider_state = api("GET", f"/providers/scim/{scim_provider_id}/")
         sync_state = api("GET", f"/providers/scim/{scim_provider_id}/sync/status/")
-        requests_since_user_creation = [
-            {
+        requests_since_user_creation = []
+        for item in recovery_state.get("requests", []):
+            if item.get("observed_at_monotonic_ns", 0) < recovery_user_started_ns:
+                continue
+            resource = item.get("resource")
+            if not isinstance(resource, dict):
+                resource = {}
+            request_value = item.get("request")
+            if not isinstance(request_value, dict):
+                request_value = {}
+            patch_operations = request_value.get("Operations", request_value.get("operations", []))
+            if not isinstance(patch_operations, list):
+                patch_operations = []
+            patch_summaries = []
+            for operation in patch_operations[:8]:
+                if not isinstance(operation, dict):
+                    continue
+                value = operation.get("value")
+                member_ids = []
+                if isinstance(value, list):
+                    for member in value[:20]:
+                        if isinstance(member, dict) and isinstance(member.get("value"), str):
+                            member_ids.append(member["value"])
+                patch_summaries.append({
+                    "op": operation.get("op"),
+                    "path": operation.get("path"),
+                    "member_ids": member_ids,
+                })
+            requests_since_user_creation.append({
                 "method": item.get("method"),
                 "path": item.get("path"),
                 "filter": item.get("filter"),
                 "result_count": item.get("result_count"),
                 "status": item.get("status"),
-                "userName": item.get("resource", {}).get("userName"),
-                "displayName": item.get("resource", {}).get("displayName"),
-            }
-            for item in recovery_state.get("requests", [])
-            if item.get("observed_at_monotonic_ns", 0) >= recovery_user_started_ns
-        ]
+                "externalId": resource.get("externalId"),
+                "userName": resource.get("userName"),
+                "displayName": resource.get("displayName"),
+                "member_ids": [
+                    member.get("value")
+                    for member in resource.get("members", [])[:20]
+                    if isinstance(member, dict) and isinstance(member.get("value"), str)
+                ],
+                "patch_operations": patch_summaries,
+            })
         recovery_task_rows = [
             item for item in task_rows(scim_provider_id)
             if item.get("message_id") not in recovery_prior_task_ids
@@ -772,6 +803,8 @@ def main():
             ],
             "target_groups": [
                 {
+                    "id": item.get("id"),
+                    "externalId": item.get("externalId"),
                     "displayName": item.get("displayName"),
                     "members": item.get("members", []),
                 }

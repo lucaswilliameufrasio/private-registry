@@ -207,6 +207,67 @@ func (s *Store) Rotate(ctx context.Context, bearerToken string, level Level) (Cr
 	return newCredentials, nil
 }
 
+// RestrictForMFAEnrollment replaces a standard session with a short-lived
+// enrollment-only session. Callers must validate CSRF and any browser-origin
+// policy before requesting this transition.
+func (s *Store) RestrictForMFAEnrollment(ctx context.Context, bearerToken string) (Credentials, error) {
+	if err := s.validate(); err != nil {
+		return Credentials{}, err
+	}
+	if ctx == nil {
+		return Credentials{}, ErrServiceUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return Credentials{}, err
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return Credentials{}, err
+	}
+	var enrollmentCredentials Credentials
+	valid, err := s.withBearerTransaction(ctx, bearerToken, func(tx *sql.Tx, record sessionRecord) error {
+		if record.Level != LevelStandard {
+			return ErrInvalidTransition
+		}
+		var activeFactor bool
+		factorQuery := `SELECT EXISTS (
+			SELECT 1 FROM registry_totp_credentials
+			WHERE user_id = ` + bind(s.driver, 1) + ` AND status = 'active'
+		)`
+		if err := tx.QueryRowContext(ctx, factorQuery, record.UserID).Scan(&activeFactor); err != nil {
+			return ErrSessionStorage
+		}
+		if activeFactor {
+			return ErrInvalidTransition
+		}
+		query := "UPDATE registry_auth_sessions SET revoked_at = " + bind(s.driver, 1) +
+			" WHERE session_id = " + bind(s.driver, 2) + " AND revoked_at IS NULL"
+		result, err := tx.ExecContext(ctx, query, now.Format(time.RFC3339Nano), record.ID)
+		if err != nil {
+			return ErrSessionStorage
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil || rowsAffected != 1 {
+			return ErrSessionStorage
+		}
+		if err := recordAudit(ctx, tx, s.driver, record.UserID, "session.revoked", "session", record.ID, now); err != nil {
+			return err
+		}
+		enrollmentCredentials, err = s.createInTransaction(ctx, tx, record.UserID, LevelEnrollmentOnly, now)
+		if err != nil {
+			return err
+		}
+		return recordAudit(ctx, tx, s.driver, record.UserID, "session.created", "session", enrollmentCredentials.Session.ID, now)
+	})
+	if err != nil {
+		return Credentials{}, err
+	}
+	if !valid {
+		return Credentials{}, ErrSessionUnavailable
+	}
+	return enrollmentCredentials, nil
+}
+
 // Revoke is idempotent so logout does not reveal whether a bearer existed.
 func (s *Store) Revoke(ctx context.Context, bearerToken string) error {
 	if err := s.validate(); err != nil {

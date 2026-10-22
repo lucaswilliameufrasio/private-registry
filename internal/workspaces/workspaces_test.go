@@ -128,6 +128,214 @@ func TestWorkspaceSlugIsValidatedUniqueAndImmutable(t *testing.T) {
 	}
 }
 
+func TestListForUserScopesActiveMembershipsAndPaginatesByWorkspaceID(t *testing.T) {
+	ctx, db, cfg := openSQLite(t)
+	service, err := New(db, cfg.DatabaseDriver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminID := seedUser(t, ctx, db, cfg.DatabaseDriver, "active", "list-admin@example.invalid")
+	memberID := seedUser(t, ctx, db, cfg.DatabaseDriver, "active", "list-member@example.invalid")
+	outsiderID := seedUser(t, ctx, db, cfg.DatabaseDriver, "active", "list-outsider@example.invalid")
+	seedInstanceAdmin(t, ctx, db, cfg.DatabaseDriver, adminID)
+
+	firstWorkspace, err := service.CreateWorkspace(ctx, adminID, "list-first", "First")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondWorkspace, err := service.CreateWorkspace(ctx, adminID, "list-second", "Second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspace_memberships
+		(workspace_id, user_id, role, status, created_by, created_at, updated_at)
+		VALUES (?, ?, 'member', 'active', ?, ?, ?)`, firstWorkspace.ID, memberID, adminID,
+		firstWorkspace.CreatedAt.Format(time.RFC3339Nano), firstWorkspace.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspace_memberships
+		(workspace_id, user_id, role, status, created_by, created_at, updated_at)
+		VALUES (?, ?, 'member', 'removed', ?, ?, ?)`, secondWorkspace.ID, memberID, adminID,
+		secondWorkspace.CreatedAt.Format(time.RFC3339Nano), secondWorkspace.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPage, hasMore, err := service.ListForUser(ctx, adminID, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage) != 1 || !hasMore {
+		t.Fatalf("workspace pagination did not report the next page: count=%d has_more=%t", len(firstPage), hasMore)
+	}
+	secondPage, hasMore, err := service.ListForUser(ctx, adminID, firstPage[0].Workspace.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage) != 1 || hasMore {
+		t.Fatalf("workspace pagination returned an unexpected last page: count=%d has_more=%t", len(secondPage), hasMore)
+	}
+	seen := map[string]bool{firstPage[0].Workspace.ID: true, secondPage[0].Workspace.ID: true}
+	if !seen[firstWorkspace.ID] || !seen[secondWorkspace.ID] {
+		t.Fatalf("admin pagination omitted or duplicated a workspace: %+v", seen)
+	}
+
+	memberWorkspaces, hasMore, err := service.ListForUser(ctx, memberID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasMore || len(memberWorkspaces) != 1 || memberWorkspaces[0].Workspace.ID != firstWorkspace.ID ||
+		memberWorkspaces[0].Role != "member" {
+		t.Fatalf("membership listing leaked or omitted workspaces: %+v has_more=%t", memberWorkspaces, hasMore)
+	}
+	outsiderWorkspaces, hasMore, err := service.ListForUser(ctx, outsiderID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasMore || len(outsiderWorkspaces) != 0 {
+		t.Fatalf("user without memberships saw workspaces: %+v has_more=%t", outsiderWorkspaces, hasMore)
+	}
+	if _, _, err := service.ListForUser(ctx, adminID, "not-a-uuid", 10); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("malformed workspace cursor was accepted: %v", err)
+	}
+	if _, _, err := service.ListForUser(ctx, adminID, "", 101); !errors.Is(err, ErrInvalidPageSize) {
+		t.Fatalf("oversized workspace page was accepted: %v", err)
+	}
+}
+
+func TestMembershipManagementEnforcesDelegationAndLastOwner(t *testing.T) {
+	ctx, db, cfg := openSQLite(t)
+	driver := cfg.DatabaseDriver
+	service, err := New(db, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerID := seedUser(t, ctx, db, driver, "active", "membership-owner@example.invalid")
+	adminID := seedUser(t, ctx, db, driver, "active", "membership-admin@example.invalid")
+	memberID := seedUser(t, ctx, db, driver, "active", "membership-member@example.invalid")
+	secondMemberID := seedUser(t, ctx, db, driver, "active", "membership-second@example.invalid")
+	seedInstanceAdmin(t, ctx, db, driver, ownerID)
+
+	workspace, err := service.CreateWorkspace(ctx, ownerID, "membership", "Membership")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetMembershipRole(ctx, ownerID, workspace.ID, adminID, RoleAdministrator); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetMembershipRole(ctx, ownerID, workspace.ID, memberID, RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetMembershipRole(ctx, adminID, workspace.ID, secondMemberID, RoleMember); err != nil {
+		t.Fatalf("workspace administrator could not delegate a member role: %v", err)
+	}
+
+	if err := service.SetMembershipRole(ctx, adminID, workspace.ID, adminID, RoleOwner); !errors.Is(err, ErrSelfElevation) {
+		t.Fatalf("workspace administrator elevated their own role: %v", err)
+	}
+	if err := service.SetMembershipRole(ctx, adminID, workspace.ID, memberID, RoleAdministrator); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("workspace administrator granted a non-delegable role: %v", err)
+	}
+	if err := service.RemoveMembership(ctx, adminID, workspace.ID, ownerID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("workspace administrator removed an owner: %v", err)
+	}
+	if err := service.RemoveMembership(ctx, memberID, workspace.ID, secondMemberID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ordinary member managed another membership: %v", err)
+	}
+	if err := service.SetMembershipRole(ctx, memberID, workspace.ID, secondMemberID, RoleMember); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ordinary member granted a membership role: %v", err)
+	}
+
+	if err := service.SetMembershipRole(ctx, ownerID, workspace.ID, ownerID, RoleMember); !errors.Is(err, ErrLastOwner) {
+		t.Fatalf("last owner demoted themselves: %v", err)
+	}
+	if err := service.RemoveMembership(ctx, ownerID, workspace.ID, ownerID); !errors.Is(err, ErrLastOwner) {
+		t.Fatalf("last owner removed themselves: %v", err)
+	}
+
+	if err := service.SetMembershipRole(ctx, ownerID, workspace.ID, adminID, RoleOwner); err != nil {
+		t.Fatalf("owner could not explicitly grant a second owner: %v", err)
+	}
+	if err := service.RemoveMembership(ctx, ownerID, workspace.ID, ownerID); err != nil {
+		t.Fatalf("owner could not leave after another owner was active: %v", err)
+	}
+	if err := service.RemoveMembership(ctx, adminID, workspace.ID, adminID); !errors.Is(err, ErrLastOwner) {
+		t.Fatalf("remaining owner left without transferring ownership: %v", err)
+	}
+	if err := service.RemoveMembership(ctx, adminID, workspace.ID, memberID); err != nil {
+		t.Fatalf("workspace administrator could not remove an ordinary member: %v", err)
+	}
+	if err := service.SetMembershipRole(ctx, ownerID, workspace.ID, secondMemberID, RoleMember); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("removed owner continued managing the workspace: %v", err)
+	}
+
+	var ownerRole, ownerStatus, memberStatus string
+	if err := db.QueryRowContext(ctx, `SELECT role, status FROM registry_workspace_memberships
+		WHERE workspace_id = ? AND user_id = ?`, workspace.ID, adminID).Scan(&ownerRole, &ownerStatus); err != nil {
+		t.Fatal(err)
+	}
+	if ownerRole != RoleOwner || ownerStatus != "active" {
+		t.Fatalf("second owner state was not persisted: role=%q status=%q", ownerRole, ownerStatus)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT status FROM registry_workspace_memberships
+		WHERE workspace_id = ? AND user_id = ?`, workspace.ID, memberID).Scan(&memberStatus); err != nil {
+		t.Fatal(err)
+	}
+	if memberStatus != "removed" {
+		t.Fatalf("member removal was not persisted: %q", memberStatus)
+	}
+
+	raceWorkspace, err := service.CreateWorkspace(ctx, ownerID, "membership-owner-race", "Membership Owner Race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetMembershipRole(ctx, ownerID, raceWorkspace.ID, adminID, RoleOwner); err != nil {
+		t.Fatal(err)
+	}
+	type removalResult struct {
+		userID string
+		err    error
+	}
+	startRemovals := make(chan struct{})
+	removalResults := make(chan removalResult, 2)
+	for _, userID := range []string{ownerID, adminID} {
+		go func(userID string) {
+			<-startRemovals
+			removalResults <- removalResult{
+				userID: userID,
+				err:    service.RemoveMembership(ctx, userID, raceWorkspace.ID, userID),
+			}
+		}(userID)
+	}
+	close(startRemovals)
+	successfulRemovals := 0
+	lastOwnerRejections := 0
+	for range 2 {
+		result := <-removalResults
+		if result.err == nil {
+			successfulRemovals++
+			continue
+		}
+		if errors.Is(result.err, ErrLastOwner) {
+			lastOwnerRejections++
+			continue
+		}
+		t.Fatalf("concurrent owner removal for %s failed unexpectedly: %v", result.userID, result.err)
+	}
+	if successfulRemovals != 1 || lastOwnerRejections != 1 {
+		t.Fatalf("concurrent owner removal violated the invariant: succeeded=%d rejected=%d",
+			successfulRemovals, lastOwnerRejections)
+	}
+
+	var membershipAuditCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events
+		WHERE target_type = 'workspace_membership'`).Scan(&membershipAuditCount); err != nil {
+		t.Fatal(err)
+	}
+	if membershipAuditCount != 8 {
+		t.Fatalf("membership changes were not audited exactly once: count=%d", membershipAuditCount)
+	}
+}
+
 func TestWorkspaceCreationSerializesDuplicateSlugAcrossConnections(t *testing.T) {
 	ctx, firstDB, cfg := openSQLite(t)
 	driver := cfg.DatabaseDriver

@@ -128,6 +128,42 @@ func TestSessionRotationAndAccountRevocation(t *testing.T) {
 	}
 }
 
+func TestStandardSessionCanStepDownToRestrictedMFAEnrollment(t *testing.T) {
+	fixture := newSQLiteFixture(t)
+	ctx := context.Background()
+	standard, err := fixture.store.Create(ctx, fixture.userID, LevelStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restricted, err := fixture.store.RestrictForMFAEnrollment(ctx, standard.BearerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restricted.Session.Level != LevelEnrollmentOnly ||
+		!restricted.Session.AbsoluteExpiresAt.Equal(fixture.now.Add(enrollmentSessionLifetime)) {
+		t.Fatalf("standard session did not step down to bounded MFA enrollment: %+v", restricted.Session)
+	}
+	if _, err := fixture.store.Validate(ctx, standard.BearerToken); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("pre-enrollment standard bearer remained valid: %v", err)
+	}
+	if _, err := fixture.store.Validate(ctx, restricted.BearerToken); err != nil {
+		t.Fatalf("restricted enrollment bearer did not validate: %v", err)
+	}
+	if err := insertActiveFactor(ctx, fixture.db, config.SQLite, fixture.userID); err != nil {
+		t.Fatal(err)
+	}
+	standardWithFactor, err := fixture.store.Create(ctx, fixture.userID, LevelStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.RestrictForMFAEnrollment(ctx, standardWithFactor.BearerToken); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("standard session with an active factor was downgraded to enrollment: %v", err)
+	}
+	if _, err := fixture.store.RestrictForMFAEnrollment(ctx, restricted.BearerToken); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("restricted enrollment session was rotated again: %v", err)
+	}
+}
+
 func TestMFAQualificationRequiresRestrictedSessionAndActiveFactor(t *testing.T) {
 	fixture := newSQLiteFixture(t)
 	ctx := context.Background()

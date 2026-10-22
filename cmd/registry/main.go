@@ -20,8 +20,10 @@ import (
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
+	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
 	"private-registry/internal/server"
+	"private-registry/internal/workspaces"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -96,8 +98,16 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	workspaceService, err := workspaces.New(db, cfg.DatabaseDriver)
+	if err != nil {
+		return err
+	}
+	repositoryService, err := repositories.New(db, cfg.DatabaseDriver)
+	if err != nil {
+		return err
+	}
 	health := server.NewHealth(db)
-	handler, err := server.NewHandler(health, authentication, server.AuthHTTPConfig{
+	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, server.AuthHTTPConfig{
 		CanonicalOrigin: cfg.CanonicalOrigin,
 		TrustedProxies:  cfg.TrustedProxies,
 	})

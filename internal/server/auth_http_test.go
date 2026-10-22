@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/tls"
+	"database/sql"
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/json"
@@ -21,13 +22,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"private-registry/internal/auth"
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
+	"private-registry/internal/password"
+	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
 	"private-registry/internal/sessions"
+	"private-registry/internal/workspaces"
 )
 
 const (
@@ -37,8 +42,11 @@ const (
 )
 
 type authHTTPFixture struct {
-	handler http.Handler
-	service *auth.Service
+	handler           http.Handler
+	service           *auth.Service
+	workspaceService  *workspaces.Service
+	repositoryService *repositories.Service
+	db                *sql.DB
 }
 
 func newAuthHTTPFixture(t *testing.T) authHTTPFixture {
@@ -108,11 +116,25 @@ func newAuthHTTPFixtureWithConfig(t *testing.T, authConfig AuthHTTPConfig) authH
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(NewHealth(db), service, authConfig)
+	workspaceService, err := workspaces.New(db, config.SQLite)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return authHTTPFixture{handler: handler, service: service}
+	repositoryService, err := repositories.New(db, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(NewHealth(db), service, workspaceService, repositoryService, authConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authHTTPFixture{
+		handler:           handler,
+		service:           service,
+		workspaceService:  workspaceService,
+		repositoryService: repositoryService,
+		db:                db,
+	}
 }
 
 func TestAuthHTTPCompletesEnrollmentChallengeAndLogout(t *testing.T) {
@@ -237,7 +259,7 @@ func TestAuthHTTPCompletesEnrollmentChallengeAndLogout(t *testing.T) {
 	}
 }
 
-func TestAuthHTTPRejectsWrongOriginsAndKeepsProtectedRoutesUnavailable(t *testing.T) {
+func TestAuthHTTPRejectsWrongOriginsAndKeepsContentRoutesUnavailable(t *testing.T) {
 	fixture := newAuthHTTPFixture(t)
 	for _, test := range []struct {
 		name   string
@@ -257,7 +279,7 @@ func TestAuthHTTPRejectsWrongOriginsAndKeepsProtectedRoutesUnavailable(t *testin
 			}
 		})
 	}
-	for _, path := range []string{"/api/v1/workspaces", "/api/v1/admin", "/packages/private"} {
+	for _, path := range []string{"/api/v1/admin", "/packages/private"} {
 		request := httptest.NewRequest(http.MethodGet, "https://registry.example"+path, nil)
 		request.Host = "registry.example"
 		response := httptest.NewRecorder()
@@ -265,6 +287,450 @@ func TestAuthHTTPRejectsWrongOriginsAndKeepsProtectedRoutesUnavailable(t *testin
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("unimplemented protected route %q became reachable: status=%d", path, response.Code)
 		}
+	}
+	workspacesRequest := httptest.NewRequest(http.MethodGet, "https://registry.example/api/v1/workspaces", nil)
+	workspacesRequest.Host = "registry.example"
+	workspacesResponse := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(workspacesResponse, workspacesRequest)
+	if workspacesResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("workspace route accepted an unauthenticated request: status=%d", workspacesResponse.Code)
+	}
+}
+
+func TestAuthHTTPWorkspaceIsolationMFAAndVoluntaryEnrollment(t *testing.T) {
+	fixture := newAuthHTTPFixture(t)
+	ctx := context.Background()
+	var administratorID string
+	if err := fixture.db.QueryRowContext(ctx, "SELECT user_id FROM registry_instance_admins").Scan(&administratorID); err != nil {
+		t.Fatal(err)
+	}
+	firstWorkspace, err := fixture.workspaceService.CreateWorkspace(ctx, administratorID, "http-first", "HTTP First")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removedWorkspace, err := fixture.workspaceService.CreateWorkspace(ctx, administratorID, "http-removed", "HTTP Removed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberID := seedHTTPUser(t, fixture, "http.member")
+	memberTimestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, membership := range []struct {
+		workspaceID string
+		status      string
+	}{
+		{workspaceID: firstWorkspace.ID, status: "active"},
+		{workspaceID: removedWorkspace.ID, status: "removed"},
+	} {
+		if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_workspace_memberships
+			(workspace_id, user_id, role, status, created_by, created_at, updated_at)
+			VALUES (?, ?, 'member', ?, ?, ?, ?)`, membership.workspaceID, memberID, membership.status,
+			administratorID, memberTimestamp, memberTimestamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := fixture.workspaceService.SetCreationPolicy(ctx, administratorID, workspaces.CreationAnyUser); err != nil {
+		t.Fatal(err)
+	}
+
+	login := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
+		`{"login_name":"http.member","password":"synthetic-http-member-password"}`, authTestOrigin, "registry.example")
+	if login.Code != http.StatusOK {
+		t.Fatalf("ordinary member login failed: status=%d body=%s", login.Code, login.Body.String())
+	}
+	memberCookies := assertSessionCookies(t, login)
+	var loginStage loginResponse
+	if err := json.Unmarshal(login.Body.Bytes(), &loginStage); err != nil {
+		t.Fatal(err)
+	}
+	if loginStage.Stage != string(auth.StageAuthenticated) {
+		t.Fatalf("ordinary member received an unexpected login stage: %+v", loginStage)
+	}
+
+	listed := authHTTPRequestWithCookies(fixture.handler, http.MethodGet,
+		"/api/v1/workspaces", "", "", "registry.example", memberCookies, "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("workspace listing failed: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var listing workspaceListResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing.HasMore || listing.NextCursor != "" || len(listing.Workspaces) != 1 ||
+		listing.Workspaces[0].WorkspaceID != firstWorkspace.ID || listing.Workspaces[0].Role != "member" {
+		t.Fatalf("workspace listing leaked a removed or unjoined workspace: %+v", listing)
+	}
+
+	createBody := `{"slug":"http-created","display_name":"HTTP Created"}`
+	missingCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, "/api/v1/workspaces",
+		createBody, authTestOrigin, "registry.example", memberCookies, "")
+	if missingCSRF.Code != http.StatusForbidden {
+		t.Fatalf("workspace creation accepted a write without CSRF: status=%d body=%s", missingCSRF.Code, missingCSRF.Body.String())
+	}
+	standardCreation := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, "/api/v1/workspaces",
+		createBody, authTestOrigin, "registry.example", memberCookies, memberCookies[csrfCookieName].Value)
+	if standardCreation.Code != http.StatusForbidden || !strings.Contains(standardCreation.Body.String(), "mfa_required") {
+		t.Fatalf("standard session created a workspace: status=%d body=%s", standardCreation.Code, standardCreation.Body.String())
+	}
+
+	startEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
+		"/api/v1/auth/mfa/enrollment/start", "", authTestOrigin, "registry.example",
+		memberCookies, memberCookies[csrfCookieName].Value)
+	if startEnrollment.Code != http.StatusOK {
+		t.Fatalf("voluntary MFA enrollment failed: status=%d body=%s", startEnrollment.Code, startEnrollment.Body.String())
+	}
+	var enrollment enrollmentResponse
+	if err := json.Unmarshal(startEnrollment.Body.Bytes(), &enrollment); err != nil {
+		t.Fatal(err)
+	}
+	if enrollment.Secret == "" || enrollment.OTPAuthURL == "" {
+		t.Fatalf("voluntary enrollment response was incomplete: %+v", enrollment)
+	}
+	enrollmentCookies := assertSessionCookies(t, startEnrollment)
+	restrictedListing := authHTTPRequestWithCookies(fixture.handler, http.MethodGet,
+		"/api/v1/workspaces", "", "", "registry.example", enrollmentCookies, "")
+	if restrictedListing.Code != http.StatusForbidden ||
+		!strings.Contains(restrictedListing.Body.String(), "authentication_incomplete") {
+		t.Fatalf("enrollment-only session accessed the workspace listing: status=%d body=%s",
+			restrictedListing.Code, restrictedListing.Body.String())
+	}
+	if _, err := fixture.service.ValidateSession(ctx, memberCookies[sessionCookieName].Value); !errors.Is(err, sessions.ErrSessionUnavailable) {
+		t.Fatalf("pre-enrollment standard session remained valid: %v", err)
+	}
+
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(enrollment.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(secret)
+	confirmationCode := authHTTPOTP(secret, time.Now().Unix()/30)
+	completedEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
+		"/api/v1/auth/mfa/enrollment/complete", fmt.Sprintf(`{"code":%q}`, confirmationCode),
+		authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if completedEnrollment.Code != http.StatusOK {
+		t.Fatalf("voluntary MFA confirmation failed: status=%d body=%s", completedEnrollment.Code, completedEnrollment.Body.String())
+	}
+	mfaCookies := assertSessionCookies(t, completedEnrollment)
+
+	challengeLogin := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
+		`{"login_name":"http.member","password":"synthetic-http-member-password"}`, authTestOrigin, "registry.example")
+	if challengeLogin.Code != http.StatusOK {
+		t.Fatalf("MFA challenge login failed: status=%d body=%s", challengeLogin.Code, challengeLogin.Body.String())
+	}
+	var challengeStage loginResponse
+	if err := json.Unmarshal(challengeLogin.Body.Bytes(), &challengeStage); err != nil {
+		t.Fatal(err)
+	}
+	if challengeStage.Stage != string(auth.StageMFAChallenge) {
+		t.Fatalf("user with active factor did not receive a challenge session: %+v", challengeStage)
+	}
+	challengeCookies := assertSessionCookies(t, challengeLogin)
+	challengeListing := authHTTPRequestWithCookies(fixture.handler, http.MethodGet,
+		"/api/v1/workspaces", "", "", "registry.example", challengeCookies, "")
+	if challengeListing.Code != http.StatusForbidden ||
+		!strings.Contains(challengeListing.Body.String(), "authentication_incomplete") {
+		t.Fatalf("MFA-challenge session accessed the workspace listing: status=%d body=%s",
+			challengeListing.Code, challengeListing.Body.String())
+	}
+
+	created := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, "/api/v1/workspaces",
+		createBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("MFA-authenticated workspace creation failed: status=%d body=%s", created.Code, created.Body.String())
+	}
+	var createdWorkspace workspaceItemResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &createdWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	if createdWorkspace.Slug != "http-created" || createdWorkspace.Role != "owner" || createdWorkspace.WorkspaceID == "" {
+		t.Fatalf("created workspace did not return owner membership: %+v", createdWorkspace)
+	}
+	staleMFATimestamp := time.Now().UTC().Add(-workspaceCreationMFAMaxAge - time.Minute).Format(time.RFC3339Nano)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_auth_sessions
+		SET mfa_verified_at = ? WHERE user_id = ? AND level = 'mfa' AND revoked_at IS NULL`,
+		staleMFATimestamp, memberID); err != nil {
+		t.Fatal(err)
+	}
+	staleMFACreation := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, "/api/v1/workspaces",
+		`{"slug":"stale-mfa","display_name":"Stale MFA"}`, authTestOrigin,
+		"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if staleMFACreation.Code != http.StatusForbidden ||
+		!strings.Contains(staleMFACreation.Body.String(), "reauthentication_required") {
+		t.Fatalf("stale MFA authentication was accepted for workspace creation: status=%d body=%s",
+			staleMFACreation.Code, staleMFACreation.Body.String())
+	}
+
+	listed = authHTTPRequestWithCookies(fixture.handler, http.MethodGet,
+		"/api/v1/workspaces", "", "", "registry.example", mfaCookies, "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("workspace relisting failed: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing.HasMore || len(listing.Workspaces) != 2 {
+		t.Fatalf("member listing did not show exactly the active membership and new owner workspace: %+v", listing)
+	}
+}
+
+func TestAuthHTTPMembershipManagementRequiresRecentMFAAndProtectsOwner(t *testing.T) {
+	fixture := newAuthHTTPFixture(t)
+	ctx := context.Background()
+	var ownerID string
+	if err := fixture.db.QueryRowContext(ctx, "SELECT user_id FROM registry_instance_admins").Scan(&ownerID); err != nil {
+		t.Fatal(err)
+	}
+
+	login := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
+		fmt.Sprintf(`{"login_name":%q,"password":%q}`, authTestLogin, authTestPassword),
+		authTestOrigin, "registry.example")
+	if login.Code != http.StatusOK {
+		t.Fatalf("administrator login failed: status=%d body=%s", login.Code, login.Body.String())
+	}
+	enrollmentCookies := assertSessionCookies(t, login)
+	startEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
+		"/api/v1/auth/mfa/enrollment", "", authTestOrigin, "registry.example",
+		enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if startEnrollment.Code != http.StatusOK {
+		t.Fatalf("administrator MFA enrollment did not start: status=%d body=%s",
+			startEnrollment.Code, startEnrollment.Body.String())
+	}
+	var enrollment enrollmentResponse
+	if err := json.Unmarshal(startEnrollment.Body.Bytes(), &enrollment); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(enrollment.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(secret)
+	completeEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
+		"/api/v1/auth/mfa/enrollment/complete",
+		fmt.Sprintf(`{"code":%q}`, authHTTPOTP(secret, time.Now().Unix()/30)),
+		authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if completeEnrollment.Code != http.StatusOK {
+		t.Fatalf("administrator MFA enrollment failed: status=%d body=%s",
+			completeEnrollment.Code, completeEnrollment.Body.String())
+	}
+	mfaCookies := assertSessionCookies(t, completeEnrollment)
+
+	workspaceResponse := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, "/api/v1/workspaces",
+		`{"slug":"membership-api","display_name":"Membership API"}`, authTestOrigin,
+		"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if workspaceResponse.Code != http.StatusCreated {
+		t.Fatalf("workspace creation failed: status=%d body=%s", workspaceResponse.Code, workspaceResponse.Body.String())
+	}
+	var createdWorkspace workspaceItemResponse
+	if err := json.Unmarshal(workspaceResponse.Body.Bytes(), &createdWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	repositoriesPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories", createdWorkspace.WorkspaceID)
+	createRepository := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, repositoriesPath,
+		`{"slug":"private-packages","display_name":"Private Packages"}`, authTestOrigin,
+		"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if createRepository.Code != http.StatusCreated {
+		t.Fatalf("MFA-authenticated repository creation failed: status=%d body=%s",
+			createRepository.Code, createRepository.Body.String())
+	}
+	var createdRepository repositoryItemResponse
+	if err := json.Unmarshal(createRepository.Body.Bytes(), &createdRepository); err != nil {
+		t.Fatal(err)
+	}
+	if createdRepository.Visibility != string(repositories.VisibilityPrivate) || createdRepository.RepositoryID == "" {
+		t.Fatalf("new repository was not private by default: %+v", createdRepository)
+	}
+	repositoryPath := repositoriesPath + "/" + createdRepository.RepositoryID
+	updateRepository := authHTTPRequestWithCookies(fixture.handler, http.MethodPatch, repositoryPath,
+		`{"display_name":"Private Package Mirror"}`, authTestOrigin, "registry.example",
+		mfaCookies, mfaCookies[csrfCookieName].Value)
+	if updateRepository.Code != http.StatusNoContent {
+		t.Fatalf("workspace owner could not update repository display name: status=%d body=%s",
+			updateRepository.Code, updateRepository.Body.String())
+	}
+	currentVisibilityPolicy := authHTTPRequestWithCookies(fixture.handler, http.MethodGet,
+		"/api/v1/admin/repository-visibility-policy", "", "", "registry.example", mfaCookies, "")
+	if currentVisibilityPolicy.Code != http.StatusOK ||
+		!strings.Contains(currentVisibilityPolicy.Body.String(), string(repositories.PolicyPrivateOnly)) {
+		t.Fatalf("initial visibility policy was unavailable or not private-only: status=%d body=%s",
+			currentVisibilityPolicy.Code, currentVisibilityPolicy.Body.String())
+	}
+	setPolicy := authHTTPRequestWithCookies(fixture.handler, http.MethodPut,
+		"/api/v1/admin/repository-visibility-policy", `{"policy":"all"}`,
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if setPolicy.Code != http.StatusNoContent {
+		t.Fatalf("instance administrator could not enable visibility modes: status=%d body=%s",
+			setPolicy.Code, setPolicy.Body.String())
+	}
+	visibilityPath := repositoryPath + "/visibility"
+	missingPublicConfirmation := authHTTPRequestWithCookies(fixture.handler, http.MethodPatch, visibilityPath,
+		`{"visibility":"listed"}`, authTestOrigin, "registry.example", mfaCookies,
+		mfaCookies[csrfCookieName].Value)
+	if missingPublicConfirmation.Code != http.StatusPreconditionFailed ||
+		!strings.Contains(missingPublicConfirmation.Body.String(), "public_visibility_confirmation_required") {
+		t.Fatalf("public visibility change did not require explicit confirmation: status=%d body=%s",
+			missingPublicConfirmation.Code, missingPublicConfirmation.Body.String())
+	}
+	setListed := authHTTPRequestWithCookies(fixture.handler, http.MethodPatch, visibilityPath,
+		`{"visibility":"listed","confirm_public":true}`, authTestOrigin,
+		"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if setListed.Code != http.StatusNoContent {
+		t.Fatalf("workspace owner could not confirm listed visibility: status=%d body=%s",
+			setListed.Code, setListed.Body.String())
+	}
+	restrictPolicy := authHTTPRequestWithCookies(fixture.handler, http.MethodPut,
+		"/api/v1/admin/repository-visibility-policy", `{"policy":"private_only"}`,
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if restrictPolicy.Code != http.StatusNoContent {
+		t.Fatalf("instance administrator could not restrict future visibility changes: status=%d body=%s",
+			restrictPolicy.Code, restrictPolicy.Body.String())
+	}
+	repositoryListing := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, repositoriesPath,
+		"", "", "registry.example", mfaCookies, "")
+	if repositoryListing.Code != http.StatusOK {
+		t.Fatalf("workspace owner could not list repositories: status=%d body=%s",
+			repositoryListing.Code, repositoryListing.Body.String())
+	}
+	var listedRepositories repositoryListResponse
+	if err := json.Unmarshal(repositoryListing.Body.Bytes(), &listedRepositories); err != nil {
+		t.Fatal(err)
+	}
+	if len(listedRepositories.Repositories) != 1 ||
+		listedRepositories.Repositories[0].Visibility != string(repositories.VisibilityListed) {
+		t.Fatalf("policy restriction silently converted an existing repository: %+v", listedRepositories)
+	}
+	setPrivate := authHTTPRequestWithCookies(fixture.handler, http.MethodPatch, visibilityPath,
+		`{"visibility":"private"}`, authTestOrigin, "registry.example", mfaCookies,
+		mfaCookies[csrfCookieName].Value)
+	if setPrivate.Code != http.StatusNoContent {
+		t.Fatalf("workspace owner could not make the repository private: status=%d body=%s",
+			setPrivate.Code, setPrivate.Body.String())
+	}
+	targetID := seedHTTPUser(t, fixture, "http.membership-target")
+	memberPath := fmt.Sprintf("/api/v1/workspaces/%s/members/%s", createdWorkspace.WorkspaceID, targetID)
+
+	targetLogin := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
+		`{"login_name":"http.membership-target","password":"synthetic-http-member-password"}`,
+		authTestOrigin, "registry.example")
+	if targetLogin.Code != http.StatusOK {
+		t.Fatalf("target user login failed: status=%d body=%s", targetLogin.Code, targetLogin.Body.String())
+	}
+	targetCookies := assertSessionCookies(t, targetLogin)
+	selfElevation := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, memberPath,
+		`{"role":"owner"}`, authTestOrigin, "registry.example", targetCookies,
+		targetCookies[csrfCookieName].Value)
+	if selfElevation.Code != http.StatusForbidden || !strings.Contains(selfElevation.Body.String(), "mfa_required") {
+		t.Fatalf("standard session changed membership: status=%d body=%s", selfElevation.Code, selfElevation.Body.String())
+	}
+
+	missingCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, memberPath,
+		`{"role":"member"}`, authTestOrigin, "registry.example", mfaCookies, "")
+	if missingCSRF.Code != http.StatusForbidden || !strings.Contains(missingCSRF.Body.String(), "csrf_failed") {
+		t.Fatalf("membership mutation accepted a missing CSRF token: status=%d body=%s",
+			missingCSRF.Code, missingCSRF.Body.String())
+	}
+	addMember := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, memberPath,
+		`{"role":"member"}`, authTestOrigin, "registry.example", mfaCookies,
+		mfaCookies[csrfCookieName].Value)
+	if addMember.Code != http.StatusNoContent {
+		t.Fatalf("owner could not add a member: status=%d body=%s", addMember.Code, addMember.Body.String())
+	}
+	grantPath := fmt.Sprintf("%s/grants/%s/reader", repositoryPath, targetID)
+	missingGrantCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, grantPath,
+		"", authTestOrigin, "registry.example", mfaCookies, "")
+	if missingGrantCSRF.Code != http.StatusForbidden || !strings.Contains(missingGrantCSRF.Body.String(), "csrf_failed") {
+		t.Fatalf("repository grant mutation accepted a missing CSRF token: status=%d body=%s",
+			missingGrantCSRF.Code, missingGrantCSRF.Body.String())
+	}
+	grantReader := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, grantPath,
+		"", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if grantReader.Code != http.StatusOK {
+		t.Fatalf("owner could not explicitly grant reader: status=%d body=%s", grantReader.Code, grantReader.Body.String())
+	}
+	var grantResponse repositoryGrantItemResponse
+	if err := json.Unmarshal(grantReader.Body.Bytes(), &grantResponse); err != nil {
+		t.Fatal(err)
+	}
+	if grantResponse.UserID != targetID || grantResponse.Role != string(repositories.GrantReader) || grantResponse.GrantID == "" {
+		t.Fatalf("repository grant endpoint returned an unexpected grant: %+v", grantResponse)
+	}
+	duplicateGrant := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, grantPath,
+		"", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if duplicateGrant.Code != http.StatusOK || !strings.Contains(duplicateGrant.Body.String(), grantResponse.GrantID) {
+		t.Fatalf("repeated grant request was not idempotent: status=%d body=%s", duplicateGrant.Code, duplicateGrant.Body.String())
+	}
+	grantListingPath := repositoryPath + "/grants"
+	grantListing := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, grantListingPath,
+		"", "", "registry.example", mfaCookies, "")
+	if grantListing.Code != http.StatusOK || !strings.Contains(grantListing.Body.String(), grantResponse.GrantID) {
+		t.Fatalf("workspace owner could not list repository grants: status=%d body=%s",
+			grantListing.Code, grantListing.Body.String())
+	}
+	memberGrantListing := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, grantListingPath,
+		"", "", "registry.example", targetCookies, "")
+	if memberGrantListing.Code != http.StatusForbidden {
+		t.Fatalf("ordinary member listed repository grants: status=%d body=%s",
+			memberGrantListing.Code, memberGrantListing.Body.String())
+	}
+	revokeReader := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, grantPath,
+		"", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if revokeReader.Code != http.StatusNoContent {
+		t.Fatalf("owner could not revoke reader grant: status=%d body=%s", revokeReader.Code, revokeReader.Body.String())
+	}
+	if allowed, err := fixture.repositoryService.HasRepositoryGrant(
+		ctx, targetID, createdWorkspace.WorkspaceID, createdRepository.RepositoryID, repositories.GrantReader); err != nil || allowed {
+		t.Fatalf("revoked HTTP grant remained effective: allowed=%t err=%v", allowed, err)
+	}
+	grantAdministrator := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, memberPath,
+		`{"role":"administrator"}`, authTestOrigin, "registry.example", mfaCookies,
+		mfaCookies[csrfCookieName].Value)
+	if grantAdministrator.Code != http.StatusNoContent {
+		t.Fatalf("owner could not change a membership role: status=%d body=%s",
+			grantAdministrator.Code, grantAdministrator.Body.String())
+	}
+
+	lastOwnerRemoval := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete,
+		fmt.Sprintf("/api/v1/workspaces/%s/members/%s", createdWorkspace.WorkspaceID, ownerID),
+		"", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if lastOwnerRemoval.Code != http.StatusConflict || !strings.Contains(lastOwnerRemoval.Body.String(), "last_owner_required") {
+		t.Fatalf("last owner was removed: status=%d body=%s", lastOwnerRemoval.Code, lastOwnerRemoval.Body.String())
+	}
+
+	staleMFATimestamp := time.Now().UTC().Add(-workspaceCreationMFAMaxAge - time.Minute).Format(time.RFC3339Nano)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_auth_sessions
+		SET mfa_verified_at = ? WHERE user_id = ? AND level = 'mfa' AND revoked_at IS NULL`,
+		staleMFATimestamp, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	staleMutation := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, memberPath,
+		"", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if staleMutation.Code != http.StatusForbidden ||
+		!strings.Contains(staleMutation.Body.String(), "reauthentication_required") {
+		t.Fatalf("stale MFA session changed a membership: status=%d body=%s",
+			staleMutation.Code, staleMutation.Body.String())
+	}
+
+	var currentRole string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT role FROM registry_workspace_memberships
+		WHERE workspace_id = ? AND user_id = ?`, createdWorkspace.WorkspaceID, targetID).Scan(&currentRole); err != nil {
+		t.Fatal(err)
+	}
+	if currentRole != workspaces.RoleAdministrator {
+		t.Fatalf("stale membership request changed the persisted role: %q", currentRole)
+	}
+	if err := fixture.workspaceService.SetMembershipRole(ctx, ownerID, createdWorkspace.WorkspaceID,
+		targetID, workspaces.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	memberRepositoryList := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, repositoriesPath,
+		"", "", "registry.example", targetCookies, "")
+	if memberRepositoryList.Code != http.StatusForbidden {
+		t.Fatalf("workspace membership alone granted repository metadata access: status=%d body=%s",
+			memberRepositoryList.Code, memberRepositoryList.Body.String())
+	}
+	memberPolicyRead := authHTTPRequestWithCookies(fixture.handler, http.MethodGet,
+		"/api/v1/admin/repository-visibility-policy", "", "", "registry.example", targetCookies, "")
+	if memberPolicyRead.Code != http.StatusForbidden {
+		t.Fatalf("non-administrator read installation visibility policy: status=%d body=%s",
+			memberPolicyRead.Code, memberPolicyRead.Body.String())
 	}
 }
 
@@ -448,6 +914,32 @@ func authHTTPRequestWithCookies(
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func seedHTTPUser(t *testing.T, fixture authHTTPFixture, loginName string) string {
+	t.Helper()
+	userID, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwordValue := []byte("synthetic-http-member-password")
+	passwordHash, err := password.Hash(passwordValue)
+	clear(passwordValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := fixture.db.Exec(`INSERT INTO registry_users
+		(user_id, display_name, email, email_verified, status, created_at, updated_at)
+		VALUES (?, ?, NULL, 0, 'active', ?, ?)`, userID.String(), "Synthetic HTTP Member", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.Exec(`INSERT INTO registry_local_credentials
+		(user_id, login_name, password_hash, created_at, updated_at, password_changed_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, userID.String(), loginName, passwordHash, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	return userID.String()
 }
 
 func assertSessionCookies(t *testing.T, response *httptest.ResponseRecorder) map[string]*http.Cookie {

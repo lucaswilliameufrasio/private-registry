@@ -153,6 +153,54 @@ func TestMFAEnrollmentChallengeAndTOTPCompletion(t *testing.T) {
 	}
 }
 
+func TestStandardSessionMustStepDownBeforeVoluntaryMFAEnrollment(t *testing.T) {
+	fixture := newSQLiteFixture(t)
+	fixture.addAccount(t, "voluntary.user", "active", false, "")
+	ctx := context.Background()
+	login, err := fixture.service.Login(ctx, "voluntary.user", fixture.password, "192.0.2.70")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login.Credentials.Session.Level != sessions.LevelStandard {
+		t.Fatalf("ordinary user did not receive a standard session: %+v", login.Credentials.Session)
+	}
+
+	started, err := fixture.service.BeginVoluntaryMFAEnrollment(ctx, login.Credentials.BearerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Credentials.Session.Level != sessions.LevelEnrollmentOnly || started.Enrollment.Secret == "" {
+		t.Fatalf("voluntary enrollment did not return a restricted session and pending factor: %+v", started)
+	}
+	if _, err := fixture.service.ValidateSession(ctx, login.Credentials.BearerToken); !errors.Is(err, sessions.ErrSessionUnavailable) {
+		t.Fatalf("pre-enrollment standard bearer remained valid: %v", err)
+	}
+	repeatedEnrollment, err := fixture.service.BeginMFAEnrollment(ctx, started.Credentials.BearerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedEnrollment.Secret != started.Enrollment.Secret {
+		t.Fatal("restricted enrollment session did not retain its pending factor")
+	}
+
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(started.Enrollment.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(secret)
+	code := generateTOTPCode(secret, time.Now().Unix()/30)
+	completed, err := fixture.service.CompleteMFAEnrollment(ctx, started.Credentials.BearerToken, code, "192.0.2.70")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Credentials.Session.Level != sessions.LevelMFA || len(completed.RecoveryCodes) != 10 {
+		t.Fatalf("voluntary enrollment did not produce a full MFA session: %+v", completed)
+	}
+	if _, err := fixture.service.BeginVoluntaryMFAEnrollment(ctx, completed.Credentials.BearerToken); !errors.Is(err, ErrRejected) {
+		t.Fatalf("session with an active MFA factor started another initial enrollment: %v", err)
+	}
+}
+
 func TestPasswordHashAdmissionRejectsExcessConcurrencyWithoutQueue(t *testing.T) {
 	fixture := newSQLiteFixture(t)
 	service := fixture.service

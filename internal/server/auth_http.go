@@ -14,15 +14,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"private-registry/internal/auth"
+	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
+	"private-registry/internal/workspaces"
 )
 
 const (
 	maxAuthRequestBytes        = 8 << 10
 	maxForwardedForHeaderBytes = 2048
+	workspaceCreationMFAMaxAge = 5 * time.Minute
 	sessionCookieName          = "__Host-registry-session"
 	csrfCookieName             = "__Host-registry-csrf"
 	csrfHeaderName             = "X-CSRF-Token"
@@ -35,6 +39,8 @@ type AuthHTTPConfig struct {
 
 type authHTTP struct {
 	service         *auth.Service
+	workspaces      *workspaces.Service
+	repositories    *repositories.Service
 	canonicalOrigin string
 	trustedProxies  []netip.Prefix
 }
@@ -63,16 +69,95 @@ type enrollmentCompletionResponse struct {
 	RecoveryCodes []string `json:"recovery_codes"`
 }
 
+type workspaceCreateRequest struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+}
+
+type workspaceMembershipRequest struct {
+	Role string `json:"role"`
+}
+
+type repositoryCreateRequest struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+}
+
+type repositoryUpdateRequest struct {
+	DisplayName string `json:"display_name"`
+}
+
+type repositoryVisibilityRequest struct {
+	Visibility    string `json:"visibility"`
+	ConfirmPublic bool   `json:"confirm_public"`
+}
+
+type repositoryVisibilityPolicyRequest struct {
+	Policy string `json:"policy"`
+}
+
+type workspaceItemResponse struct {
+	WorkspaceID string `json:"workspace_id"`
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+}
+
+type workspaceListResponse struct {
+	Workspaces []workspaceItemResponse `json:"workspaces"`
+	HasMore    bool                    `json:"has_more"`
+	NextCursor string                  `json:"next_cursor,omitempty"`
+}
+
+type repositoryItemResponse struct {
+	RepositoryID string `json:"repository_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	Slug         string `json:"slug"`
+	DisplayName  string `json:"display_name"`
+	Visibility   string `json:"visibility"`
+}
+
+type repositoryListResponse struct {
+	Repositories []repositoryItemResponse `json:"repositories"`
+	HasMore      bool                     `json:"has_more"`
+	NextCursor   string                   `json:"next_cursor,omitempty"`
+}
+
+type repositoryVisibilityPolicyResponse struct {
+	Policy string `json:"policy"`
+}
+
+type repositoryGrantItemResponse struct {
+	GrantID      string `json:"grant_id"`
+	RepositoryID string `json:"repository_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	UserID       string `json:"user_id"`
+	Role         string `json:"role"`
+	GrantedBy    string `json:"granted_by"`
+	GrantedAt    string `json:"granted_at"`
+}
+
+type repositoryGrantListResponse struct {
+	Grants     []repositoryGrantItemResponse `json:"grants"`
+	HasMore    bool                          `json:"has_more"`
+	NextCursor string                        `json:"next_cursor,omitempty"`
+}
+
 type apiErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// NewHandler composes health probes with the narrow, public authentication
-// routes. It deliberately registers no workspace, administrative, or content
-// routes; those remain unavailable until authorization is implemented.
-func NewHandler(health *Health, service *auth.Service, cfg AuthHTTPConfig) (http.Handler, error) {
-	if health == nil || service == nil {
-		return nil, errors.New("health and authentication services are required")
+// NewHandler composes health probes with authentication and narrowly scoped
+// workspace/repository administration. No package or content routes exist yet.
+func NewHandler(
+	health *Health,
+	service *auth.Service,
+	workspaceService *workspaces.Service,
+	repositoryService *repositories.Service,
+	cfg AuthHTTPConfig,
+) (http.Handler, error) {
+	if health == nil || service == nil || workspaceService == nil || repositoryService == nil {
+		return nil, errors.New("health, authentication, workspace, and repository services are required")
 	}
 	canonicalOrigin, err := normalizeOrigin(cfg.CanonicalOrigin)
 	if err != nil {
@@ -88,6 +173,8 @@ func NewHandler(health *Health, service *auth.Service, cfg AuthHTTPConfig) (http
 	health.registerRoutes(router)
 	authentication := &authHTTP{
 		service:         service,
+		workspaces:      workspaceService,
+		repositories:    repositoryService,
 		canonicalOrigin: canonicalOrigin,
 		trustedProxies:  append([]netip.Prefix(nil), cfg.TrustedProxies...),
 	}
@@ -98,9 +185,23 @@ func NewHandler(health *Health, service *auth.Service, cfg AuthHTTPConfig) (http
 func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Post("/api/v1/auth/login", h.login)
 	router.Post("/api/v1/auth/mfa/enrollment", h.beginMFAEnrollment)
+	router.Post("/api/v1/auth/mfa/enrollment/start", h.beginVoluntaryMFAEnrollment)
 	router.Post("/api/v1/auth/mfa/enrollment/complete", h.completeMFAEnrollment)
 	router.Post("/api/v1/auth/mfa/challenge", h.completeMFAChallenge)
 	router.Post("/api/v1/auth/logout", h.logout)
+	router.Get("/api/v1/workspaces", h.listWorkspaces)
+	router.Post("/api/v1/workspaces", h.createWorkspace)
+	router.Put("/api/v1/workspaces/{workspaceID}/members/{userID}", h.setWorkspaceMembership)
+	router.Delete("/api/v1/workspaces/{workspaceID}/members/{userID}", h.removeWorkspaceMembership)
+	router.Get("/api/v1/workspaces/{workspaceID}/repositories", h.listRepositories)
+	router.Post("/api/v1/workspaces/{workspaceID}/repositories", h.createRepository)
+	router.Patch("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}", h.updateRepository)
+	router.Patch("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/visibility", h.setRepositoryVisibility)
+	router.Get("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/grants", h.listRepositoryGrants)
+	router.Put("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/grants/{userID}/{role}", h.grantRepositoryRole)
+	router.Delete("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/grants/{userID}/{role}", h.revokeRepositoryRole)
+	router.Get("/api/v1/admin/repository-visibility-policy", h.getRepositoryVisibilityPolicy)
+	router.Put("/api/v1/admin/repository-visibility-policy", h.setRepositoryVisibilityPolicy)
 }
 
 func (h *authHTTP) login(response http.ResponseWriter, request *http.Request) {
@@ -157,6 +258,27 @@ func (h *authHTTP) beginMFAEnrollment(response http.ResponseWriter, request *htt
 		Secret:     enrollment.Secret,
 		OTPAuthURL: enrollment.OTPAuthURL,
 		ExpiresAt:  enrollment.ExpiresAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+	})
+}
+
+func (h *authHTTP) beginVoluntaryMFAEnrollment(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	bearerToken, _, _, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	started, err := h.service.BeginVoluntaryMFAEnrollment(request.Context(), bearerToken)
+	if err != nil {
+		writeServiceError(response, err)
+		return
+	}
+	setSessionCookies(response, started.Credentials)
+	writeJSON(response, http.StatusOK, enrollmentResponse{
+		Secret:     started.Enrollment.Secret,
+		OTPAuthURL: started.Enrollment.OTPAuthURL,
+		ExpiresAt:  started.Enrollment.ExpiresAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	})
 }
 
@@ -227,6 +349,367 @@ func (h *authHTTP) completeMFAChallenge(response http.ResponseWriter, request *h
 	writeJSON(response, http.StatusOK, loginResponse{Stage: string(auth.StageAuthenticated)})
 }
 
+func (h *authHTTP) listWorkspaces(response http.ResponseWriter, request *http.Request) {
+	session, ok := h.validateAuthenticatedSession(response, request)
+	if !ok {
+		return
+	}
+	afterWorkspaceID, pageSize, valid := parseWorkspaceListQuery(request)
+	if !valid {
+		writeAPIError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	memberships, hasMore, err := h.workspaces.ListForUser(
+		request.Context(), session.UserID, afterWorkspaceID, pageSize)
+	if err != nil {
+		writeWorkspaceError(response, err)
+		return
+	}
+	items := make([]workspaceItemResponse, 0, len(memberships))
+	for _, membership := range memberships {
+		items = append(items, workspaceItemResponse{
+			WorkspaceID: membership.Workspace.ID,
+			Slug:        membership.Workspace.Slug,
+			DisplayName: membership.Workspace.DisplayName,
+			Role:        membership.Role,
+		})
+	}
+	result := workspaceListResponse{Workspaces: items, HasMore: hasMore}
+	if hasMore && len(memberships) > 0 {
+		result.NextCursor = memberships[len(memberships)-1].Workspace.ID
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (h *authHTTP) createWorkspace(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload workspaceCreateRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	workspace, err := h.workspaces.CreateWorkspace(request.Context(), session.UserID, payload.Slug, payload.DisplayName)
+	if err != nil {
+		writeWorkspaceError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, workspaceItemResponse{
+		WorkspaceID: workspace.ID,
+		Slug:        workspace.Slug,
+		DisplayName: workspace.DisplayName,
+		Role:        "owner",
+	})
+}
+
+func (h *authHTTP) setWorkspaceMembership(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload workspaceMembershipRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	if err := h.workspaces.SetMembershipRole(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "userID"), payload.Role); err != nil {
+		writeWorkspaceError(response, err)
+		return
+	}
+	writeNoContent(response)
+}
+
+func (h *authHTTP) removeWorkspaceMembership(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	if err := h.workspaces.RemoveMembership(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "userID")); err != nil {
+		writeWorkspaceError(response, err)
+		return
+	}
+	writeNoContent(response)
+}
+
+func (h *authHTTP) listRepositories(response http.ResponseWriter, request *http.Request) {
+	session, ok := h.validateAuthenticatedSession(response, request)
+	if !ok {
+		return
+	}
+	workspaceID := chi.URLParam(request, "workspaceID")
+	afterRepositoryID, pageSize, valid := parseRepositoryListQuery(request)
+	if !valid {
+		writeAPIError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	items, hasMore, err := h.repositories.ListForWorkspace(
+		request.Context(), session.UserID, workspaceID, afterRepositoryID, pageSize)
+	if err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	result := repositoryListResponse{
+		Repositories: make([]repositoryItemResponse, 0, len(items)),
+		HasMore:      hasMore,
+	}
+	for _, repository := range items {
+		result.Repositories = append(result.Repositories, repositoryItemResponse{
+			RepositoryID: repository.ID,
+			WorkspaceID:  repository.WorkspaceID,
+			Slug:         repository.Slug,
+			DisplayName:  repository.DisplayName,
+			Visibility:   string(repository.Visibility),
+		})
+	}
+	if hasMore && len(items) > 0 {
+		result.NextCursor = items[len(items)-1].ID
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (h *authHTTP) createRepository(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload repositoryCreateRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	repository, err := h.repositories.Create(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), payload.Slug, payload.DisplayName)
+	if err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, repositoryItemResponse{
+		RepositoryID: repository.ID,
+		WorkspaceID:  repository.WorkspaceID,
+		Slug:         repository.Slug,
+		DisplayName:  repository.DisplayName,
+		Visibility:   string(repository.Visibility),
+	})
+}
+
+func (h *authHTTP) updateRepository(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload repositoryUpdateRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	if err := h.repositories.UpdateDisplayName(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"), payload.DisplayName); err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeNoContent(response)
+}
+
+func (h *authHTTP) setRepositoryVisibility(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload repositoryVisibilityRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	if err := h.repositories.SetVisibility(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"),
+		repositories.Visibility(payload.Visibility), payload.ConfirmPublic); err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeNoContent(response)
+}
+
+func (h *authHTTP) listRepositoryGrants(response http.ResponseWriter, request *http.Request) {
+	session, ok := h.validateAuthenticatedSession(response, request)
+	if !ok {
+		return
+	}
+	afterGrantID, pageSize, valid := parseRepositoryGrantListQuery(request)
+	if !valid {
+		writeAPIError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	grants, hasMore, err := h.repositories.ListRepositoryGrants(
+		request.Context(), session.UserID, chi.URLParam(request, "workspaceID"),
+		chi.URLParam(request, "repositoryID"), afterGrantID, pageSize)
+	if err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	result := repositoryGrantListResponse{
+		Grants:  make([]repositoryGrantItemResponse, 0, len(grants)),
+		HasMore: hasMore,
+	}
+	for _, grant := range grants {
+		result.Grants = append(result.Grants, repositoryGrantItemResponse{
+			GrantID:      grant.ID,
+			RepositoryID: grant.RepositoryID,
+			WorkspaceID:  grant.WorkspaceID,
+			UserID:       grant.UserID,
+			Role:         string(grant.Role),
+			GrantedBy:    grant.GrantedBy,
+			GrantedAt:    grant.GrantedAt.Format(time.RFC3339Nano),
+		})
+	}
+	if hasMore && len(grants) > 0 {
+		result.NextCursor = grants[len(grants)-1].ID
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (h *authHTTP) grantRepositoryRole(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	grant, err := h.repositories.GrantRepositoryRole(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"),
+		chi.URLParam(request, "userID"), repositories.GrantRole(chi.URLParam(request, "role")))
+	if err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, repositoryGrantItemResponse{
+		GrantID:      grant.ID,
+		RepositoryID: grant.RepositoryID,
+		WorkspaceID:  grant.WorkspaceID,
+		UserID:       grant.UserID,
+		Role:         string(grant.Role),
+		GrantedBy:    grant.GrantedBy,
+		GrantedAt:    grant.GrantedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (h *authHTTP) revokeRepositoryRole(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	if err := h.repositories.RevokeRepositoryRole(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"),
+		chi.URLParam(request, "userID"), repositories.GrantRole(chi.URLParam(request, "role"))); err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeNoContent(response)
+}
+
+func (h *authHTTP) getRepositoryVisibilityPolicy(response http.ResponseWriter, request *http.Request) {
+	session, ok := h.validateAuthenticatedSession(response, request)
+	if !ok {
+		return
+	}
+	policy, err := h.repositories.VisibilityPolicy(request.Context(), session.UserID)
+	if err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, repositoryVisibilityPolicyResponse{Policy: string(policy)})
+}
+
+func (h *authHTTP) setRepositoryVisibilityPolicy(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload repositoryVisibilityPolicyRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	if err := h.repositories.SetVisibilityPolicy(request.Context(), session.UserID,
+		repositories.VisibilityPolicy(payload.Policy)); err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeNoContent(response)
+}
+
+func requireRecentMFA(response http.ResponseWriter, session sessions.Session) bool {
+	if session.Level != sessions.LevelMFA {
+		writeAPIError(response, http.StatusForbidden, "mfa_required")
+		return false
+	}
+	if session.MFAAuthenticatedAt == nil {
+		writeAPIError(response, http.StatusForbidden, "reauthentication_required")
+		return false
+	}
+	mfaAge := time.Since(*session.MFAAuthenticatedAt)
+	if mfaAge < 0 || mfaAge >= workspaceCreationMFAMaxAge {
+		writeAPIError(response, http.StatusForbidden, "reauthentication_required")
+		return false
+	}
+	return true
+}
+
 func (h *authHTTP) logout(response http.ResponseWriter, request *http.Request) {
 	if !h.requireCanonicalRequest(response, request) {
 		return
@@ -263,21 +746,51 @@ func (h *authHTTP) validateBrowserSession(
 	response http.ResponseWriter,
 	request *http.Request,
 ) (string, string, bool) {
+	bearerToken, csrfToken, _, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	return bearerToken, csrfToken, ok
+}
+
+func (h *authHTTP) validateBrowserSessionWithPrincipal(
+	response http.ResponseWriter,
+	request *http.Request,
+) (string, string, sessions.Session, bool) {
 	bearerToken, found, err := uniqueCookie(request, sessionCookieName)
 	if err != nil || !found {
 		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
-		return "", "", false
+		return "", "", sessions.Session{}, false
 	}
 	csrfToken, found, err := uniqueCookie(request, csrfCookieName)
 	if err != nil || !found || !requestCSRFHeaderMatches(request, csrfToken) {
 		writeAPIError(response, http.StatusForbidden, "csrf_failed")
-		return "", "", false
+		return "", "", sessions.Session{}, false
 	}
-	if _, err := h.service.ValidateWithCSRF(request.Context(), bearerToken, csrfToken); err != nil {
+	session, err := h.service.ValidateWithCSRF(request.Context(), bearerToken, csrfToken)
+	if err != nil {
 		writeServiceError(response, err)
-		return "", "", false
+		return "", "", sessions.Session{}, false
 	}
-	return bearerToken, csrfToken, true
+	return bearerToken, csrfToken, session, true
+}
+
+func (h *authHTTP) validateAuthenticatedSession(
+	response http.ResponseWriter,
+	request *http.Request,
+) (sessions.Session, bool) {
+	bearerToken, found, err := uniqueCookie(request, sessionCookieName)
+	if err != nil || !found {
+		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
+		return sessions.Session{}, false
+	}
+	session, err := h.service.ValidateSession(request.Context(), bearerToken)
+	if err != nil {
+		writeServiceError(response, err)
+		return sessions.Session{}, false
+	}
+	if session.Level != sessions.LevelStandard && session.Level != sessions.LevelMFA {
+		writeAPIError(response, http.StatusForbidden, "authentication_incomplete")
+		return sessions.Session{}, false
+	}
+	return session, true
 }
 
 func (h *authHTTP) requireCanonicalRequest(response http.ResponseWriter, request *http.Request) bool {
@@ -386,6 +899,142 @@ func requestErrorCode(status int) string {
 		return "request_too_large"
 	}
 	return "invalid_request"
+}
+
+func parseWorkspaceListQuery(request *http.Request) (string, int, bool) {
+	const defaultPageSize = 50
+	query := request.URL.Query()
+	for name, values := range query {
+		if (name != "after_workspace_id" && name != "limit") || len(values) != 1 {
+			return "", 0, false
+		}
+	}
+	afterWorkspaceID := ""
+	if values, exists := query["after_workspace_id"]; exists {
+		afterWorkspaceID = values[0]
+		if strings.TrimSpace(afterWorkspaceID) == "" {
+			return "", 0, false
+		}
+	}
+	pageSize := defaultPageSize
+	if values, exists := query["limit"]; exists {
+		parsedPageSize, err := strconv.Atoi(values[0])
+		if err != nil || parsedPageSize < 1 || parsedPageSize > 100 {
+			return "", 0, false
+		}
+		pageSize = parsedPageSize
+	}
+	return afterWorkspaceID, pageSize, true
+}
+
+func parseRepositoryListQuery(request *http.Request) (string, int, bool) {
+	const defaultPageSize = 50
+	query := request.URL.Query()
+	for name, values := range query {
+		if (name != "after_repository_id" && name != "limit") || len(values) != 1 {
+			return "", 0, false
+		}
+	}
+	afterRepositoryID := ""
+	if values, exists := query["after_repository_id"]; exists {
+		afterRepositoryID = values[0]
+		if strings.TrimSpace(afterRepositoryID) == "" {
+			return "", 0, false
+		}
+	}
+	pageSize := defaultPageSize
+	if values, exists := query["limit"]; exists {
+		parsedPageSize, err := strconv.Atoi(values[0])
+		if err != nil || parsedPageSize < 1 || parsedPageSize > 100 {
+			return "", 0, false
+		}
+		pageSize = parsedPageSize
+	}
+	return afterRepositoryID, pageSize, true
+}
+
+func parseRepositoryGrantListQuery(request *http.Request) (string, int, bool) {
+	const defaultPageSize = 50
+	query := request.URL.Query()
+	for name, values := range query {
+		if (name != "after_grant_id" && name != "limit") || len(values) != 1 {
+			return "", 0, false
+		}
+	}
+	afterGrantID := ""
+	if values, exists := query["after_grant_id"]; exists {
+		afterGrantID = values[0]
+		if strings.TrimSpace(afterGrantID) == "" {
+			return "", 0, false
+		}
+	}
+	pageSize := defaultPageSize
+	if values, exists := query["limit"]; exists {
+		parsedPageSize, err := strconv.Atoi(values[0])
+		if err != nil || parsedPageSize < 1 || parsedPageSize > 100 {
+			return "", 0, false
+		}
+		pageSize = parsedPageSize
+	}
+	return afterGrantID, pageSize, true
+}
+
+func writeWorkspaceError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, workspaces.ErrUnauthenticated):
+		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
+	case errors.Is(err, workspaces.ErrForbidden):
+		writeAPIError(response, http.StatusForbidden, "forbidden")
+	case errors.Is(err, workspaces.ErrInvalidSlug),
+		errors.Is(err, workspaces.ErrInvalidName),
+		errors.Is(err, workspaces.ErrInvalidWorkspaceID),
+		errors.Is(err, workspaces.ErrInvalidMembershipRole),
+		errors.Is(err, workspaces.ErrInvalidCursor),
+		errors.Is(err, workspaces.ErrInvalidPageSize):
+		writeAPIError(response, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, workspaces.ErrSlugConflict):
+		writeAPIError(response, http.StatusConflict, "workspace_slug_conflict")
+	case errors.Is(err, workspaces.ErrLastOwner):
+		writeAPIError(response, http.StatusConflict, "last_owner_required")
+	case errors.Is(err, workspaces.ErrSelfElevation):
+		writeAPIError(response, http.StatusForbidden, "self_elevation_forbidden")
+	case errors.Is(err, workspaces.ErrMembershipUnavailable):
+		writeAPIError(response, http.StatusNotFound, "membership_unavailable")
+	default:
+		writeAPIError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	}
+}
+
+func writeRepositoryError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, repositories.ErrUnauthenticated):
+		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
+	case errors.Is(err, repositories.ErrForbidden):
+		writeAPIError(response, http.StatusForbidden, "forbidden")
+	case errors.Is(err, repositories.ErrInvalidWorkspaceID),
+		errors.Is(err, repositories.ErrInvalidRepositoryID),
+		errors.Is(err, repositories.ErrInvalidSlug),
+		errors.Is(err, repositories.ErrInvalidName),
+		errors.Is(err, repositories.ErrInvalidPageSize),
+		errors.Is(err, repositories.ErrInvalidGrantRole),
+		errors.Is(err, repositories.ErrInvalidGrantCursor),
+		errors.Is(err, repositories.ErrInvalidGrantPageSize),
+		errors.Is(err, repositories.ErrInvalidVisibility),
+		errors.Is(err, repositories.ErrInvalidVisibilityPolicy):
+		writeAPIError(response, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, repositories.ErrSlugConflict):
+		writeAPIError(response, http.StatusConflict, "repository_slug_conflict")
+	case errors.Is(err, repositories.ErrVisibilityNotAllowed):
+		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
+	case errors.Is(err, repositories.ErrPublicConfirmation):
+		writeAPIError(response, http.StatusPreconditionFailed, "public_visibility_confirmation_required")
+	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable):
+		writeAPIError(response, http.StatusNotFound, "resource_unavailable")
+	case errors.Is(err, repositories.ErrMembershipUnavailable):
+		writeAPIError(response, http.StatusNotFound, "membership_unavailable")
+	default:
+		writeAPIError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	}
 }
 
 func writeServiceError(response http.ResponseWriter, err error) {

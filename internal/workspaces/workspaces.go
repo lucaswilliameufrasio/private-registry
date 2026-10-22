@@ -24,15 +24,28 @@ const (
 )
 
 var (
-	ErrUnauthenticated = errors.New("authenticated user is required")
-	ErrForbidden       = errors.New("operation is not permitted")
-	ErrInvalidSlug     = errors.New("workspace slug is invalid")
-	ErrInvalidName     = errors.New("workspace display name is invalid")
-	ErrInvalidPolicy   = errors.New("workspace creation policy is invalid")
-	ErrSlugConflict    = errors.New("workspace slug is already reserved")
-	ErrUserUnavailable = errors.New("user is unavailable")
+	ErrUnauthenticated       = errors.New("authenticated user is required")
+	ErrForbidden             = errors.New("operation is not permitted")
+	ErrInvalidSlug           = errors.New("workspace slug is invalid")
+	ErrInvalidName           = errors.New("workspace display name is invalid")
+	ErrInvalidPolicy         = errors.New("workspace creation policy is invalid")
+	ErrInvalidCursor         = errors.New("workspace cursor is invalid")
+	ErrInvalidPageSize       = errors.New("workspace page size is invalid")
+	ErrSlugConflict          = errors.New("workspace slug is already reserved")
+	ErrUserUnavailable       = errors.New("user is unavailable")
+	ErrInvalidWorkspaceID    = errors.New("workspace identity is invalid")
+	ErrInvalidMembershipRole = errors.New("workspace membership role is invalid")
+	ErrMembershipUnavailable = errors.New("workspace membership is unavailable")
+	ErrLastOwner             = errors.New("workspace must retain an active owner")
+	ErrSelfElevation         = errors.New("users cannot elevate their own membership")
 
 	workspaceSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+)
+
+const (
+	RoleOwner         = "owner"
+	RoleAdministrator = "administrator"
+	RoleMember        = "member"
 )
 
 type Workspace struct {
@@ -43,6 +56,13 @@ type Workspace struct {
 	CreatedBy   string
 	CreatedAt   time.Time
 }
+
+type Membership struct {
+	Workspace Workspace
+	Role      string
+}
+
+const maxWorkspacePageSize = 100
 
 type Service struct {
 	db     *sql.DB
@@ -271,6 +291,275 @@ func (s *Service) CreateWorkspace(
 	return workspace, nil
 }
 
+// SetMembershipRole creates, reactivates, or changes a membership for an
+// active user. Owners may assign any role; administrators may only delegate
+// the member role and cannot elevate their own membership.
+func (s *Service) SetMembershipRole(
+	ctx context.Context,
+	actorUserID string,
+	workspaceID string,
+	targetUserID string,
+	targetRole string,
+) error {
+	if ctx == nil {
+		return errors.New("workspace membership context is required")
+	}
+	actorID, err := parseUserID(actorUserID)
+	if err != nil {
+		return ErrUnauthenticated
+	}
+	workspaceID, err = parseWorkspaceID(workspaceID)
+	if err != nil {
+		return ErrInvalidWorkspaceID
+	}
+	targetID, err := parseUserID(targetUserID)
+	if err != nil {
+		return ErrUserUnavailable
+	}
+	if !validMembershipRole(targetRole) {
+		return ErrInvalidMembershipRole
+	}
+
+	return s.withWriteTransaction(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveUser(ctx, tx, s.driver, actorID); err != nil {
+			return err
+		}
+		actorRole, err := activeWorkspaceRole(ctx, tx, s.driver, workspaceID, actorID)
+		if err != nil {
+			return err
+		}
+		if actorRole != RoleOwner && actorRole != RoleAdministrator {
+			return ErrForbidden
+		}
+		if actorID == targetID && membershipRoleRank(targetRole) > membershipRoleRank(actorRole) {
+			return ErrSelfElevation
+		}
+		if actorRole == RoleAdministrator && targetRole != RoleMember {
+			return ErrForbidden
+		}
+		if err := requireActiveUser(ctx, tx, s.driver, targetID); err != nil {
+			return ErrUserUnavailable
+		}
+
+		currentRole, currentStatus, membershipExists, err := readMembership(ctx, tx, s.driver, workspaceID, targetID)
+		if err != nil {
+			return errors.New("workspace membership could not be read")
+		}
+		if membershipExists && currentStatus == "suspended" {
+			return ErrMembershipUnavailable
+		}
+		if actorRole == RoleAdministrator && membershipExists && currentRole != RoleMember {
+			return ErrForbidden
+		}
+		if membershipExists && currentStatus == "active" && currentRole == RoleOwner && targetRole != RoleOwner {
+			ownerCount, err := countActiveOwners(ctx, tx, s.driver, workspaceID)
+			if err != nil {
+				return errors.New("active workspace owners could not be counted")
+			}
+			if ownerCount <= 1 {
+				return ErrLastOwner
+			}
+		}
+		if membershipExists && currentStatus == "active" && currentRole == targetRole {
+			return nil
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if !membershipExists {
+			query := `INSERT INTO registry_workspace_memberships
+				(workspace_id, user_id, role, status, created_by, created_at, updated_at)
+				VALUES (` + bind(s.driver, 1) + `, ` + bind(s.driver, 2) + `, ` + bind(s.driver, 3) + `, 'active', ` + bind(s.driver, 4) + `, ` + bind(s.driver, 5) + `, ` + bind(s.driver, 6) + `)`
+			if _, err := tx.ExecContext(ctx, query,
+				workspaceID, targetID, targetRole, actorID, now, now); err != nil {
+				return errors.New("workspace membership could not be created")
+			}
+		} else {
+			query := `UPDATE registry_workspace_memberships SET role = ` + bind(s.driver, 1) + `,
+				status = 'active', updated_at = ` + bind(s.driver, 2) + `
+				WHERE workspace_id = ` + bind(s.driver, 3) + ` AND user_id = ` + bind(s.driver, 4)
+			if _, err := tx.ExecContext(ctx, query, targetRole, now, workspaceID, targetID); err != nil {
+				return errors.New("workspace membership could not be updated")
+			}
+		}
+		return recordAudit(ctx, tx, s.driver, actorID, "workspace.membership.changed",
+			"workspace_membership", workspaceID+"/"+targetID)
+	})
+}
+
+// RemoveMembership revokes an active membership. Members may leave; workspace
+// owners and administrators may remove ordinary members, while only owners
+// may remove elevated roles. The last active owner cannot leave or be removed.
+func (s *Service) RemoveMembership(
+	ctx context.Context,
+	actorUserID string,
+	workspaceID string,
+	targetUserID string,
+) error {
+	if ctx == nil {
+		return errors.New("workspace membership context is required")
+	}
+	actorID, err := parseUserID(actorUserID)
+	if err != nil {
+		return ErrUnauthenticated
+	}
+	workspaceID, err = parseWorkspaceID(workspaceID)
+	if err != nil {
+		return ErrInvalidWorkspaceID
+	}
+	targetID, err := parseUserID(targetUserID)
+	if err != nil {
+		return ErrUserUnavailable
+	}
+
+	return s.withWriteTransaction(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveUser(ctx, tx, s.driver, actorID); err != nil {
+			return err
+		}
+		actorRole, err := activeWorkspaceRole(ctx, tx, s.driver, workspaceID, actorID)
+		if err != nil {
+			return err
+		}
+		selfRemoval := actorID == targetID
+		if !selfRemoval && actorRole != RoleOwner && actorRole != RoleAdministrator {
+			return ErrForbidden
+		}
+
+		targetRole, targetStatus, membershipExists, err := readMembership(ctx, tx, s.driver, workspaceID, targetID)
+		if err != nil {
+			return errors.New("workspace membership could not be read")
+		}
+		if !membershipExists || targetStatus == "removed" {
+			return nil
+		}
+		if targetStatus != "active" {
+			return ErrMembershipUnavailable
+		}
+		if !selfRemoval && actorRole == RoleAdministrator && targetRole != RoleMember {
+			return ErrForbidden
+		}
+		if targetRole == RoleOwner {
+			ownerCount, err := countActiveOwners(ctx, tx, s.driver, workspaceID)
+			if err != nil {
+				return errors.New("active workspace owners could not be counted")
+			}
+			if ownerCount <= 1 {
+				return ErrLastOwner
+			}
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		query := `UPDATE registry_workspace_memberships SET status = 'removed', updated_at = ` + bind(s.driver, 1) + `
+			WHERE workspace_id = ` + bind(s.driver, 2) + ` AND user_id = ` + bind(s.driver, 3) + ` AND status = 'active'`
+		result, err := tx.ExecContext(ctx, query, now, workspaceID, targetID)
+		if err != nil {
+			return errors.New("workspace membership could not be removed")
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return errors.New("workspace membership removal result could not be checked")
+		}
+		if rowsAffected == 0 {
+			return nil
+		}
+		return recordAudit(ctx, tx, s.driver, actorID, "workspace.membership.removed",
+			"workspace_membership", workspaceID+"/"+targetID)
+	})
+}
+
+// ListForUser returns only active workspace memberships belonging to the
+// verified user. Pagination is keyset-based on opaque, immutable UUIDs; slugs
+// are never used as authorization identifiers.
+func (s *Service) ListForUser(
+	ctx context.Context,
+	userID string,
+	afterWorkspaceID string,
+	pageSize int,
+) ([]Membership, bool, error) {
+	if s == nil || s.db == nil || ctx == nil {
+		return nil, false, errors.New("workspace list service is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	normalizedUserID, err := parseUserID(userID)
+	if err != nil {
+		return nil, false, ErrUnauthenticated
+	}
+	if pageSize < 1 || pageSize > maxWorkspacePageSize {
+		return nil, false, ErrInvalidPageSize
+	}
+	if afterWorkspaceID != "" {
+		parsedCursor, err := uuid.Parse(afterWorkspaceID)
+		if err != nil || parsedCursor == uuid.Nil {
+			return nil, false, ErrInvalidCursor
+		}
+		afterWorkspaceID = parsedCursor.String()
+	}
+
+	query := `SELECT workspaces.workspace_id, workspaces.slug, workspaces.display_name,
+		workspaces.status, workspaces.created_by, workspaces.created_at,
+		memberships.role
+		FROM registry_workspace_memberships AS memberships
+		JOIN registry_workspaces AS workspaces
+			ON workspaces.workspace_id = memberships.workspace_id
+		JOIN registry_users AS users ON users.user_id = memberships.user_id
+		WHERE memberships.user_id = ` + bind(s.driver, 1) + `
+			AND memberships.status = 'active'
+			AND workspaces.status = 'active'
+			AND users.status = 'active'`
+	args := []any{normalizedUserID}
+	if afterWorkspaceID != "" {
+		query += " AND workspaces.workspace_id > " + bind(s.driver, 2)
+		args = append(args, afterWorkspaceID)
+	}
+	limitPosition := len(args) + 1
+	query += " ORDER BY workspaces.workspace_id ASC LIMIT " + bind(s.driver, limitPosition)
+	args = append(args, pageSize+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, errors.New("workspace memberships could not be read")
+	}
+	defer rows.Close()
+
+	memberships := make([]Membership, 0, pageSize+1)
+	for rows.Next() {
+		var membership Membership
+		var createdAt string
+		if err := rows.Scan(
+			&membership.Workspace.ID,
+			&membership.Workspace.Slug,
+			&membership.Workspace.DisplayName,
+			&membership.Workspace.Status,
+			&membership.Workspace.CreatedBy,
+			&createdAt,
+			&membership.Role,
+		); err != nil {
+			return nil, false, errors.New("workspace membership record is invalid")
+		}
+		if parsedID, err := uuid.Parse(membership.Workspace.ID); err != nil || parsedID == uuid.Nil {
+			return nil, false, errors.New("workspace identity is invalid")
+		} else {
+			membership.Workspace.ID = parsedID.String()
+		}
+		parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, false, errors.New("workspace creation timestamp is invalid")
+		}
+		membership.Workspace.CreatedAt = parsedCreatedAt.UTC()
+		if membership.Role != "owner" && membership.Role != "administrator" && membership.Role != "member" {
+			return nil, false, errors.New("workspace membership role is invalid")
+		}
+		memberships = append(memberships, membership)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, errors.New("workspace memberships could not be read")
+	}
+	if len(memberships) <= pageSize {
+		return memberships, false, nil
+	}
+	return memberships[:pageSize], true, nil
+}
+
 func (s *Service) withWriteTransaction(ctx context.Context, operation func(*sql.Tx) error) (retErr error) {
 	if s == nil || s.db == nil || operation == nil {
 		return errors.New("workspace service is not initialized")
@@ -441,6 +730,108 @@ func parseUserID(userID string) (string, error) {
 		return "", ErrUnauthenticated
 	}
 	return parsed.String(), nil
+}
+
+func parseWorkspaceID(workspaceID string) (string, error) {
+	parsed, err := uuid.Parse(workspaceID)
+	if err != nil || parsed == uuid.Nil {
+		return "", ErrInvalidWorkspaceID
+	}
+	return parsed.String(), nil
+}
+
+func validMembershipRole(role string) bool {
+	switch role {
+	case RoleOwner, RoleAdministrator, RoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+func membershipRoleRank(role string) int {
+	switch role {
+	case RoleOwner:
+		return 3
+	case RoleAdministrator:
+		return 2
+	case RoleMember:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func activeWorkspaceRole(
+	ctx context.Context,
+	tx *sql.Tx,
+	driver config.DatabaseDriver,
+	workspaceID string,
+	userID string,
+) (string, error) {
+	query := `SELECT memberships.role
+		FROM registry_workspace_memberships AS memberships
+		JOIN registry_workspaces AS workspaces ON workspaces.workspace_id = memberships.workspace_id
+		JOIN registry_users AS users ON users.user_id = memberships.user_id
+		WHERE memberships.workspace_id = ` + bind(driver, 1) + `
+			AND memberships.user_id = ` + bind(driver, 2) + `
+			AND memberships.status = 'active'
+			AND workspaces.status = 'active'
+			AND users.status = 'active'`
+	var role string
+	err := tx.QueryRowContext(ctx, query, workspaceID, userID).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrForbidden
+	}
+	if err != nil {
+		return "", errors.New("workspace membership authority could not be checked")
+	}
+	if !validMembershipRole(role) {
+		return "", errors.New("stored workspace membership role is invalid")
+	}
+	return role, nil
+}
+
+func readMembership(
+	ctx context.Context,
+	tx *sql.Tx,
+	driver config.DatabaseDriver,
+	workspaceID string,
+	userID string,
+) (string, string, bool, error) {
+	query := `SELECT role, status FROM registry_workspace_memberships
+		WHERE workspace_id = ` + bind(driver, 1) + ` AND user_id = ` + bind(driver, 2)
+	var role string
+	var status string
+	err := tx.QueryRowContext(ctx, query, workspaceID, userID).Scan(&role, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if !validMembershipRole(role) || (status != "active" && status != "suspended" && status != "removed") {
+		return "", "", false, errors.New("stored workspace membership is invalid")
+	}
+	return role, status, true, nil
+}
+
+func countActiveOwners(
+	ctx context.Context,
+	tx *sql.Tx,
+	driver config.DatabaseDriver,
+	workspaceID string,
+) (int, error) {
+	query := `SELECT count(*)
+		FROM registry_workspace_memberships AS memberships
+		JOIN registry_users AS users ON users.user_id = memberships.user_id
+	WHERE memberships.workspace_id = ` + bind(driver, 1) + `
+		AND memberships.role = 'owner'
+		AND memberships.status = 'active'
+		AND users.status = 'active'`
+	var count int
+	err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&count)
+	return count, err
 }
 
 func validPolicy(policy CreationPolicy) bool {

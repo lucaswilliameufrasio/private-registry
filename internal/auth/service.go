@@ -48,6 +48,11 @@ type EnrollmentCompletion struct {
 	RecoveryCodes []string
 }
 
+type EnrollmentStart struct {
+	Credentials sessions.Credentials
+	Enrollment  mfa.Enrollment
+}
+
 type accountRecord struct {
 	userID       string
 	status       string
@@ -182,6 +187,43 @@ func (s *Service) BeginMFAEnrollment(ctx context.Context, bearerToken string) (m
 	return enrollment, nil
 }
 
+// BeginVoluntaryMFAEnrollment replaces a standard session with an enrollment-
+// only session before creating a pending TOTP factor. The old bearer is revoked
+// and the caller must install the returned session credentials.
+func (s *Service) BeginVoluntaryMFAEnrollment(ctx context.Context, bearerToken string) (EnrollmentStart, error) {
+	if err := s.validate(ctx); err != nil {
+		return EnrollmentStart{}, err
+	}
+	session, err := s.sessions.Validate(ctx, bearerToken)
+	if err != nil {
+		if errors.Is(err, sessions.ErrSessionUnavailable) {
+			return EnrollmentStart{}, ErrRejected
+		}
+		return EnrollmentStart{}, ErrUnavailable
+	}
+	if session.Level != sessions.LevelStandard {
+		return EnrollmentStart{}, ErrRejected
+	}
+	enrollment, err := s.mfa.BeginEnrollment(ctx, session.UserID)
+	if err != nil {
+		if errors.Is(err, mfa.ErrFactorEnrolled) {
+			return EnrollmentStart{}, ErrRejected
+		}
+		if errors.Is(err, mfa.ErrEnrollmentExpired) {
+			return EnrollmentStart{}, ErrEnrollmentUnavailable
+		}
+		return EnrollmentStart{}, ErrUnavailable
+	}
+	credentials, err := s.sessions.RestrictForMFAEnrollment(ctx, bearerToken)
+	if err != nil {
+		if errors.Is(err, sessions.ErrSessionUnavailable) || errors.Is(err, sessions.ErrInvalidTransition) {
+			return EnrollmentStart{}, ErrRejected
+		}
+		return EnrollmentStart{}, ErrUnavailable
+	}
+	return EnrollmentStart{Credentials: credentials, Enrollment: enrollment}, nil
+}
+
 func (s *Service) CompleteMFAEnrollment(
 	ctx context.Context,
 	bearerToken string,
@@ -262,6 +304,20 @@ func (s *Service) ValidateWithCSRF(ctx context.Context, bearerToken, csrfToken s
 		return sessions.Session{}, err
 	}
 	session, err := s.sessions.ValidateWithCSRF(ctx, bearerToken, csrfToken)
+	if err != nil {
+		return sessions.Session{}, err
+	}
+	return session, nil
+}
+
+// ValidateSession rechecks the local account and persisted session state for
+// every authenticated request. The HTTP boundary adds CSRF and Origin checks to
+// browser writes.
+func (s *Service) ValidateSession(ctx context.Context, bearerToken string) (sessions.Session, error) {
+	if err := s.validate(ctx); err != nil {
+		return sessions.Session{}, err
+	}
+	session, err := s.sessions.Validate(ctx, bearerToken)
 	if err != nil {
 		return sessions.Session{}, err
 	}
