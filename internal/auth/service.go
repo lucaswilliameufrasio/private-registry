@@ -255,6 +255,31 @@ func (s *Service) CompleteMFA(ctx context.Context, bearerToken, code, sourceAddr
 	return credentials, nil
 }
 
+// ValidateWithCSRF validates a browser session and its synchronizer token. The
+// HTTP boundary must additionally validate the configured Origin before writes.
+func (s *Service) ValidateWithCSRF(ctx context.Context, bearerToken, csrfToken string) (sessions.Session, error) {
+	if err := s.validate(ctx); err != nil {
+		return sessions.Session{}, err
+	}
+	session, err := s.sessions.ValidateWithCSRF(ctx, bearerToken, csrfToken)
+	if err != nil {
+		return sessions.Session{}, err
+	}
+	return session, nil
+}
+
+// Logout revokes the supplied opaque bearer without revealing whether it was
+// already absent or revoked.
+func (s *Service) Logout(ctx context.Context, bearerToken string) error {
+	if err := s.validate(ctx); err != nil {
+		return err
+	}
+	if err := s.sessions.Revoke(ctx, bearerToken); err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 func (s *Service) validateRestrictedSession(ctx context.Context, bearerToken string, requiredLevel sessions.Level) (sessions.Session, error) {
 	if err := s.validate(ctx); err != nil {
 		return sessions.Session{}, err

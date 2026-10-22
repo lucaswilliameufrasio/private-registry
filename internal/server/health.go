@@ -23,9 +23,13 @@ func NewHealth(database *sql.DB) *Health {
 
 func (h *Health) Handler() http.Handler {
 	router := chi.NewRouter()
+	h.registerRoutes(router)
+	return router
+}
+
+func (h *Health) registerRoutes(router chi.Router) {
 	router.Get("/livez", h.livez)
 	router.Get("/readyz", h.readyz)
-	return router
 }
 
 func (h *Health) MarkDraining() {

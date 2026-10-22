@@ -1,6 +1,6 @@
 # ADR 0011 — Autenticação humana, MFA e sessões
 
-- **Status:** Contrato aceito; login/TOTP/sessões internos parciais; endpoints e middleware ainda não implementados
+- **Status:** Contrato aceito; login/TOTP/sessões conectados a endpoints HTTP limitados; autorização e rotas protegidas ainda não implementadas
 - **Data:** 2026-10-18
 
 ## Contexto
@@ -30,10 +30,13 @@ O bootstrap local já cria a identidade inicial e serviços internos agora verif
 
 - Migration v4 e `internal/mfa` implementam parcialmente enrollment TOTP com SHA-1/6 dígitos/30 segundos, janela de confirmação de ±1 passo, confirmação antes da ativação, prevenção de replay, expiração de enrollment em 10 minutos e dez códigos de recuperação aleatórios de uso único armazenados como SHA-256. O seed usa envelope XChaCha20-Poly1305 com AAD específica por usuário. A service não cria sessão nem expõe rotas.
 - Migration v5 e `internal/sessions` persistem somente hashes de bearers/CSRF, validam usuário ativo, duração absoluta padrão de 12 horas e inatividade de 1 hora, suportam validação CSRF e rotação/revogação. Contextos pré-autenticados de enrollment MFA expiram em 10 minutos e challenges MFA em 5 minutos.
-- Migration v6, `internal/password`, `internal/authattempts` e `internal/auth` integram login local Argon2id, regras que exigem MFA de administradores de instalação/workspace, enrollment TOTP restrito, challenge/recovery e limite persistido. Os serviços são internos: ainda não estão conectados a cookies, origem canônica, CSRF de navegador ou middleware HTTP. O SHA-256 dos identificadores reduz exposição acidental, mas não é criptografia nem protege contra adivinhação offline de username/IP em dump do banco.
-- As entregas seguintes deverão conectar login, enrollment, recuperação e TOTP ao router, cookies host-only, origem canônica e CSRF, sem liberar conteúdo até autorização independente estar pronta.
+- Migration v6, `internal/password`, `internal/authattempts` e `internal/auth` integram login local Argon2id, regras que exigem MFA de administradores de instalação/workspace, enrollment TOTP restrito, challenge/recovery e limite persistido. O SHA-256 dos identificadores reduz exposição acidental, mas não é criptografia nem protege contra adivinhação offline de username/IP em dump do banco.
+- A primeira fronteira HTTP é restrita a `POST /api/v1/auth/login`, `POST /api/v1/auth/mfa/enrollment`, `POST /api/v1/auth/mfa/enrollment/complete`, `POST /api/v1/auth/mfa/challenge` e `POST /api/v1/auth/logout`. Login retorna apenas o estágio; bearer nunca vai em JSON. Enrollments e recovery codes usam respostas `no-store`.
+- A sessão usa cookie `__Host-registry-session` com `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/` e sem `Domain`. O CSRF usa cookie host-only `__Host-registry-csrf` legível pelo cliente same-origin, enviado também no header `X-CSRF-Token`; o valor é comparado com o cookie e validado contra o hash persistido da sessão. Todo POST exige `Origin` único, HTTPS e igual à origem canônica; o `Host` da requisição também deve corresponder. Login exige Origin mesmo sem sessão prévia.
+- `REGISTRY_CANONICAL_ORIGIN` é obrigatório ao executar `serve` e aceita uma origem HTTPS sem path. `REGISTRY_TRUSTED_PROXIES` exige o IP/CIDR do proxy TLS; sem TLS direto, a requisição só é aceita quando esse peer envia exatamente `X-Forwarded-Proto: https`. Essa asserção não define a origem canônica. Somente quando o peer direto pertence à lista confiável, a cadeia `X-Forwarded-For` é percorrida da direita para a esquerda; `Forwarded` e `X-Forwarded-Host` são ignorados. O proxy deve preservar o Host canônico.
+- Não há middleware nem rota de workspace, administração ou conteúdo nessa entrega. A próxima fronteira protegida continua condicionada a autorização por request e testes de isolamento; as rotas não implementadas retornam 404. O SHA-256 dos identificadores de rate limit não protege contra adivinhação offline de username/IP em dump do banco.
 - Passkeys continuam obrigatórias para v1; uma passkey só satisfaz a política MFA quando o autenticador comprova user verification, não apenas presença/toque.
-- Ainda não existem login/sessões via HTTP, cookies, validação de Origin, passkeys, reset/recuperação operacional, middleware ou rotas protegidas. As bases internas não anunciam autenticação/MFA utilizável pelo produto.
+- A autenticação TOTP local agora pode ser completada ponta a ponta por esses endpoints, mas não há UI, passkeys, reset/recuperação operacional, autorização HTTP, middleware de conteúdo ou rotas administrativas. Não anunciar a fundação como produto utilizável nem como v1.
 
 ## Referências
 

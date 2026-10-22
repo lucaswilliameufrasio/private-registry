@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,6 +65,31 @@ func TestLoadFromResolvesOptionalMasterKeyFilePath(t *testing.T) {
 	}
 	if config.MasterKeyFile != absoluteKeyPath {
 		t.Fatalf("unexpected master key file path: got %q, want %q", config.MasterKeyFile, absoluteKeyPath)
+	}
+}
+
+func TestLoadFromAcceptsCanonicalOriginAndTrustedProxyRanges(t *testing.T) {
+	config, err := LoadFrom(lookupMap(map[string]string{
+		"REGISTRY_CANONICAL_ORIGIN": " https://registry.example ",
+		"REGISTRY_TRUSTED_PROXIES":  "192.0.2.7, 2001:db8::/32",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CanonicalOrigin != "https://registry.example" {
+		t.Fatalf("unexpected canonical origin: %q", config.CanonicalOrigin)
+	}
+	wantPrefixes := []netip.Prefix{
+		netip.MustParsePrefix("192.0.2.7/32"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
+	if len(config.TrustedProxies) != len(wantPrefixes) {
+		t.Fatalf("unexpected trusted proxy count: %d", len(config.TrustedProxies))
+	}
+	for index, want := range wantPrefixes {
+		if config.TrustedProxies[index] != want {
+			t.Fatalf("unexpected trusted proxy at index %d: got %s, want %s", index, config.TrustedProxies[index], want)
+		}
 	}
 }
 
@@ -136,6 +162,18 @@ func TestLoadFromRejectsInvalidConfiguration(t *testing.T) {
 		{
 			name:   "pool size above safety bound",
 			values: map[string]string{"REGISTRY_DATABASE_MAX_OPEN_CONNS": "129"},
+		},
+		{
+			name:   "empty canonical origin",
+			values: map[string]string{"REGISTRY_CANONICAL_ORIGIN": "  "},
+		},
+		{
+			name:   "trusted proxy hostname",
+			values: map[string]string{"REGISTRY_TRUSTED_PROXIES": "proxy.example"},
+		},
+		{
+			name:   "empty trusted proxy entry",
+			values: map[string]string{"REGISTRY_TRUSTED_PROXIES": "192.0.2.1,"},
 		},
 	}
 

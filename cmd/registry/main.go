@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/term"
 
+	"private-registry/internal/auth"
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
@@ -76,17 +77,43 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		)
 		return nil
 	}
+	if cfg.MasterKeyFile == "" {
+		return errors.New("REGISTRY_MASTER_KEY_FILE is required by serve")
+	}
+	if cfg.CanonicalOrigin == "" {
+		return errors.New("REGISTRY_CANONICAL_ORIGIN is required by serve")
+	}
+	if len(cfg.TrustedProxies) == 0 {
+		return errors.New("REGISTRY_TRUSTED_PROXIES must include the TLS-terminating proxy for serve")
+	}
+	masterKey, err := secrets.LoadMasterKeyFile(cfg.MasterKeyFile, cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer masterKey.Destroy()
+
+	authentication, err := auth.New(db, cfg.DatabaseDriver, &masterKey)
+	if err != nil {
+		return err
+	}
+	health := server.NewHealth(db)
+	handler, err := server.NewHandler(health, authentication, server.AuthHTTPConfig{
+		CanonicalOrigin: cfg.CanonicalOrigin,
+		TrustedProxies:  cfg.TrustedProxies,
+	})
+	if err != nil {
+		return err
+	}
 
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	if err != nil {
 		return errors.Join(errors.New("HTTP listener could not be opened"), err)
 	}
-	health := server.NewHealth(db)
-	logger.Info("registry health server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver)
-	if err := server.Serve(ctx, listener, health.Handler(), health.MarkDraining, shutdownTimeout); err != nil {
+	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver)
+	if err := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout); err != nil {
 		return errors.Join(errors.New("HTTP server failed"), err)
 	}
-	logger.Info("registry health server stopped")
+	logger.Info("registry HTTP server stopped")
 	return nil
 }
 

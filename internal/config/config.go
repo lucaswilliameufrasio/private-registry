@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,8 @@ type Config struct {
 	ListenAddress        string
 	DataDir              string
 	MasterKeyFile        string
+	CanonicalOrigin      string
+	TrustedProxies       []netip.Prefix
 	DatabaseDriver       DatabaseDriver
 	DatabaseDSN          string
 	DatabaseMaxOpenConns int
@@ -100,6 +103,19 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		masterKeyFile = filepath.Clean(masterKeyFile)
 	}
 
+	canonicalOrigin := ""
+	if rawCanonicalOrigin, ok := lookup("REGISTRY_CANONICAL_ORIGIN"); ok {
+		canonicalOrigin = strings.TrimSpace(rawCanonicalOrigin)
+		if canonicalOrigin == "" {
+			return Config{}, errors.New("REGISTRY_CANONICAL_ORIGIN must not be empty")
+		}
+	}
+
+	trustedProxies, err := loadTrustedProxies(lookup)
+	if err != nil {
+		return Config{}, err
+	}
+
 	driverValue, err := value(lookup, "REGISTRY_DATABASE_DRIVER", string(SQLite))
 	if err != nil {
 		return Config{}, err
@@ -144,10 +160,60 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		ListenAddress:        listenAddress,
 		DataDir:              filepath.Clean(dataDir),
 		MasterKeyFile:        masterKeyFile,
+		CanonicalOrigin:      canonicalOrigin,
+		TrustedProxies:       trustedProxies,
 		DatabaseDriver:       driver,
 		DatabaseDSN:          dsn,
 		DatabaseMaxOpenConns: maxOpenConns,
 	}, nil
+}
+
+func loadTrustedProxies(lookup LookupEnv) ([]netip.Prefix, error) {
+	raw, exists := lookup("REGISTRY_TRUSTED_PROXIES")
+	if !exists {
+		return nil, nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 4096 {
+		return nil, errors.New("REGISTRY_TRUSTED_PROXIES must contain valid IP addresses or CIDRs")
+	}
+
+	parts := strings.Split(raw, ",")
+	if len(parts) > 128 {
+		return nil, errors.New("REGISTRY_TRUSTED_PROXIES contains too many entries")
+	}
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			return nil, errors.New("REGISTRY_TRUSTED_PROXIES must contain valid IP addresses or CIDRs")
+		}
+		prefix, err := parseProxyPrefix(entry)
+		if err != nil {
+			return nil, errors.New("REGISTRY_TRUSTED_PROXIES must contain valid IP addresses or CIDRs")
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+func parseProxyPrefix(value string) (netip.Prefix, error) {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		address := prefix.Addr()
+		if address.Is4In6() {
+			if prefix.Bits() < 96 {
+				return netip.Prefix{}, errors.New("mapped IPv4 proxy prefix is too broad")
+			}
+			prefix = netip.PrefixFrom(address.Unmap(), prefix.Bits()-96)
+		}
+		return prefix.Masked(), nil
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil || address.Zone() != "" {
+		return netip.Prefix{}, errors.New("proxy address is invalid")
+	}
+	address = address.Unmap()
+	return netip.PrefixFrom(address, address.BitLen()), nil
 }
 
 func loadDataDir(lookup LookupEnv) (string, error) {
