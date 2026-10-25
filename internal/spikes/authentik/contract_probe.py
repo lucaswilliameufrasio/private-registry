@@ -704,6 +704,24 @@ def main():
         return remote
 
     try:
+        # The provider only includes users assigned to A or B. Bootstrap scope
+        # via A, then wait for the identity before testing a separate B event.
+        # SCIMGroupClient._patch_add_users returns without sending a membership
+        # if the new user's SCIM connection does not exist yet.
+        api("POST", f"/core/groups/{group_a['pk']}/add_user/", {"pk": recovery_user["pk"]})
+        def recovery_identity_provisioned():
+            current = get_target_state()
+            return next(
+                (
+                    item
+                    for item in current["users"].values()
+                    if item.get("userName") == recovery_user_name and item.get("active") is True
+                ),
+                None,
+            )
+
+        wait_until("active SCIM recovery identity before membership change", recovery_identity_provisioned)
+        wait_for_provider_idle(scim_provider_id)
         api("POST", f"/core/groups/{group_b['pk']}/add_user/", {"pk": recovery_user["pk"]})
         remote_recovery_user = wait_until(
             "active SCIM recovery user and group membership",

@@ -30,6 +30,9 @@ func TestLoadFromDefaultsToLoopbackAndPersistentSQLite(t *testing.T) {
 	if config.DatabaseMaxOpenConns != 4 {
 		t.Fatalf("unexpected SQLite pool limit: %d", config.DatabaseMaxOpenConns)
 	}
+	if config.MaxUploadBytes != MaxConfiguredUploadBytes || config.MaxConcurrentUploads != 4 {
+		t.Fatalf("unexpected upload limits: bytes=%d concurrent=%d", config.MaxUploadBytes, config.MaxConcurrentUploads)
+	}
 }
 
 func TestLoadFromAcceptsPostgresDSNWithoutConnecting(t *testing.T) {
@@ -71,6 +74,7 @@ func TestLoadFromResolvesOptionalMasterKeyFilePath(t *testing.T) {
 func TestLoadFromAcceptsCanonicalOriginAndTrustedProxyRanges(t *testing.T) {
 	config, err := LoadFrom(lookupMap(map[string]string{
 		"REGISTRY_CANONICAL_ORIGIN": " https://registry.example ",
+		"REGISTRY_ASSET_ORIGIN":     " https://assets.example ",
 		"REGISTRY_TRUSTED_PROXIES":  "192.0.2.7, 2001:db8::/32",
 	}))
 	if err != nil {
@@ -78,6 +82,9 @@ func TestLoadFromAcceptsCanonicalOriginAndTrustedProxyRanges(t *testing.T) {
 	}
 	if config.CanonicalOrigin != "https://registry.example" {
 		t.Fatalf("unexpected canonical origin: %q", config.CanonicalOrigin)
+	}
+	if config.AssetOrigin != "https://assets.example" {
+		t.Fatalf("unexpected asset origin: %q", config.AssetOrigin)
 	}
 	wantPrefixes := []netip.Prefix{
 		netip.MustParsePrefix("192.0.2.7/32"),
@@ -162,6 +169,18 @@ func TestLoadFromRejectsInvalidConfiguration(t *testing.T) {
 		{
 			name:   "pool size above safety bound",
 			values: map[string]string{"REGISTRY_DATABASE_MAX_OPEN_CONNS": "129"},
+		},
+		{
+			name:   "upload size exceeds storage schema limit",
+			values: map[string]string{"REGISTRY_MAX_UPLOAD_BYTES": "1073741825"},
+		},
+		{
+			name:   "zero upload size",
+			values: map[string]string{"REGISTRY_MAX_UPLOAD_BYTES": "0"},
+		},
+		{
+			name:   "too many concurrent uploads",
+			values: map[string]string{"REGISTRY_MAX_CONCURRENT_UPLOADS": "129"},
 		},
 		{
 			name:   "empty canonical origin",

@@ -427,6 +427,68 @@ func (s *Service) HasRepositoryGrant(
 	return found, nil
 }
 
+// WithRepositoryGrantTransaction serializes a short domain write with current
+// grant changes, then runs operation inside the same transaction. Callers must
+// not perform storage or network I/O in operation. The shared installation
+// lock makes grant revocation and publication linearizable on both supported
+// database drivers.
+func (s *Service) WithRepositoryGrantTransaction(
+	ctx context.Context,
+	userID string,
+	workspaceID string,
+	repositoryID string,
+	role GrantRole,
+	operation func(*sql.Tx) error,
+) error {
+	if s == nil || s.db == nil || ctx == nil || operation == nil {
+		return errors.New("repository grant transaction is unavailable")
+	}
+	userID, err := parseUUID(userID, ErrUnauthenticated)
+	if err != nil {
+		return ErrUnauthenticated
+	}
+	workspaceID, err = parseUUID(workspaceID, ErrInvalidWorkspaceID)
+	if err != nil {
+		return ErrInvalidWorkspaceID
+	}
+	repositoryID, err = parseUUID(repositoryID, ErrInvalidRepositoryID)
+	if err != nil {
+		return ErrInvalidRepositoryID
+	}
+	if !validGrantRole(role) {
+		return ErrInvalidGrantRole
+	}
+
+	return s.withWriteTransaction(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveUser(ctx, tx, s.driver, userID); err != nil {
+			return err
+		}
+		if _, err := activeWorkspaceRole(ctx, tx, s.driver, workspaceID, userID); err != nil {
+			return err
+		}
+		if err := requireActiveRepository(ctx, tx, s.driver, workspaceID, repositoryID); err != nil {
+			return err
+		}
+
+		query := `SELECT EXISTS (
+			SELECT 1 FROM registry_repository_grants
+			WHERE user_id = ` + bind(s.driver, 1) + `
+				AND workspace_id = ` + bind(s.driver, 2) + `
+				AND repository_id = ` + bind(s.driver, 3) + `
+				AND role = ` + bind(s.driver, 4) + `
+				AND revoked_at IS NULL
+		)`
+		var granted bool
+		if err := tx.QueryRowContext(ctx, query, userID, workspaceID, repositoryID, string(role)).Scan(&granted); err != nil {
+			return errors.New("repository grant authorization could not be checked")
+		}
+		if !granted {
+			return ErrForbidden
+		}
+		return operation(tx)
+	})
+}
+
 func requireActiveRepository(
 	ctx context.Context,
 	tx *sql.Tx,

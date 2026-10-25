@@ -3,13 +3,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +26,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
@@ -32,13 +36,15 @@ import (
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
 	"private-registry/internal/sessions"
+	"private-registry/internal/storage"
 	"private-registry/internal/workspaces"
 )
 
 const (
-	authTestOrigin   = "https://registry.example"
-	authTestLogin    = "http.admin"
-	authTestPassword = "synthetic-auth-http-password-never-reuse"
+	authTestOrigin      = "https://registry.example"
+	authTestAssetOrigin = "https://assets.example"
+	authTestLogin       = "http.admin"
+	authTestPassword    = "synthetic-auth-http-password-never-reuse"
 )
 
 type authHTTPFixture struct {
@@ -46,18 +52,20 @@ type authHTTPFixture struct {
 	service           *auth.Service
 	workspaceService  *workspaces.Service
 	repositoryService *repositories.Service
+	artifactService   *artifacts.Service
 	db                *sql.DB
 }
 
 func newAuthHTTPFixture(t *testing.T) authHTTPFixture {
 	t.Helper()
-	return newAuthHTTPFixtureWithConfig(t, AuthHTTPConfig{CanonicalOrigin: authTestOrigin})
+	return newAuthHTTPFixtureWithConfig(t, AuthHTTPConfig{CanonicalOrigin: authTestOrigin, AssetOrigin: authTestAssetOrigin})
 }
 
 func newAuthHTTPFixtureWithProxies(t *testing.T, proxies []netip.Prefix) authHTTPFixture {
 	t.Helper()
 	return newAuthHTTPFixtureWithConfig(t, AuthHTTPConfig{
 		CanonicalOrigin: authTestOrigin,
+		AssetOrigin:     authTestAssetOrigin,
 		TrustedProxies:  proxies,
 	})
 }
@@ -124,7 +132,18 @@ func newAuthHTTPFixtureWithConfig(t *testing.T, authConfig AuthHTTPConfig) authH
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(NewHealth(db), service, workspaceService, repositoryService, authConfig)
+	objectStore, err := storage.NewFileSystem(filepath.Join(dataDir, "object-store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactService, err := artifacts.New(db, config.SQLite, repositoryService, objectStore, artifacts.Options{
+		MaxUploadBytes:       1 << 20,
+		MaxConcurrentUploads: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(NewHealth(db), service, workspaceService, repositoryService, artifactService, authConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +152,7 @@ func newAuthHTTPFixtureWithConfig(t *testing.T, authConfig AuthHTTPConfig) authH
 		service:           service,
 		workspaceService:  workspaceService,
 		repositoryService: repositoryService,
+		artifactService:   artifactService,
 		db:                db,
 	}
 }
@@ -734,6 +754,184 @@ func TestAuthHTTPMembershipManagementRequiresRecentMFAAndProtectsOwner(t *testin
 	}
 }
 
+func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *testing.T) {
+	fixture := newAuthHTTPFixture(t)
+	ctx := context.Background()
+	var ownerID string
+	if err := fixture.db.QueryRowContext(ctx, "SELECT user_id FROM registry_instance_admins").Scan(&ownerID); err != nil {
+		t.Fatal("read administrator identity:", err)
+	}
+	workspace, err := fixture.workspaceService.CreateWorkspace(ctx, ownerID, "artifact-http", "Artifact HTTP")
+	if err != nil {
+		t.Fatal("create test workspace:", err)
+	}
+	repository, err := fixture.repositoryService.Create(ctx, ownerID, workspace.ID, "artifact-files", "Artifact Files")
+	if err != nil {
+		t.Fatal("create test repository:", err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, ownerID, workspace.ID, repository.ID,
+		ownerID, repositories.GrantPublisher); err != nil {
+		t.Fatal("explicitly grant publisher role:", err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, ownerID, workspace.ID, repository.ID,
+		ownerID, repositories.GrantReader); err != nil {
+		t.Fatal("explicitly grant reader role:", err)
+	}
+
+	login := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
+		fmt.Sprintf(`{"login_name":%q,"password":%q}`, authTestLogin, authTestPassword),
+		authTestOrigin, "registry.example")
+	if login.Code != http.StatusOK {
+		t.Fatalf("administrator login failed: status=%d body=%s", login.Code, login.Body.String())
+	}
+	enrollmentCookies := assertSessionCookies(t, login)
+	beginEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
+		"/api/v1/auth/mfa/enrollment", "", authTestOrigin, "registry.example",
+		enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if beginEnrollment.Code != http.StatusOK {
+		t.Fatalf("MFA enrollment did not start: status=%d body=%s", beginEnrollment.Code, beginEnrollment.Body.String())
+	}
+	var enrollment enrollmentResponse
+	if err := json.Unmarshal(beginEnrollment.Body.Bytes(), &enrollment); err != nil {
+		t.Fatal("decode MFA enrollment:", err)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(enrollment.Secret)
+	if err != nil {
+		t.Fatal("decode MFA secret:", err)
+	}
+	defer clear(secret)
+	completeEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
+		"/api/v1/auth/mfa/enrollment/complete",
+		fmt.Sprintf(`{"code":%q}`, authHTTPOTP(secret, time.Now().Unix()/30)),
+		authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if completeEnrollment.Code != http.StatusOK {
+		t.Fatalf("MFA enrollment failed: status=%d body=%s", completeEnrollment.Code, completeEnrollment.Body.String())
+	}
+	mfaCookies := assertSessionCookies(t, completeEnrollment)
+
+	payload := []byte("synthetic generic artifact")
+	digest := sha256.Sum256(payload)
+	startPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/uploads", workspace.ID, repository.ID)
+	startBody := fmt.Sprintf(`{"collection":"widget","version":"2026.10","path":"dist/widget.js","content_type":"application/javascript","size":%d,"sha256":"%x"}`, len(payload), digest)
+	start := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, startPath, startBody,
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if start.Code != http.StatusCreated {
+		t.Fatalf("artifact upload session creation failed: status=%d body=%s", start.Code, start.Body.String())
+	}
+	var upload artifactUploadResponse
+	if err := json.Unmarshal(start.Body.Bytes(), &upload); err != nil {
+		t.Fatal("decode upload session response:", err)
+	}
+	if upload.UploadSessionID == "" || upload.ArtifactVersionID == "" || upload.Status != "receiving" {
+		t.Fatalf("created upload session response is incomplete: %+v", upload)
+	}
+
+	contentPath := startPath + "/" + upload.UploadSessionID
+	received := authRawHTTPRequestWithCookies(fixture.handler, http.MethodPut, contentPath, payload,
+		"application/octet-stream", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if received.Code != http.StatusOK || !strings.Contains(received.Body.String(), `"status":"uploaded"`) {
+		t.Fatalf("artifact upload failed: status=%d body=%s", received.Code, received.Body.String())
+	}
+
+	publishPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/%s/publish",
+		workspace.ID, repository.ID, upload.ArtifactVersionID)
+	published := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, publishPath, "",
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if published.Code != http.StatusOK {
+		t.Fatalf("artifact publication failed: status=%d body=%s", published.Code, published.Body.String())
+	}
+	var version artifactVersionResponse
+	if err := json.Unmarshal(published.Body.Bytes(), &version); err != nil {
+		t.Fatal("decode published artifact:", err)
+	}
+	if version.Status != "published" || len(version.Files) != 1 || version.Files[0].SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("published artifact response = %+v; want one verified file", version)
+	}
+	manifestPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/%s",
+		workspace.ID, repository.ID, version.ArtifactVersionID)
+	manifest := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, manifestPath, "",
+		authTestOrigin, "registry.example", mfaCookies, "")
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("published artifact manifest query failed: status=%d body=%s", manifest.Code, manifest.Body.String())
+	}
+	var queriedManifest artifactVersionResponse
+	if err := json.Unmarshal(manifest.Body.Bytes(), &queriedManifest); err != nil {
+		t.Fatal("decode queried artifact manifest:", err)
+	}
+	if queriedManifest.ArtifactVersionID != version.ArtifactVersionID || len(queriedManifest.Files) != 1 {
+		t.Fatalf("queried manifest = %+v; want published version %+v", queriedManifest, version)
+	}
+
+	linkPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/%s/files/%s/download-link",
+		workspace.ID, repository.ID, version.ArtifactVersionID, version.Files[0].ArtifactFileID)
+	linkResponse := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, linkPath, `{}`,
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if linkResponse.Code != http.StatusCreated {
+		t.Fatalf("authorized download link creation failed: status=%d body=%s", linkResponse.Code, linkResponse.Body.String())
+	}
+	var downloadLink artifactDownloadLinkResponse
+	if err := json.Unmarshal(linkResponse.Body.Bytes(), &downloadLink); err != nil {
+		t.Fatal("decode download link response:", err)
+	}
+	if !strings.HasPrefix(downloadLink.DownloadURL, authTestAssetOrigin+"/api/v1/assets/") ||
+		downloadLink.File.ArtifactFileID != version.Files[0].ArtifactFileID || downloadLink.ExpiresAt == "" {
+		t.Fatalf("download link response is invalid: %+v", downloadLink)
+	}
+	assetPath := strings.TrimPrefix(downloadLink.DownloadURL, authTestAssetOrigin)
+	assetDownload := authAssetHTTPRequest(fixture.handler, http.MethodGet, assetPath, "assets.example", "")
+	if assetDownload.Code != http.StatusOK || assetDownload.Body.String() != string(payload) {
+		t.Fatalf("asset-origin download failed: status=%d body=%q", assetDownload.Code, assetDownload.Body.String())
+	}
+	if assetDownload.Header().Get("Content-Disposition") == "" ||
+		!strings.HasPrefix(assetDownload.Header().Get("Content-Disposition"), "attachment") ||
+		assetDownload.Header().Get("X-Content-Type-Options") != "nosniff" ||
+		assetDownload.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("unsafe asset response headers: %v", assetDownload.Header())
+	}
+	etag := assetDownload.Header().Get("ETag")
+	conditionalAsset := authAssetConditionalHTTPRequest(fixture.handler, http.MethodGet, assetPath,
+		"assets.example", "", etag, "")
+	if conditionalAsset.Code != http.StatusNotModified || conditionalAsset.Body.Len() != 0 {
+		t.Fatalf("conditional asset request status=%d body=%q; want empty 304", conditionalAsset.Code, conditionalAsset.Body.String())
+	}
+	rangedAsset := authAssetHTTPRequest(fixture.handler, http.MethodGet, assetPath, "assets.example", "bytes=4-9")
+	if rangedAsset.Code != http.StatusPartialContent || rangedAsset.Body.String() != string(payload[4:10]) ||
+		rangedAsset.Header().Get("Content-Range") != fmt.Sprintf("bytes 4-9/%d", len(payload)) {
+		t.Fatalf("asset range failed: status=%d range=%q body=%q", rangedAsset.Code,
+			rangedAsset.Header().Get("Content-Range"), rangedAsset.Body.String())
+	}
+	ignoredRange := authAssetConditionalHTTPRequest(fixture.handler, http.MethodGet, assetPath,
+		"assets.example", "bytes=4-9", "", `"stale-etag"`)
+	if ignoredRange.Code != http.StatusOK || ignoredRange.Body.String() != string(payload) {
+		t.Fatalf("If-Range mismatch response status=%d body=%q; want full 200 response", ignoredRange.Code, ignoredRange.Body.String())
+	}
+	unsatisfiedRange := authAssetHTTPRequest(fixture.handler, http.MethodGet, assetPath, "assets.example", "bytes=99-")
+	if unsatisfiedRange.Code != http.StatusRequestedRangeNotSatisfiable ||
+		unsatisfiedRange.Header().Get("Content-Range") != fmt.Sprintf("bytes */%d", len(payload)) {
+		t.Fatalf("unsatisfied asset range status=%d content-range=%q", unsatisfiedRange.Code, unsatisfiedRange.Header().Get("Content-Range"))
+	}
+	assetHead := authAssetHTTPRequest(fixture.handler, http.MethodHead, assetPath, "assets.example", "")
+	if assetHead.Code != http.StatusOK || assetHead.Body.Len() != 0 ||
+		assetHead.Header().Get("Content-Length") != fmt.Sprint(len(payload)) {
+		t.Fatalf("asset HEAD failed: status=%d content-length=%q body=%q", assetHead.Code,
+			assetHead.Header().Get("Content-Length"), assetHead.Body.String())
+	}
+	wrongAssetOrigin := authAssetHTTPRequest(fixture.handler, http.MethodGet, assetPath, "registry.example", "")
+	if wrongAssetOrigin.Code != http.StatusForbidden {
+		t.Fatalf("asset ticket was served from administrative origin: status=%d body=%s", wrongAssetOrigin.Code, wrongAssetOrigin.Body.String())
+	}
+
+	if err := fixture.repositoryService.RevokeRepositoryRole(ctx, ownerID, workspace.ID, repository.ID,
+		ownerID, repositories.GrantPublisher); err != nil {
+		t.Fatal("revoke explicit publisher grant:", err)
+	}
+	retry := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, publishPath, "",
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if retry.Code != http.StatusForbidden {
+		t.Fatalf("publication retry after grant revocation status=%d body=%s; want 403", retry.Code, retry.Body.String())
+	}
+}
+
 func TestAuthHTTPRejectsMalformedOrAmbiguousJSON(t *testing.T) {
 	fixture := newAuthHTTPFixture(t)
 	for _, test := range []struct {
@@ -910,6 +1108,82 @@ func authHTTPRequestWithCookies(
 	}
 	if csrfHeader != "" {
 		request.Header.Set(csrfHeaderName, csrfHeader)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func authRawHTTPRequestWithCookies(
+	handler http.Handler,
+	method string,
+	path string,
+	body []byte,
+	contentType string,
+	origin string,
+	host string,
+	cookies map[string]*http.Cookie,
+	csrfHeader string,
+) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "https://registry.example"+path, bytes.NewReader(body))
+	request.Header.Set("Content-Type", contentType)
+	request.Host = host
+	request.TLS = &tls.ConnectionState{}
+	request.RemoteAddr = "192.0.2.10:54321"
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	if csrfHeader != "" {
+		request.Header.Set(csrfHeaderName, csrfHeader)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func authAssetHTTPRequest(
+	handler http.Handler,
+	method string,
+	path string,
+	host string,
+	rangeHeader string,
+) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "https://assets.example"+path, nil)
+	request.Host = host
+	request.TLS = &tls.ConnectionState{}
+	request.RemoteAddr = "192.0.2.10:54321"
+	if rangeHeader != "" {
+		request.Header.Set("Range", rangeHeader)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func authAssetConditionalHTTPRequest(
+	handler http.Handler,
+	method string,
+	path string,
+	host string,
+	rangeHeader string,
+	ifNoneMatch string,
+	ifRange string,
+) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "https://assets.example"+path, nil)
+	request.Host = host
+	request.TLS = &tls.ConnectionState{}
+	request.RemoteAddr = "192.0.2.10:54321"
+	if rangeHeader != "" {
+		request.Header.Set("Range", rangeHeader)
+	}
+	if ifNoneMatch != "" {
+		request.Header.Set("If-None-Match", ifNoneMatch)
+	}
+	if ifRange != "" {
+		request.Header.Set("If-Range", ifRange)
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

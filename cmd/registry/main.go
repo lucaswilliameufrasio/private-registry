@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/term"
 
+	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
@@ -23,6 +25,7 @@ import (
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
 	"private-registry/internal/server"
+	"private-registry/internal/storage"
 	"private-registry/internal/workspaces"
 )
 
@@ -85,6 +88,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if cfg.CanonicalOrigin == "" {
 		return errors.New("REGISTRY_CANONICAL_ORIGIN is required by serve")
 	}
+	if cfg.AssetOrigin == "" {
+		return errors.New("REGISTRY_ASSET_ORIGIN is required by serve")
+	}
 	if len(cfg.TrustedProxies) == 0 {
 		return errors.New("REGISTRY_TRUSTED_PROXIES must include the TLS-terminating proxy for serve")
 	}
@@ -106,9 +112,21 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	objectStore, err := storage.NewFileSystem(filepath.Join(cfg.DataDir, "object-store"))
+	if err != nil {
+		return err
+	}
+	artifactService, err := artifacts.New(db, cfg.DatabaseDriver, repositoryService, objectStore, artifacts.Options{
+		MaxUploadBytes:       cfg.MaxUploadBytes,
+		MaxConcurrentUploads: cfg.MaxConcurrentUploads,
+	})
+	if err != nil {
+		return err
+	}
 	health := server.NewHealth(db)
-	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, server.AuthHTTPConfig{
+	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, server.AuthHTTPConfig{
 		CanonicalOrigin: cfg.CanonicalOrigin,
+		AssetOrigin:     cfg.AssetOrigin,
 		TrustedProxies:  cfg.TrustedProxies,
 	})
 	if err != nil {

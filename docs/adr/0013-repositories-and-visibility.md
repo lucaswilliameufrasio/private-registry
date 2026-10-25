@@ -27,7 +27,7 @@ Workspace define a fronteira de tenancy, mas o conteúdo precisa de um escopo me
 ## Consequências e limites
 
 - Os endpoints administrativos podem exibir configuração de visibilidade antes de o protocolo correspondente existir; esse campo não é prova de que conteúdo público está sendo servido.
-- Grants explícitos de repositório existem pela migration v8 e pelo serviço/rotas descritos no ADR 0014; equipes, UI e conversão explícita de instalações existentes são trabalho posterior. Não há rotas de conteúdo, então os grants ainda não abrem acesso a bytes.
+- Grants explícitos de repositório existem pela migration v8 e pelo serviço/rotas descritos no ADR 0014; equipes, UI e conversão explícita de instalações existentes são trabalho posterior. A primeira fatia genérica usa `reader`/`publisher` em cada request e ticket temporário para download privado; outros formatos e serving público continuam pendentes.
 - Migrações são forward-only; backup/restore e aceite de upgrade ainda precisam ser completados conforme o ADR 0007.
 - Reavaliar o default de política apenas após configuração inicial guiada e fluxo completo de serving público, confirmação e invalidação de cache.
 

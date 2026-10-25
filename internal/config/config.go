@@ -16,8 +16,9 @@ import (
 type DatabaseDriver string
 
 const (
-	SQLite   DatabaseDriver = "sqlite"
-	Postgres DatabaseDriver = "postgres"
+	SQLite                   DatabaseDriver = "sqlite"
+	Postgres                 DatabaseDriver = "postgres"
+	MaxConfiguredUploadBytes int64          = 1 << 30
 )
 
 type Config struct {
@@ -25,10 +26,13 @@ type Config struct {
 	DataDir              string
 	MasterKeyFile        string
 	CanonicalOrigin      string
+	AssetOrigin          string
 	TrustedProxies       []netip.Prefix
 	DatabaseDriver       DatabaseDriver
 	DatabaseDSN          string
 	DatabaseMaxOpenConns int
+	MaxUploadBytes       int64
+	MaxConcurrentUploads int
 }
 
 type MasterKeySettings struct {
@@ -111,6 +115,14 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		}
 	}
 
+	assetOrigin := ""
+	if rawAssetOrigin, ok := lookup("REGISTRY_ASSET_ORIGIN"); ok {
+		assetOrigin = strings.TrimSpace(rawAssetOrigin)
+		if assetOrigin == "" {
+			return Config{}, errors.New("REGISTRY_ASSET_ORIGIN must not be empty")
+		}
+	}
+
 	trustedProxies, err := loadTrustedProxies(lookup)
 	if err != nil {
 		return Config{}, err
@@ -156,15 +168,36 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		return Config{}, errors.New("database max open connections must be between 1 and 128")
 	}
 
+	maxUploadBytesValue, err := value(lookup, "REGISTRY_MAX_UPLOAD_BYTES", strconv.FormatInt(MaxConfiguredUploadBytes, 10))
+	if err != nil {
+		return Config{}, err
+	}
+	maxUploadBytes, err := strconv.ParseInt(maxUploadBytesValue, 10, 64)
+	if err != nil || maxUploadBytes < 1 || maxUploadBytes > MaxConfiguredUploadBytes {
+		return Config{}, errors.New("maximum upload size must be between 1 byte and 1 GiB")
+	}
+
+	maxConcurrentUploadsValue, err := value(lookup, "REGISTRY_MAX_CONCURRENT_UPLOADS", "4")
+	if err != nil {
+		return Config{}, err
+	}
+	maxConcurrentUploads, err := strconv.Atoi(maxConcurrentUploadsValue)
+	if err != nil || maxConcurrentUploads < 1 || maxConcurrentUploads > 128 {
+		return Config{}, errors.New("maximum concurrent uploads must be between 1 and 128")
+	}
+
 	return Config{
 		ListenAddress:        listenAddress,
 		DataDir:              filepath.Clean(dataDir),
 		MasterKeyFile:        masterKeyFile,
 		CanonicalOrigin:      canonicalOrigin,
+		AssetOrigin:          assetOrigin,
 		TrustedProxies:       trustedProxies,
 		DatabaseDriver:       driver,
 		DatabaseDSN:          dsn,
 		DatabaseMaxOpenConns: maxOpenConns,
+		MaxUploadBytes:       maxUploadBytes,
+		MaxConcurrentUploads: maxConcurrentUploads,
 	}, nil
 }
 

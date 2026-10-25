@@ -26,7 +26,7 @@ Os formatos têm roteamento próprio e alguns downloads podem servir HTML, JavaS
 ## Consequências e trabalho restante
 
 - Deployment e configuração precisam validar todas as origens e impedir aliases ambíguos ou fallback de SPA sobre endpoints de protocolos.
-- A fronteira HTTP inicial valida a origem HTTPS canônica e o Host, emite cookies `__Host-` e aplica `nosniff`/`no-store` nas respostas de autenticação; ainda faltam CSP, UI, CORS e teste de isolamento entre UI e conteúdo.
+- A fronteira HTTP valida a origem HTTPS canônica para API e uma origem de assets distinta. Downloads genéricos usam ticket curto, `Content-Disposition: attachment`, `nosniff`, CSP sandbox e `private, no-store`; teste verifica que o ticket não serve pela origem administrativa. UI, CORS deliberado e configuração/validação do deployment reverse-proxy ainda faltam.
 - `serve` exige `REGISTRY_TRUSTED_PROXIES` para o proxy que termina TLS; `X-Forwarded-Proto: https` desse peer é aceito somente como asserção de transporte HTTPS. A origem continua fixa pela configuração e o Host recebido deve corresponder a ela; `Forwarded` e `X-Forwarded-Host` não definem host/origem. Apenas `X-Forwarded-For` de peer confiável participa do rate limit.
 - Roteamento real continua condicionado aos testes com clientes de cada formato; estes exemplos não anunciam compatibilidade.
 - Pre-signed links têm a janela de revogação do storage documentada e não substituem autorização do gateway por padrão.

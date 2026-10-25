@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
@@ -34,6 +35,7 @@ const (
 
 type AuthHTTPConfig struct {
 	CanonicalOrigin string
+	AssetOrigin     string
 	TrustedProxies  []netip.Prefix
 }
 
@@ -41,7 +43,10 @@ type authHTTP struct {
 	service         *auth.Service
 	workspaces      *workspaces.Service
 	repositories    *repositories.Service
+	artifacts       *artifacts.Service
+	maxUploadBytes  int64
 	canonicalOrigin string
+	assetOrigin     string
 	trustedProxies  []netip.Prefix
 }
 
@@ -143,25 +148,67 @@ type repositoryGrantListResponse struct {
 	NextCursor string                        `json:"next_cursor,omitempty"`
 }
 
+type artifactUploadRequest struct {
+	Collection  string `json:"collection"`
+	Version     string `json:"version"`
+	Path        string `json:"path"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
+type artifactUploadResponse struct {
+	UploadSessionID   string `json:"upload_session_id"`
+	ArtifactVersionID string `json:"artifact_version_id"`
+	Path              string `json:"path"`
+	Status            string `json:"status"`
+	ExpiresAt         string `json:"expires_at"`
+}
+
+type artifactFileResponse struct {
+	ArtifactFileID string `json:"artifact_file_id"`
+	Path           string `json:"path"`
+	ContentType    string `json:"content_type"`
+	Size           int64  `json:"size"`
+	SHA256         string `json:"sha256"`
+}
+
+type artifactVersionResponse struct {
+	ArtifactVersionID string                 `json:"artifact_version_id"`
+	WorkspaceID       string                 `json:"workspace_id"`
+	RepositoryID      string                 `json:"repository_id"`
+	Collection        string                 `json:"collection"`
+	Version           string                 `json:"version"`
+	Status            string                 `json:"status"`
+	PublishedAt       string                 `json:"published_at,omitempty"`
+	Files             []artifactFileResponse `json:"files"`
+}
+
 type apiErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// NewHandler composes health probes with authentication and narrowly scoped
-// workspace/repository administration. No package or content routes exist yet.
+// NewHandler composes health probes, authentication, administration, and the
+// private generic-artifact publication flow. Asset delivery remains on a
+// separate origin and is not served by this administrative router.
 func NewHandler(
 	health *Health,
 	service *auth.Service,
 	workspaceService *workspaces.Service,
 	repositoryService *repositories.Service,
+	artifactService *artifacts.Service,
 	cfg AuthHTTPConfig,
 ) (http.Handler, error) {
-	if health == nil || service == nil || workspaceService == nil || repositoryService == nil {
-		return nil, errors.New("health, authentication, workspace, and repository services are required")
+	if health == nil || service == nil || workspaceService == nil || repositoryService == nil || artifactService == nil {
+		return nil, errors.New("health, authentication, workspace, repository, and artifact services are required")
 	}
 	canonicalOrigin, err := normalizeOrigin(cfg.CanonicalOrigin)
 	if err != nil {
 		return nil, errors.New("a valid HTTPS canonical origin is required")
+	}
+	assetOrigin, err := normalizeOrigin(cfg.AssetOrigin)
+	if err != nil || assetOrigin == canonicalOrigin {
+		return nil, errors.New("a distinct HTTPS asset origin is required")
 	}
 	for _, proxy := range cfg.TrustedProxies {
 		if !proxy.IsValid() {
@@ -175,7 +222,10 @@ func NewHandler(
 		service:         service,
 		workspaces:      workspaceService,
 		repositories:    repositoryService,
+		artifacts:       artifactService,
+		maxUploadBytes:  artifactService.MaxUploadBytes(),
 		canonicalOrigin: canonicalOrigin,
+		assetOrigin:     assetOrigin,
 		trustedProxies:  append([]netip.Prefix(nil), cfg.TrustedProxies...),
 	}
 	authentication.registerRoutes(router)
@@ -200,6 +250,11 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Get("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/grants", h.listRepositoryGrants)
 	router.Put("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/grants/{userID}/{role}", h.grantRepositoryRole)
 	router.Delete("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/grants/{userID}/{role}", h.revokeRepositoryRole)
+	router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/uploads", h.startArtifactUpload)
+	router.Put("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/uploads/{uploadSessionID}", h.receiveArtifactUpload)
+	router.Get("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/{artifactVersionID}", h.getArtifactVersion)
+	router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/{artifactVersionID}/publish", h.publishArtifactVersion)
+	h.registerArtifactAssetRoutes(router)
 	router.Get("/api/v1/admin/repository-visibility-policy", h.getRepositoryVisibilityPolicy)
 	router.Put("/api/v1/admin/repository-visibility-policy", h.setRepositoryVisibilityPolicy)
 }
@@ -451,6 +506,117 @@ func (h *authHTTP) removeWorkspaceMembership(response http.ResponseWriter, reque
 		return
 	}
 	writeNoContent(response)
+}
+
+func (h *authHTTP) startArtifactUpload(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	var payload artifactUploadRequest
+	if status := decodeJSONBody(response, request, &payload); status != 0 {
+		writeAPIError(response, status, requestErrorCode(status))
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	uploadSession, err := h.artifacts.StartUpload(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"), artifacts.StartUploadRequest{
+			Collection:  payload.Collection,
+			Version:     payload.Version,
+			Path:        payload.Path,
+			ContentType: payload.ContentType,
+			Size:        payload.Size,
+			SHA256:      payload.SHA256,
+		})
+	if err != nil {
+		writeArtifactError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, artifactUploadResponse{
+		UploadSessionID:   uploadSession.ID,
+		ArtifactVersionID: uploadSession.ArtifactVersionID,
+		Path:              uploadSession.Path,
+		Status:            uploadSession.Status,
+		ExpiresAt:         uploadSession.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (h *authHTTP) receiveArtifactUpload(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/octet-stream" {
+		writeAPIError(response, http.StatusUnsupportedMediaType, "unsupported_media_type")
+		return
+	}
+	if request.ContentLength > h.maxUploadBytes {
+		writeAPIError(response, http.StatusRequestEntityTooLarge, "request_too_large")
+		return
+	}
+	limitedBody := http.MaxBytesReader(response, request.Body, h.maxUploadBytes)
+	uploadSession, err := h.artifacts.ReceiveUpload(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"),
+		chi.URLParam(request, "uploadSessionID"), limitedBody)
+	if err != nil {
+		writeArtifactError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, artifactUploadResponse{
+		UploadSessionID:   uploadSession.ID,
+		ArtifactVersionID: uploadSession.ArtifactVersionID,
+		Path:              uploadSession.Path,
+		Status:            uploadSession.Status,
+		ExpiresAt:         uploadSession.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (h *authHTTP) publishArtifactVersion(response http.ResponseWriter, request *http.Request) {
+	if !h.requireCanonicalRequest(response, request) {
+		return
+	}
+	_, _, session, ok := h.validateBrowserSessionWithPrincipal(response, request)
+	if !ok {
+		return
+	}
+	if !requireRecentMFA(response, session) {
+		return
+	}
+	artifactVersion, err := h.artifacts.Publish(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"),
+		chi.URLParam(request, "artifactVersionID"))
+	if err != nil {
+		writeArtifactError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, toArtifactVersionResponse(artifactVersion))
+}
+
+func (h *authHTTP) getArtifactVersion(response http.ResponseWriter, request *http.Request) {
+	session, ok := h.validateAuthenticatedSession(response, request)
+	if !ok {
+		return
+	}
+	artifactVersion, err := h.artifacts.GetPublishedVersion(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), chi.URLParam(request, "repositoryID"),
+		chi.URLParam(request, "artifactVersionID"))
+	if err != nil {
+		writeArtifactError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, toArtifactVersionResponse(artifactVersion))
 }
 
 func (h *authHTTP) listRepositories(response http.ResponseWriter, request *http.Request) {
@@ -1035,6 +1201,80 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 	default:
 		writeAPIError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
 	}
+}
+
+func writeArtifactError(response http.ResponseWriter, err error) {
+	var maxBytesError *http.MaxBytesError
+	switch {
+	case errors.Is(err, repositories.ErrUnauthenticated):
+		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
+	case errors.Is(err, repositories.ErrForbidden):
+		writeAPIError(response, http.StatusForbidden, "forbidden")
+	case errors.Is(err, repositories.ErrMembershipUnavailable):
+		writeAPIError(response, http.StatusForbidden, "forbidden")
+	case errors.Is(err, repositories.ErrUserUnavailable):
+		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
+	case errors.Is(err, artifacts.ErrInvalidCollectionName),
+		errors.Is(err, artifacts.ErrInvalidVersionLabel),
+		errors.Is(err, artifacts.ErrInvalidArtifactPath),
+		errors.Is(err, artifacts.ErrInvalidContentType),
+		errors.Is(err, artifacts.ErrInvalidArtifactSize),
+		errors.Is(err, artifacts.ErrInvalidDigest),
+		errors.Is(err, repositories.ErrInvalidWorkspaceID),
+		errors.Is(err, repositories.ErrInvalidRepositoryID):
+		writeAPIError(response, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, artifacts.ErrArtifactNotFound),
+		errors.Is(err, artifacts.ErrUploadNotFound),
+		errors.Is(err, artifacts.ErrDownloadTicketUnavailable),
+		errors.Is(err, repositories.ErrRepositoryUnavailable):
+		writeAPIError(response, http.StatusNotFound, "resource_unavailable")
+	case errors.Is(err, artifacts.ErrVersionConflict),
+		errors.Is(err, artifacts.ErrPathConflict),
+		errors.Is(err, artifacts.ErrUploadStateConflict),
+		errors.Is(err, artifacts.ErrVersionIncomplete),
+		errors.Is(err, artifacts.ErrVersionEmpty):
+		writeAPIError(response, http.StatusConflict, "artifact_state_conflict")
+	case errors.Is(err, artifacts.ErrUploadExpired):
+		writeAPIError(response, http.StatusGone, "upload_session_expired")
+	case errors.Is(err, artifacts.ErrUploadTooLarge), errors.As(err, &maxBytesError):
+		writeAPIError(response, http.StatusRequestEntityTooLarge, "request_too_large")
+	case errors.Is(err, artifacts.ErrUploadDigestMismatch):
+		writeAPIError(response, http.StatusUnprocessableEntity, "artifact_digest_mismatch")
+	case errors.Is(err, artifacts.ErrUploadSizeMismatch):
+		writeAPIError(response, http.StatusUnprocessableEntity, "artifact_size_mismatch")
+	case errors.Is(err, artifacts.ErrInvalidRange):
+		writeAPIError(response, http.StatusRequestedRangeNotSatisfiable, "invalid_range")
+	case errors.Is(err, artifacts.ErrUploadCapacity):
+		response.Header().Set("Retry-After", "1")
+		writeAPIError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	default:
+		writeAPIError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	}
+}
+
+func toArtifactVersionResponse(artifact artifacts.ArtifactVersion) artifactVersionResponse {
+	result := artifactVersionResponse{
+		ArtifactVersionID: artifact.ID,
+		WorkspaceID:       artifact.WorkspaceID,
+		RepositoryID:      artifact.RepositoryID,
+		Collection:        artifact.Collection,
+		Version:           artifact.Version,
+		Status:            artifact.Status,
+		Files:             make([]artifactFileResponse, 0, len(artifact.Files)),
+	}
+	if artifact.PublishedAt != nil {
+		result.PublishedAt = artifact.PublishedAt.UTC().Format(time.RFC3339Nano)
+	}
+	for _, file := range artifact.Files {
+		result.Files = append(result.Files, artifactFileResponse{
+			ArtifactFileID: file.ID,
+			Path:           file.Path,
+			ContentType:    file.ContentType,
+			Size:           file.Size,
+			SHA256:         file.SHA256,
+		})
+	}
+	return result
 }
 
 func writeServiceError(response http.ResponseWriter, err error) {

@@ -57,6 +57,12 @@ Depois de restaurar o target, o retry da tarefa de evento alterou o perfil remot
 
 Este spike é evidência parcial de fase 0, não servidor, integração de produção ou suporte anunciado. Não marcar a fase 0, a fase de identidade nem a v1 como concluídas.
 
+## Ordenação do setup de recuperação (25/10/2026)
+
+Novas execuções do gate falharam ao criar o usuário de recuperação e sua membership B na mesma sequência: o target recebeu o usuário, mas não a membership, embora as tasks reportassem `done/info`. A inspeção somente leitura do código da imagem fixada mostrou que `SCIMGroupClient._patch_add_users` retorna sem emitir PATCH se a conexão SCIM do usuário ainda não existir. O provider restringe usuários aos grupos A/B; esperar identidade antes de qualquer associação também falhou, pois o usuário estava fora de escopo.
+
+O setup do cenário de indisponibilidade agora associa primeiro ao grupo A para entrar no escopo, aguarda usuário remoto ativo e provider idle, e só então emite a associação B, mantendo a asserção de membership B. Essa ordenação separa o bootstrap do evento sob teste; não corrige o provider nem aceita a associação inicial concorrente como confiável. Entrega de memberships durante criação concorrente, unicidade dos grupos, health/freshness e reconciliação determinística continuam gaps. A nova sequência passou no teste focado 3× (592.049s) e no `make verify` integral de 25/10/2026: integração 3× (695.139s) e race 1× (193.634s).
+
 ## Verificação
 
 A repetição `-count=3` observou a variação acima e invalidou o assert determinístico anterior. A fixture ficou limitada a 1 CPU para o worker e a espera de sync inicial foi ampliada de 120s para 240s; o erro agora informa as tarefas ainda bloqueadoras. Um gate falhou uma vez no race detector ao esperar membership do usuário de recuperação; após adicionar diagnósticos limitados e redigidos para tasks, a execução focalizada race passou e o `make verify` integral final também passou. A causa-raiz daquela falha não foi estabelecida; o resultado foi transitório, não uma correção de comportamento comprovada. O teste aceita ambos os resultados de full sync sem tratar nenhum como garantia de reconciliação. Grupos excedentes variaram (4–6), pois o target não rejeita POST duplicado.
