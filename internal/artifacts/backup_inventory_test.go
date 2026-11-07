@@ -223,7 +223,8 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cipherStaging.Close() })
-	if err := backup.RestoreReceiptedGenericObject(ctx, bytes.NewReader(copied.Bytes()), envelope, publicKey, installationID, backupID, identity, cipherStaging, staging, restoredStore); err != nil {
+	trusted := backup.GenericSetRecovery{Signer: publicKey, InstallationID: installationID, BackupID: backupID, SnapshotSHA256: recoveredDigest, Inventory: objects}
+	if err := backup.RestoreGenericSetObject(ctx, bytes.NewReader(copied.Bytes()), setEnvelope, envelope, trusted, identity, cipherStaging, staging, restoredStore); err != nil {
 		t.Fatalf("restore synthetic object: %v", err)
 	}
 	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)

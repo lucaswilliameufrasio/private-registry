@@ -58,6 +58,22 @@ func TestRestoreReceiptedGenericObjectVerifiesCiphertextBeforeWriting(t *testing
 		t.Cleanup(func() { _ = file.Close() })
 		return file
 	}
+	snapshotDigest := sha256.Sum256([]byte("synthetic snapshot"))
+	trusted := GenericSetRecovery{Signer: public, InstallationID: receipt.InstallationID, BackupID: receipt.BackupID, SnapshotSHA256: hex.EncodeToString(snapshotDigest[:]), Inventory: []GenericObject{object}}
+	set := GenericSet{Version: 1, InstallationID: receipt.InstallationID, BackupID: receipt.BackupID, SnapshotSHA256: trusted.SnapshotSHA256, Objects: []ObjectReceipt{receipt}}
+	setEnvelope, err := SignGenericSet(set, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentReceipt := receipt
+	differentReceipt.CipherSHA256 = hex.EncodeToString(make([]byte, sha256.Size))
+	differentEnvelope, err := SignObjectReceipt(differentReceipt, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreGenericSetObject(ctx, bytes.NewReader(sealed.Bytes()), setEnvelope, differentEnvelope, trusted, identity, stage(), stage(), destination); err == nil {
+		t.Fatal("signed object receipt not in the authenticated set was accepted")
+	}
 	modified := bytes.Clone(sealed.Bytes())
 	modified[len(modified)-1] ^= 1
 	if err := RestoreReceiptedGenericObject(ctx, bytes.NewReader(modified), envelope, public, receipt.InstallationID, receipt.BackupID, identity, stage(), stage(), destination); err == nil {
@@ -70,7 +86,7 @@ func TestRestoreReceiptedGenericObjectVerifiesCiphertextBeforeWriting(t *testing
 	if err := RestoreReceiptedGenericObject(ctx, bytes.NewReader(sealed.Bytes()), envelope, public, receipt.InstallationID, uuid.NewString(), identity, stage(), stage(), destination); err == nil {
 		t.Fatal("wrong backup context was accepted")
 	}
-	if err := RestoreReceiptedGenericObject(ctx, bytes.NewReader(sealed.Bytes()), envelope, public, receipt.InstallationID, receipt.BackupID, identity, stage(), stage(), destination); err != nil {
+	if err := RestoreGenericSetObject(ctx, bytes.NewReader(sealed.Bytes()), setEnvelope, envelope, trusted, identity, stage(), stage(), destination); err != nil {
 		t.Fatal("restore valid receipted object:", err)
 	}
 	reader, _, err := destination.Open(ctx, key)
