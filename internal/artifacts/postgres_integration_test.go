@@ -15,6 +15,7 @@ import (
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/jobs"
 	"private-registry/internal/migrations"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
@@ -246,6 +247,32 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	queue, err := jobs.New(db, config.Postgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobNow := time.Now().UTC()
+	if _, err := queue.Enqueue(ctx, "synthetic-recovery-running", "synthetic-recovery", "{}", 3, jobNow, jobNow); err != nil {
+		t.Fatal(err)
+	}
+	job, err := queue.Claim(ctx, "synthetic-recovery", jobNow, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Enqueue(ctx, "synthetic-recovery-pending", "synthetic-recovery", "{}", 3, jobNow, jobNow); err != nil {
+		t.Fatal(err)
+	}
+	recoveryUpload, err := service.StartUpload(ctx, publisherID, workspaceID, repositoryID, requestFor("recovery-uploaded", "v1", "file", payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReceiveUpload(ctx, publisherID, workspaceID, repositoryID, recoveryUpload.ID, bytes.NewReader(payload)); err != nil {
+		t.Fatal(err)
+	}
+	receivingUpload, err := service.StartUpload(ctx, publisherID, workspaceID, repositoryID, requestFor("recovery-receiving", "v1", "file", payload))
+	if err != nil {
+		t.Fatal(err)
+	}
 	recoveryTx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -260,8 +287,44 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 		_ = recoveryTx.Rollback()
 		t.Fatalf("repeated PostgreSQL invalidation counts=%+v error=%v", repeated, err)
 	}
+	held, err := backup.HoldRestoredJobs(ctx, recoveryTx, config.Postgres, jobNow)
+	if err != nil || held != 2 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery held jobs=%d error=%v", held, err)
+	}
+	heldAgain, err := backup.HoldRestoredJobs(ctx, recoveryTx, config.Postgres, jobNow)
+	if err != nil || heldAgain != 0 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("repeated PostgreSQL recovery held jobs=%d error=%v", heldAgain, err)
+	}
+	uploads, err := backup.InvalidateRestoredUploads(ctx, recoveryTx, config.Postgres, jobNow)
+	if err != nil || uploads != 2 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery invalidated uploads=%d error=%v", uploads, err)
+	}
+	uploadsAgain, err := backup.InvalidateRestoredUploads(ctx, recoveryTx, config.Postgres, jobNow)
+	if err != nil || uploadsAgain != 0 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("repeated PostgreSQL recovery invalidated uploads=%d error=%v", uploadsAgain, err)
+	}
+	var receivedStatus, uploadedStatus string
+	var uploadInvalidated int
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT status FROM registry_generic_upload_sessions WHERE upload_session_id = $1`, receivingUpload.ID).Scan(&receivedStatus); err != nil || receivedStatus != "expired" {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovered receiving status=%s error=%v", receivedStatus, err)
+	}
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_generic_upload_sessions WHERE upload_session_id = $1`, recoveryUpload.ID).Scan(&uploadedStatus, &uploadInvalidated); err != nil || uploadedStatus != "uploaded" || uploadInvalidated != 1 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovered uploaded status=%s invalidated=%d error=%v", uploadedStatus, uploadInvalidated, err)
+	}
 	if err := recoveryTx.Rollback(); err != nil {
 		t.Fatal("roll back isolated PostgreSQL recovery test:", err)
+	}
+	if err := queue.Heartbeat(ctx, job.ID, job.LeaseToken, jobNow.Add(time.Second), time.Hour); err != nil {
+		t.Fatal("source job lease changed after rolled back recovery:", err)
+	}
+	if _, err := service.Publish(ctx, publisherID, workspaceID, repositoryID, recoveryUpload.ArtifactVersionID); err != nil {
+		t.Fatal("source upload changed after rolled back recovery:", err)
 	}
 	if _, err := postgresSessions.Validate(ctx, oldSession.BearerToken); err != nil {
 		t.Fatal("source session changed after rolled back recovery:", err)

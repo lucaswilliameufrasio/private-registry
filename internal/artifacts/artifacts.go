@@ -510,6 +510,14 @@ func (s *Service) Publish(
 			if artifact.Status != "receiving" {
 				return ErrVersionConflict
 			}
+			var invalidatedUpload bool
+			query = `SELECT EXISTS (SELECT 1 FROM registry_generic_upload_sessions WHERE artifact_version_id = ` + bind(s.driver, 1) + ` AND recovery_invalidated = 1)`
+			if err := tx.QueryRowContext(ctx, query, artifactVersionID).Scan(&invalidatedUpload); err != nil {
+				return errors.New("artifact recovery state could not be checked")
+			}
+			if invalidatedUpload {
+				return ErrVersionIncomplete
+			}
 
 			now := time.Now().UTC()
 			if err := s.expireOldSessions(ctx, tx, artifactVersionID, now); err != nil {

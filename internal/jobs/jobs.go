@@ -157,7 +157,7 @@ func (q *Queue) Claim(ctx context.Context, kind string, now time.Time, duration 
 		// Limit cleanup per call so many exhausted leases cannot monopolize the lock.
 		for i := 0; i < 32; i++ {
 			query := `SELECT job_id, idempotency_key, kind, payload, attempts, max_attempts FROM registry_jobs
-				WHERE kind = ` + q.bind(1) + ` AND ((status = 'pending' AND available_at_ms <= ` + q.bind(2) + `)
+				WHERE kind = ` + q.bind(1) + ` AND recovery_previous_status IS NULL AND ((status = 'pending' AND available_at_ms <= ` + q.bind(2) + `)
 				OR (status = 'running' AND lease_until_ms <= ` + q.bind(3) + `)) ORDER BY available_at_ms, job_id LIMIT 1`
 			err := tx.QueryRowContext(ctx, query, kind, now.UnixMilli(), now.UnixMilli()).Scan(&job.ID, &job.Key, &job.Kind, &job.Payload, &job.Attempts, &job.MaxAttempts)
 			if errors.Is(err, sql.ErrNoRows) {

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/jobs"
 	"private-registry/internal/migrations"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
@@ -41,6 +43,16 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil || len(version.Files) != 1 {
 		t.Fatalf("publish synthetic artifact: %v", err)
 	}
+	publisherID := fixture.userIDs["publisher"]
+	receivingUpload := startFixtureUpload(t, fixture, publisherID, "recovery-receiving", "v1", "file", payload)
+	uploadingUpload := startFixtureUpload(t, fixture, publisherID, "recovery-uploading", "v1", "file", payload)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_generic_upload_sessions SET status = 'uploading', upload_claim_id = ? WHERE upload_session_id = ?`, uuid.NewString(), uploadingUpload.ID); err != nil {
+		t.Fatal(err)
+	}
+	uploadedUpload := startFixtureUpload(t, fixture, publisherID, "recovery-uploaded", "v1", "file", payload)
+	if _, err := fixture.service.ReceiveUpload(ctx, publisherID, fixture.workspaceID, fixture.repositoryID, uploadedUpload.ID, bytes.NewReader(payload)); err != nil {
+		t.Fatal(err)
+	}
 	sourceSessions, err := sessions.New(fixture.db, config.SQLite)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +67,21 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	}
 	ticket, err := fixture.service.IssueDownloadTicket(ctx, readerID, fixture.workspaceID, fixture.repositoryID, version.ID, version.Files[0].ID, 0)
 	if err != nil {
+		t.Fatal(err)
+	}
+	jobQueue, err := jobs.New(fixture.db, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobNow := time.Now().UTC()
+	if _, err := jobQueue.Enqueue(ctx, "synthetic-running", "synthetic-recovery", "{}", 3, jobNow, jobNow); err != nil {
+		t.Fatal(err)
+	}
+	activeJob, err := jobQueue.Claim(ctx, "synthetic-recovery", jobNow, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobQueue.Enqueue(ctx, "synthetic-pending", "synthetic-recovery", "{}", 3, jobNow, jobNow); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(t.TempDir(), "recovery")
@@ -89,7 +116,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
-	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.DownloadTickets != 1 {
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 3 {
 		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
@@ -120,6 +147,26 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = preparedDB.Close() })
+	preparedQueue, err := jobs.New(preparedDB, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preparedQueue.Claim(ctx, "synthetic-recovery", jobNow.Add(2*time.Hour), time.Minute); !errors.Is(err, jobs.ErrNoJob) {
+		t.Fatalf("held recovery job could be claimed: %v", err)
+	}
+	if err := preparedQueue.Finish(ctx, activeJob.ID, activeJob.LeaseToken, true, jobNow.Add(time.Second), time.Time{}); !errors.Is(err, jobs.ErrLease) {
+		t.Fatalf("restored lease remained valid: %v", err)
+	}
+	var heldRunning, heldPending int
+	if err := preparedDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_jobs WHERE recovery_previous_status = 'running' AND lease_token IS NULL AND lease_until_ms IS NULL`).Scan(&heldRunning); err != nil || heldRunning != 1 {
+		t.Fatalf("running recovery hold count=%d err=%v", heldRunning, err)
+	}
+	if err := preparedDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_jobs WHERE recovery_previous_status = 'pending'`).Scan(&heldPending); err != nil || heldPending != 1 {
+		t.Fatalf("pending recovery hold count=%d err=%v", heldPending, err)
+	}
+	if err := jobQueue.Heartbeat(ctx, activeJob.ID, activeJob.LeaseToken, jobNow.Add(time.Second), time.Hour); err != nil {
+		t.Fatal("source job changed during isolated recovery:", err)
+	}
 	preparedSessions, err := sessions.New(preparedDB, config.SQLite)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +187,25 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	}
 	if _, _, err := preparedArtifacts.ResolveDownloadTicket(ctx, ticket.Token); !errors.Is(err, ErrDownloadTicketUnavailable) {
 		t.Fatalf("prepared old ticket accepted: %v", err)
+	}
+	for _, id := range []string{receivingUpload.ID, uploadingUpload.ID} {
+		var status string
+		var claim sql.NullString
+		var invalidated int
+		if err := preparedDB.QueryRowContext(ctx, `SELECT status, upload_claim_id, recovery_invalidated FROM registry_generic_upload_sessions WHERE upload_session_id = ?`, id).Scan(&status, &claim, &invalidated); err != nil || status != "expired" || claim.Valid || invalidated != 1 {
+			t.Fatalf("prepared upload state=%s claim=%v invalidated=%d err=%v", status, claim.Valid, invalidated, err)
+		}
+	}
+	if _, err := preparedArtifacts.Publish(ctx, publisherID, fixture.workspaceID, fixture.repositoryID, uploadedUpload.ArtifactVersionID); !errors.Is(err, ErrVersionIncomplete) {
+		t.Fatalf("invalidated uploaded receipt could be published: %v", err)
+	}
+	var objectDigest string
+	var invalidated int
+	if err := preparedDB.QueryRowContext(ctx, `SELECT object_sha256, recovery_invalidated FROM registry_generic_upload_sessions WHERE upload_session_id = ?`, uploadedUpload.ID).Scan(&objectDigest, &invalidated); err != nil || objectDigest != object.SHA256 || invalidated != 1 {
+		t.Fatalf("uploaded recovery reference changed: invalidated=%d err=%v", invalidated, err)
+	}
+	if _, err := fixture.service.Publish(ctx, publisherID, fixture.workspaceID, fixture.repositoryID, uploadedUpload.ArtifactVersionID); err != nil {
+		t.Fatal("source uploaded receipt changed during isolated recovery:", err)
 	}
 	wrongSet := set
 	wrongSet.Objects = []backup.ObjectReceipt{}
@@ -164,6 +230,35 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	}
 	if err := migrations.VerifyCurrent(ctx, recoveredDB, config.SQLite, expectedInstallationID); err != nil {
 		t.Fatal("verify isolated recovery schema:", err)
+	}
+	rollbackTx, err := recoveredDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rollbackTx.ExecContext(ctx, `CREATE TRIGGER synthetic_upload_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'recovery.uploads.invalidated' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := backup.HoldRestoredJobs(ctx, rollbackTx, config.SQLite, jobNow); err != nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := backup.InvalidateRestoredUploads(ctx, rollbackTx, config.SQLite, jobNow); err == nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal("upload recovery accepted a failed audit write")
+	}
+	if err := rollbackTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var unchangedStatus string
+	var unchangedInvalidation int
+	if err := recoveredDB.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_generic_upload_sessions WHERE upload_session_id = ?`, receivingUpload.ID).Scan(&unchangedStatus, &unchangedInvalidation); err != nil || unchangedStatus != "receiving" || unchangedInvalidation != 0 {
+		t.Fatalf("recovery rollback changed upload: status=%s invalidated=%d err=%v", unchangedStatus, unchangedInvalidation, err)
+	}
+	var runningStatus string
+	var held sql.NullString
+	if err := recoveredDB.QueryRowContext(ctx, `SELECT status, recovery_previous_status FROM registry_jobs WHERE job_id = ?`, activeJob.ID).Scan(&runningStatus, &held); err != nil || runningStatus != "running" || held.Valid {
+		t.Fatalf("recovery rollback changed job: status=%s held=%v err=%v", runningStatus, held.Valid, err)
 	}
 	failedTx, err := recoveredDB.BeginTx(ctx, nil)
 	if err != nil {
@@ -234,7 +329,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (16, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (17, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
 		_ = futureTx.Rollback()
 		t.Fatal(err)
 	}

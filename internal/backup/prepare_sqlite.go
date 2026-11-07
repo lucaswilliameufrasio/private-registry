@@ -19,10 +19,12 @@ var recoveryDirectoryName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$
 // PreparedSQLiteRecovery describes an unpromoted, isolated database copy.
 // It does not mean the installation, objects, secrets or backup are complete.
 type PreparedSQLiteRecovery struct {
-	DatabasePath   string
-	SnapshotSize   int64
-	GenericObjects int
-	Invalidated    InvalidatedCredentials
+	DatabasePath       string
+	SnapshotSize       int64
+	GenericObjects     int
+	Invalidated        InvalidatedCredentials
+	HeldJobs           int64
+	InvalidatedUploads int64
 }
 
 // PrepareSQLiteRecovery writes an authenticated plaintext SQLite snapshot to a
@@ -126,8 +128,16 @@ func PrepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if err != nil {
 		return result, err
 	}
+	heldJobs, err := HoldRestoredJobs(ctx, tx, config.SQLite, time.Now())
+	if err != nil {
+		return result, err
+	}
+	invalidatedUploads, err := InvalidateRestoredUploads(ctx, tx, config.SQLite, time.Now())
+	if err != nil {
+		return result, err
+	}
 	if err := tx.Commit(); err != nil {
 		return result, errors.New("isolated SQLite recovery transaction could not commit")
 	}
-	return PreparedSQLiteRecovery{DatabasePath: path, SnapshotSize: size, GenericObjects: len(inventory), Invalidated: invalidated}, nil
+	return PreparedSQLiteRecovery{DatabasePath: path, SnapshotSize: size, GenericObjects: len(inventory), Invalidated: invalidated, HeldJobs: heldJobs, InvalidatedUploads: invalidatedUploads}, nil
 }
