@@ -309,15 +309,11 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err := os.Mkdir(preparedParent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	prepareInput := filepath.Join(snapshotDir, "prepare-input.sqlite")
-	if err := sqlitebackup.Decrypt(ctx, ciphertextPath, prepareInput, identity); err != nil {
-		t.Fatal("decrypt isolated preparation input:", err)
-	}
-	inputFile, err := os.Open(prepareInput)
+	inputFile, err := os.Open(ciphertextPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepareErr := backup.PrepareSQLiteGenericRecovery(ctx, inputFile, 64<<20, 10, 10, captured.Set, trusted, preparedParent, "isolated", capturedSources, identity, newStage)
+	prepared, prepareErr := backup.PrepareEncryptedSQLiteGenericRecovery(ctx, inputFile, 65<<20, 64<<20, 10, 10, captured.Set, trusted, preparedParent, "isolated", capturedSources, identity, newStage)
 	inputCloseErr := inputFile.Close()
 	if prepareErr != nil || inputCloseErr != nil || prepared.GenericObjects != 1 {
 		t.Fatalf("prepare captured SQLite recovery count=%d prepare=%v close=%v", prepared.GenericObjects, prepareErr, inputCloseErr)
@@ -356,17 +352,29 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if _, err := preparedService.OpenFile(ctx, fixture.userIDs["member"], fixture.workspaceID, fixture.repositoryID, version.Files[0].ID, 0, int64(len(before))); !errors.Is(err, repositories.ErrForbidden) {
 		t.Fatalf("ungranted prepared recovery read = %v", err)
 	}
-	failedInput, err := os.Open(prepareInput)
+	failedInput, err := os.Open(ciphertextPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed, failedErr := backup.PrepareSQLiteGenericRecovery(ctx, failedInput, 64<<20, 10, 10, captured.Set, trusted, preparedParent, "missing-source", nil, identity, newStage)
+	failed, failedErr := backup.PrepareEncryptedSQLiteGenericRecovery(ctx, failedInput, 65<<20, 64<<20, 10, 10, captured.Set, trusted, preparedParent, "missing-source", nil, identity, newStage)
 	failedCloseErr := failedInput.Close()
 	if failedErr == nil || failed.DatabasePath != "" || failedCloseErr != nil {
 		t.Fatalf("missing recovery source accepted: result=%+v error=%v close=%v", failed, failedErr, failedCloseErr)
 	}
 	if _, err := os.Stat(filepath.Join(preparedParent, "missing-source", "RECOVERY_INCOMPLETE")); err != nil {
 		t.Fatal("failed generic recovery lost incomplete marker:", err)
+	}
+	wrongInput, err := os.Open(ciphertextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongResult, wrongErr := backup.PrepareEncryptedSQLiteGenericRecovery(ctx, wrongInput, 65<<20, 64<<20, 10, 10, captured.Set, trusted, preparedParent, "wrong-key", capturedSources, wrongIdentity, newStage)
+	wrongCloseErr := wrongInput.Close()
+	if wrongErr == nil || wrongResult.DatabasePath != "" || wrongCloseErr != nil {
+		t.Fatalf("wrong recovery key accepted: result=%+v err=%v close=%v", wrongResult, wrongErr, wrongCloseErr)
+	}
+	if _, err := os.Stat(filepath.Join(preparedParent, "wrong-key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("wrong recovery key created a destination: %v", err)
 	}
 	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)
 	if err != nil {
