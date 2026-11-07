@@ -20,6 +20,24 @@ type logicalQuotaResponse struct {
 	Revision   int64  `json:"revision"`
 }
 
+type genericLogicalUsageResponse struct {
+	ReservedBytes  int64 `json:"reserved_bytes"`
+	PublishedBytes int64 `json:"published_bytes"`
+}
+
+func (h *authHTTP) getGenericLogicalUsage(response http.ResponseWriter, request *http.Request) {
+	session, ok := h.validateAuthenticatedSession(response, request)
+	if !ok {
+		return
+	}
+	usage, err := h.repositories.WorkspaceGenericLogicalUsage(request.Context(), session.UserID, chi.URLParam(request, "workspaceID"))
+	if err != nil {
+		writeRepositoryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, genericLogicalUsageResponse{ReservedBytes: usage.ReservedBytes, PublishedBytes: usage.PublishedBytes})
+}
+
 func quotaResponse(policy repositories.LogicalQuota) logicalQuotaResponse {
 	result := logicalQuotaResponse{Mode: "unlimited", Revision: policy.Revision}
 	if policy.LimitBytes != nil {

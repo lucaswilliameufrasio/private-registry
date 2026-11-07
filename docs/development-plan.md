@@ -764,6 +764,8 @@ Interface mínima: abrir, escrever staging, finalizar objeto, HEAD/verificar, le
 
 **Fundação parcial:** as migrations v12/v13 permitem tetos lógicos opcionais versionados por workspace e repositório, e o início de upload genérico reserva o tamanho declarado sob o lock transacional compartilhado. Sessões ativas, recebidas e publicadas contam por referência lógica; expiração ou rejeição libera a reserva. Administrador da instalação pode consultar e alterar as policies pelas rotas autenticadas com controle de revisão, MFA recente para escrita e auditoria. Delegação ao workspace, quota da instalação, medição/limites para outros formatos e reconciliação operacional continuam pendentes; teto não configurado não oferece proteção. Ver [ADR 0018](adr/0018-generic-logical-quota.md).
 
+Administradores da instalação também podem consultar bytes genéricos reservados e publicados agregados por workspace, sem nomes de conteúdo; não há ainda detalhamento para administradores de workspace, medição de tráfego/download ou valores físicos de storage.
+
 O limite de tamanho de upload e a concorrência HTTP configuráveis são apenas guardrails locais por processo (`REGISTRY_MAX_UPLOAD_BYTES`, default 1 GiB; `REGISTRY_MAX_CONCURRENT_UPLOADS`, default 4). Não reservam quota, não limitam uso agregado por workspace/repositório e não coordenam múltiplas instâncias. Cada upload session é reivindicada por um único request; a expiração lazy recupera estados persistidos, mas não substitui job periódico nem remove objetos órfãos.
 
 - Quota de workspace/repositório, upload individual e concorrência.

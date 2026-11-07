@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"private-registry/internal/config"
+	"private-registry/internal/repositories"
 )
 
 func TestSQLiteGenericQuotaReservations(t *testing.T) {
@@ -119,5 +120,15 @@ func exerciseGenericQuota(t *testing.T, service *Service, db *sql.DB, driver con
 	}
 	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("third", "v1", "same.bin", payload)); err != nil {
 		t.Fatalf("expired reservation did not release quota: %v", err)
+	}
+	if _, err := service.repositories.WorkspaceGenericLogicalUsage(ctx, actor, workspace); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("non-admin read of workspace aggregates = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_instance_admins (user_id, granted_by, granted_at) VALUES (`+bindArg(1)+`, NULL, `+bindArg(2)+`)`, actor, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal("seed installation administrator:", err)
+	}
+	usage, err := service.repositories.WorkspaceGenericLogicalUsage(ctx, actor, workspace)
+	if err != nil || usage.ReservedBytes != int64(len(payload)) || usage.PublishedBytes != int64(len(payload)) {
+		t.Fatalf("workspace logical usage = %+v, %v", usage, err)
 	}
 }

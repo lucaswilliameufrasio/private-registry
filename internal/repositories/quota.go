@@ -17,6 +17,36 @@ type LogicalQuota struct {
 	Revision   int64
 }
 
+// GenericLogicalUsage contains only workspace-level aggregate bytes. Reserved
+// bytes include unfinished and uploaded-but-unpublished generic artifacts.
+type GenericLogicalUsage struct {
+	ReservedBytes  int64
+	PublishedBytes int64
+}
+
+// WorkspaceGenericLogicalUsage is restricted to active installation admins and
+// deliberately exposes no repository, package, version, or consumer details.
+func (s *Service) WorkspaceGenericLogicalUsage(ctx context.Context, actorUserID, workspaceID string) (GenericLogicalUsage, error) {
+	var usage GenericLogicalUsage
+	err := s.withQuotaTarget(ctx, actorUserID, workspaceID, "", func(tx *sql.Tx, query string, args []any) error {
+		var limit sql.NullInt64
+		var revision int64
+		if err := tx.QueryRowContext(ctx, query, args...).Scan(&limit, &revision); errors.Is(err, sql.ErrNoRows) {
+			return ErrRepositoryUnavailable
+		} else if err != nil {
+			return errors.New("workspace quota context could not be read")
+		}
+		query = `SELECT COALESCE(SUM(CASE WHEN status IN ('receiving', 'uploading', 'uploaded') THEN expected_size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'published' THEN expected_size ELSE 0 END), 0)
+			FROM registry_generic_upload_sessions WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, args[0]).Scan(&usage.ReservedBytes, &usage.PublishedBytes); err != nil {
+			return errors.New("generic logical usage could not be read")
+		}
+		return nil
+	})
+	return usage, err
+}
+
 // LogicalQuotaPolicy exposes policy metadata only to installation admins. It
 // does not grant access to workspace contents or individual package metadata.
 func (s *Service) LogicalQuotaPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string) (LogicalQuota, error) {

@@ -867,6 +867,12 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	if upload.UploadSessionID == "" || upload.ArtifactVersionID == "" || upload.Status != "receiving" {
 		t.Fatalf("created upload session response is incomplete: %+v", upload)
 	}
+	usagePath := fmt.Sprintf("/api/v1/admin/workspaces/%s/generic-logical-usage", workspace.ID)
+	usage := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, usagePath, "", authTestOrigin, "registry.example", mfaCookies, "")
+	var usageData genericLogicalUsageResponse
+	if usage.Code != http.StatusOK || json.Unmarshal(usage.Body.Bytes(), &usageData) != nil || usageData.ReservedBytes != int64(len(payload)) || usageData.PublishedBytes != 0 {
+		t.Fatalf("reserved usage = status %d body %s", usage.Code, usage.Body.String())
+	}
 
 	contentPath := startPath + "/" + upload.UploadSessionID
 	received := authRawHTTPRequestWithCookies(fixture.handler, http.MethodPut, contentPath, payload,
@@ -881,6 +887,10 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
 	if published.Code != http.StatusOK {
 		t.Fatalf("artifact publication failed: status=%d body=%s", published.Code, published.Body.String())
+	}
+	usage = authHTTPRequestWithCookies(fixture.handler, http.MethodGet, usagePath, "", authTestOrigin, "registry.example", mfaCookies, "")
+	if usage.Code != http.StatusOK || json.Unmarshal(usage.Body.Bytes(), &usageData) != nil || usageData.ReservedBytes != 0 || usageData.PublishedBytes != int64(len(payload)) {
+		t.Fatalf("published usage = status %d body %s", usage.Code, usage.Body.String())
 	}
 	var version artifactVersionResponse
 	if err := json.Unmarshal(published.Body.Bytes(), &version); err != nil {

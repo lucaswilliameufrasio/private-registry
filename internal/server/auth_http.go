@@ -258,6 +258,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Get("/api/v1/admin/repository-visibility-policy", h.getRepositoryVisibilityPolicy)
 	router.Put("/api/v1/admin/repository-visibility-policy", h.setRepositoryVisibilityPolicy)
 	router.Get("/api/v1/admin/workspaces/{workspaceID}/generic-logical-quota", h.getLogicalQuota)
+	router.Get("/api/v1/admin/workspaces/{workspaceID}/generic-logical-usage", h.getGenericLogicalUsage)
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/generic-logical-quota", h.setLogicalQuota)
 	router.Get("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.getLogicalQuota)
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
