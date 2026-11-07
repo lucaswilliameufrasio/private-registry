@@ -134,11 +134,9 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 			t.Fatal("truncated ciphertext was accepted")
 		}
 	}
-	decrypted, err := age.Decrypt(bytes.NewReader(copied.Bytes()), identity)
-	if err != nil {
-		t.Fatal("decrypt synthetic object:", err)
-	}
-	recoveredBytes, err := io.ReadAll(decrypted)
+	var recovered bytes.Buffer
+	err = backup.DecryptGenericObject(ctx, bytes.NewReader(copied.Bytes()), int64(copied.Len()), objects[0], &recovered, identity)
+	recoveredBytes := recovered.Bytes()
 	if err != nil || !bytes.Equal(recoveredBytes, before) {
 		t.Fatalf("verify synthetic recovery identity: %v", err)
 	}
