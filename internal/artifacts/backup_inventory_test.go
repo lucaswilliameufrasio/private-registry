@@ -152,8 +152,20 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		t.Fatalf("failed snapshot recovery left output: %v", err)
 	}
 	recoveredPath := filepath.Join(recoveryDir, "registry.sqlite")
-	if err := sqlitebackup.Decrypt(ctx, ciphertextPath, recoveredPath, identity); err != nil {
-		t.Fatal("recover synthetic snapshot:", err)
+	encryptedInput, err := os.Open(ciphertextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredOutput, err := os.OpenFile(recoveredPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		_ = encryptedInput.Close()
+		t.Fatal(err)
+	}
+	recoveredSize, decryptErr := backup.DecryptSnapshot(ctx, encryptedInput, recoveredOutput, 65<<20, 64<<20, encryptedSnapshot.PlainSHA256, identity)
+	encryptedCloseErr := encryptedInput.Close()
+	recoveredCloseErr := recoveredOutput.Close()
+	if decryptErr != nil || encryptedCloseErr != nil || recoveredCloseErr != nil || recoveredSize != encryptedSnapshot.PlainBytes {
+		t.Fatalf("recover synthetic snapshot: decrypt=%v input=%v output=%v", decryptErr, encryptedCloseErr, recoveredCloseErr)
 	}
 	digestSnapshot := func(path string) (string, int64) {
 		t.Helper()
@@ -169,8 +181,8 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		return digest, size
 	}
 	originalDigest, originalSize := digestSnapshot(snapshotPath)
-	recoveredDigest, recoveredSize := digestSnapshot(recoveredPath)
-	if originalDigest != recoveredDigest || originalSize != recoveredSize || encryptedSnapshot.PlainSHA256 != originalDigest || encryptedSnapshot.PlainBytes != originalSize {
+	recoveredDigest, digestRecoveredSize := digestSnapshot(recoveredPath)
+	if originalDigest != recoveredDigest || originalSize != digestRecoveredSize || encryptedSnapshot.PlainSHA256 != originalDigest || encryptedSnapshot.PlainBytes != originalSize {
 		t.Fatal("recovered snapshot digest or size differs")
 	}
 	after := []byte("synthetic after snapshot")
