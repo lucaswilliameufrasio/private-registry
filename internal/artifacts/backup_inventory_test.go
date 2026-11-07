@@ -3,9 +3,15 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"private-registry/internal/backup"
+	"private-registry/internal/config"
+	"private-registry/internal/database"
+	"private-registry/internal/spikes/sqlitebackup"
 )
 
 func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) {
@@ -57,5 +63,53 @@ func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) 
 	}
 	if _, err := backup.InventoryGeneric(ctx, tx, 2); err == nil {
 		t.Fatal("conflicting object sizes were accepted")
+	}
+}
+
+func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	actor := fixture.userIDs["publisher"]
+	before := []byte("synthetic before snapshot")
+	first := startFixtureUpload(t, fixture, actor, "snapshot", "v1", "first", before)
+	if _, err := fixture.service.ReceiveUpload(ctx, actor, fixture.workspaceID, fixture.repositoryID, first.ID, bytes.NewReader(before)); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	if err := os.Mkdir(snapshotDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(snapshotDir, "registry.sqlite")
+	if _, err := sqlitebackup.Snapshot(ctx, fixture.db, snapshotPath, sqlitebackup.Options{PagesPerStep: 16}); err != nil {
+		t.Fatal("create synthetic online snapshot:", err)
+	}
+	after := []byte("synthetic after snapshot")
+	second := startFixtureUpload(t, fixture, actor, "snapshot", "v2", "second", after)
+	if _, err := fixture.service.ReceiveUpload(ctx, actor, fixture.workspaceID, fixture.repositoryID, second.ID, bytes.NewReader(after)); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{DataDir: snapshotDir, DatabaseDriver: config.SQLite, DatabaseDSN: snapshotPath, DatabaseMaxOpenConns: 1}
+	snapshotDB, err := database.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal("open isolated snapshot:", err)
+	}
+	t.Cleanup(func() { _ = snapshotDB.Close() })
+	tx, err := snapshotDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	objects, err := backup.InventoryGeneric(ctx, tx, 10)
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("snapshot inventory count=%d err=%v; want one", len(objects), err)
+	}
+	var copied bytes.Buffer
+	if err := backup.CopyGenericObject(ctx, fixture.storage, objects[0], &copied); err != nil || !bytes.Equal(copied.Bytes(), before) {
+		t.Fatalf("copy object from snapshot inventory: %v", err)
+	}
+	var liveCount int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT count(*) FROM registry_generic_upload_sessions WHERE status = 'uploaded'`).Scan(&liveCount); err != nil || liveCount != 2 {
+		t.Fatalf("live synthetic state count=%d err=%v; want 2", liveCount, err)
 	}
 }
