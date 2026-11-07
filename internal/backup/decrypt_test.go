@@ -47,6 +47,10 @@ func TestDecryptGenericObjectRejectsUntrustedCiphertext(t *testing.T) {
 	if err := DecryptGenericObject(context.Background(), bytes.NewReader(sealed.Bytes()), int64(sealed.Len()-1), object, io.Discard, identity); err == nil {
 		t.Fatal("ciphertext beyond limit accepted")
 	}
+	withTrailing := append(bytes.Clone(sealed.Bytes()), []byte("untrusted trailing bytes")...)
+	if err := DecryptGenericObject(context.Background(), bytes.NewReader(withTrailing), int64(len(withTrailing)), object, io.Discard, identity); err == nil {
+		t.Fatal("ciphertext with trailing bytes accepted")
+	}
 	wrongObject := object
 	wrongObject.Size--
 	if err := DecryptGenericObject(context.Background(), bytes.NewReader(sealed.Bytes()), int64(sealed.Len()), wrongObject, io.Discard, identity); err == nil {
