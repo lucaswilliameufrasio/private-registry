@@ -183,6 +183,14 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err != nil || len(verifiedObjects) != 1 {
 		t.Fatalf("verify synthetic inventory receipts: %v", err)
 	}
+	set := backup.GenericSet{Version: 1, InstallationID: installationID, BackupID: backupID, SnapshotSHA256: originalDigest, Objects: []backup.ObjectReceipt{receipt}}
+	setEnvelope, err := backup.SignGenericSet(set, signingKey)
+	if err != nil {
+		t.Fatal("sign synthetic generic set:", err)
+	}
+	if _, err := backup.VerifyGenericSetInventory(setEnvelope, publicKey, installationID, backupID, recoveredDigest, objects); err != nil {
+		t.Fatal("verify synthetic snapshot and object inventory:", err)
+	}
 	if _, err := age.Decrypt(bytes.NewReader(copied.Bytes()), wrongIdentity); err == nil {
 		t.Fatal("incorrect recovery identity decrypted synthetic object")
 	}
