@@ -66,6 +66,9 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = recoveredDB.Close() })
+	if err := backup.VerifySQLiteIntegrity(ctx, recoveredDB); err != nil {
+		t.Fatal("verify isolated recovered SQLite integrity:", err)
+	}
 	if err := migrations.VerifyCurrent(ctx, recoveredDB, config.SQLite, expectedInstallationID); err != nil {
 		t.Fatal("verify isolated recovery schema:", err)
 	}
@@ -148,5 +151,36 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	}
 	if err := futureTx.Rollback(); err != nil {
 		t.Fatal(err)
+	}
+	conn, err := recoveredDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`CREATE TABLE synthetic_parent (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE synthetic_child (parent_id INTEGER REFERENCES synthetic_parent(id))`,
+		`INSERT INTO synthetic_child (parent_id) VALUES (42)`,
+	} {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			_ = conn.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.VerifySQLiteIntegrity(ctx, recoveredDB); err == nil {
+		t.Fatal("recovered database with broken foreign key was accepted")
+	}
+	if _, err := sourceSessions.Validate(ctx, session.BearerToken); err != nil {
+		t.Fatal("source session changed after recovered-database failure injection:", err)
 	}
 }
