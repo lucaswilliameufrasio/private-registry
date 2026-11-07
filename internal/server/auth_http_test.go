@@ -935,6 +935,53 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	if version.Status != "published" || len(version.Files) != 1 || version.Files[0].SHA256 != hex.EncodeToString(digest[:]) {
 		t.Fatalf("published artifact response = %+v; want one verified file", version)
 	}
+	publicPath := "/public/artifact-http/artifact-files/widget/2026.10/dist/widget.js"
+	privatePublic := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "")
+	missingPublic := authAssetHTTPRequest(fixture.handler, http.MethodGet, "/public/artifact-http/artifact-files/widget/2026.10/dist/missing.js", "assets.example", "")
+	if privatePublic.Code != http.StatusNotFound || missingPublic.Code != privatePublic.Code || missingPublic.Body.String() != privatePublic.Body.String() {
+		t.Fatalf("private and missing public responses differ: private=%d/%s missing=%d/%s", privatePublic.Code, privatePublic.Body.String(), missingPublic.Code, missingPublic.Body.String())
+	}
+	if err := fixture.repositoryService.SetVisibilityPolicy(ctx, ownerID, repositories.PolicyAll); err != nil {
+		t.Fatal("allow public visibility:", err)
+	}
+	if err := fixture.repositoryService.SetVisibility(ctx, ownerID, workspace.ID, repository.ID, repositories.VisibilityUnlisted, true); err != nil {
+		t.Fatal("make repository unlisted:", err)
+	}
+	publicAsset := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "")
+	if publicAsset.Code != http.StatusOK || publicAsset.Body.String() != string(payload) || publicAsset.Header().Get("Cache-Control") != "no-store" || publicAsset.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.HasPrefix(publicAsset.Header().Get("Content-Disposition"), "inline") || publicAsset.Header().Get("Content-Security-Policy") != "sandbox; default-src 'none'" || publicAsset.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("public asset = status %d headers %v body %q", publicAsset.Code, publicAsset.Header(), publicAsset.Body.String())
+	}
+	publicRange := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "bytes=4-9")
+	if publicRange.Code != http.StatusPartialContent || publicRange.Body.String() != string(payload[4:10]) {
+		t.Fatalf("public range = status %d body %q", publicRange.Code, publicRange.Body.String())
+	}
+	invalidPublicRange := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "bytes=999-")
+	if invalidPublicRange.Code != http.StatusRequestedRangeNotSatisfiable || invalidPublicRange.Header().Get("Content-Length") != "" {
+		t.Fatalf("invalid public range = status %d length %q", invalidPublicRange.Code, invalidPublicRange.Header().Get("Content-Length"))
+	}
+	publicNotModified := authAssetConditionalHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "", publicAsset.Header().Get("ETag"), "")
+	if publicNotModified.Code != http.StatusNotModified || publicNotModified.Body.Len() != 0 {
+		t.Fatalf("conditional public asset = status %d body %q", publicNotModified.Code, publicNotModified.Body.String())
+	}
+	publicHead := authAssetHTTPRequest(fixture.handler, http.MethodHead, publicPath, "assets.example", "")
+	if publicHead.Code != http.StatusOK || publicHead.Body.Len() != 0 || publicHead.Header().Get("Content-Length") != fmt.Sprint(len(payload)) {
+		t.Fatalf("public HEAD = status %d length %s", publicHead.Code, publicHead.Header().Get("Content-Length"))
+	}
+	if wrongOrigin := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "registry.example", ""); wrongOrigin.Code != http.StatusForbidden {
+		t.Fatalf("public asset on administrative origin = %d", wrongOrigin.Code)
+	}
+	if err := fixture.repositoryService.SetVisibility(ctx, ownerID, workspace.ID, repository.ID, repositories.VisibilityListed, true); err != nil {
+		t.Fatal("make repository listed:", err)
+	}
+	if listed := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", ""); listed.Code != http.StatusOK {
+		t.Fatalf("listed public asset = %d", listed.Code)
+	}
+	if err := fixture.repositoryService.SetVisibility(ctx, ownerID, workspace.ID, repository.ID, repositories.VisibilityPrivate, false); err != nil {
+		t.Fatal("make repository private again:", err)
+	}
+	if privateAgain := authAssetConditionalHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "", publicAsset.Header().Get("ETag"), ""); privateAgain.Code != http.StatusNotFound {
+		t.Fatalf("conditional public request after privatization = %d", privateAgain.Code)
+	}
 	manifestPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/%s",
 		workspace.ID, repository.ID, version.ArtifactVersionID)
 	manifest := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, manifestPath, "",

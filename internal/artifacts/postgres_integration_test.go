@@ -168,6 +168,40 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if version.Status != "published" || len(version.Files) != 1 {
 		t.Fatalf("PostgreSQL published version = %+v", version)
 	}
+	if _, err := service.ResolvePublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", "dist/package.tar"); !errors.Is(err, ErrArtifactNotFound) {
+		t.Fatalf("private PostgreSQL public resolution = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET visibility = 'unlisted' WHERE repository_id = $1`, repositoryID); err != nil {
+		t.Fatal(err)
+	}
+	publicFile, err := service.ResolvePublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", "dist/package.tar")
+	if err != nil {
+		t.Fatal("resolve PostgreSQL public file:", err)
+	}
+	publicStream, err := service.OpenPublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", publicFile.Path, publicFile.ID, 0, publicFile.Size)
+	if err != nil {
+		t.Fatal("open PostgreSQL public file:", err)
+	}
+	publicBytes, readErr := io.ReadAll(publicStream.Reader)
+	closeErr := publicStream.Reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(publicBytes, payload) {
+		t.Fatalf("PostgreSQL public read=%v close=%v", readErr, closeErr)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_generic_artifact_versions SET status = 'quarantined' WHERE artifact_version_id = $1`, version.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResolvePublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", publicFile.Path); !errors.Is(err, ErrArtifactNotFound) {
+		t.Fatalf("quarantined public resolution = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_generic_artifact_versions SET status = 'published' WHERE artifact_version_id = $1`, version.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET visibility = 'private' WHERE repository_id = $1`, repositoryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.OpenPublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", publicFile.Path, publicFile.ID, 0, publicFile.Size); !errors.Is(err, ErrArtifactNotFound) {
+		t.Fatalf("PostgreSQL open after privatization = %v", err)
+	}
 
 	ticket, err := service.IssueDownloadTicket(ctx, readerID, workspaceID, repositoryID,
 		version.ID, version.Files[0].ID, 0)

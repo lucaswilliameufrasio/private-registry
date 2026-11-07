@@ -29,6 +29,8 @@ func (h *authHTTP) registerArtifactAssetRoutes(router chi.Router) {
 	router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/{artifactVersionID}/files/{fileID}/download-link", h.issueArtifactDownloadLink)
 	router.Get("/api/v1/assets/{token}", h.downloadArtifact)
 	router.Head("/api/v1/assets/{token}", h.downloadArtifact)
+	router.Get("/public/{workspaceSlug}/{repositorySlug}/{collection}/{version}/*", h.downloadPublicArtifact)
+	router.Head("/public/{workspaceSlug}/{repositorySlug}/{collection}/{version}/*", h.downloadPublicArtifact)
 }
 
 func (h *authHTTP) issueArtifactDownloadLink(response http.ResponseWriter, request *http.Request) {
