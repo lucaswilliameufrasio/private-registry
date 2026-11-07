@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"private-registry/internal/authattempts"
@@ -95,6 +96,22 @@ func New(db *sql.DB, driver config.DatabaseDriver, key *secrets.MasterKey) (*Ser
 		attempts: attemptLimiter,
 		verify:   password.Verify,
 	}, nil
+}
+
+// BeginPersonalToken and CompletePersonalToken use a separate source bucket;
+// callers must complete only after the bearer and current authority validate.
+func (s *Service) BeginPersonalToken(ctx context.Context, source string) (time.Duration, error) {
+	if s == nil || s.attempts == nil {
+		return 0, ErrUnavailable
+	}
+	return s.attempts.BeginPersonalToken(ctx, source)
+}
+
+func (s *Service) CompletePersonalToken(ctx context.Context, source string) error {
+	if s == nil || s.attempts == nil {
+		return ErrUnavailable
+	}
+	return s.attempts.CompletePersonalToken(ctx, source)
 }
 
 // Login verifies a local username/password pair and returns the next restricted

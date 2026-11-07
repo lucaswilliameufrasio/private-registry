@@ -796,6 +796,11 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		t.Fatalf("administrator login failed: status=%d body=%s", login.Code, login.Body.String())
 	}
 	enrollmentCookies := assertSessionCookies(t, login)
+	preMFAIssuePath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/personal-read-tokens", workspace.ID, repository.ID)
+	preMFAIssue := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, preMFAIssuePath, `{}`, authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if preMFAIssue.Code == http.StatusCreated {
+		t.Fatal("personal token was issued before MFA")
+	}
 	beginEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
 		"/api/v1/auth/mfa/enrollment", "", authTestOrigin, "registry.example",
 		enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
@@ -1019,6 +1024,50 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	}
 	if privateAgain := authAssetConditionalHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "", publicAsset.Header().Get("ETag"), ""); privateAgain.Code != http.StatusNotFound {
 		t.Fatalf("conditional public request after privatization = %d", privateAgain.Code)
+	}
+	tokenIssuePath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/personal-read-tokens", workspace.ID, repository.ID)
+	withoutTokenCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, tokenIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, "")
+	if withoutTokenCSRF.Code != http.StatusForbidden {
+		t.Fatalf("token issuance without CSRF = %d", withoutTokenCSRF.Code)
+	}
+	issueResponse := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, tokenIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	var personal issuedPersonalTokenResponse
+	if issueResponse.Code != http.StatusCreated || json.Unmarshal(issueResponse.Body.Bytes(), &personal) != nil || personal.Token.TokenID == "" || personal.Bearer == "" || issueResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("personal token issuance failed: status=%d", issueResponse.Code)
+	}
+	listTokens := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, "/api/v1/personal-read-tokens", "", authTestOrigin, "registry.example", mfaCookies, "")
+	var tokenList personalTokenListResponse
+	if listTokens.Code != http.StatusOK || json.Unmarshal(listTokens.Body.Bytes(), &tokenList) != nil || len(tokenList.Tokens) != 1 || tokenList.Tokens[0].TokenID != personal.Token.TokenID || strings.Contains(listTokens.Body.String(), personal.Bearer) {
+		t.Fatalf("personal token metadata listing failed: status=%d", listTokens.Code)
+	}
+	tokenManifestPath := fmt.Sprintf("/api/v1/token/workspaces/%s/repositories/%s/artifacts/%s", workspace.ID, repository.ID, version.ArtifactVersionID)
+	tokenManifest := authBearerHTTPRequest(fixture.handler, http.MethodGet, tokenManifestPath, "registry.example", "bearer "+personal.Bearer, "", "")
+	if tokenManifest.Code != http.StatusOK {
+		t.Fatalf("token manifest status=%d", tokenManifest.Code)
+	}
+	filePath := fmt.Sprintf("/api/v1/token/workspaces/%s/repositories/%s/files/%s", workspace.ID, repository.ID, version.Files[0].ArtifactFileID)
+	tokenFile := authBearerHTTPRequest(fixture.handler, http.MethodGet, filePath, "assets.example", "Bearer "+personal.Bearer, "bytes=4-9", "https://consumer.example")
+	if tokenFile.Code != http.StatusPartialContent || tokenFile.Body.String() != string(payload[4:10]) || tokenFile.Header().Get("Cache-Control") != "private, no-store" || tokenFile.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("token file status=%d headers=%v", tokenFile.Code, tokenFile.Header())
+	}
+	wrongTokenHost := authBearerHTTPRequest(fixture.handler, http.MethodGet, filePath, "registry.example", "Bearer "+personal.Bearer, "", "")
+	if wrongTokenHost.Code != http.StatusForbidden {
+		t.Fatalf("token content on administrative origin = %d", wrongTokenHost.Code)
+	}
+	wrongRepository := fmt.Sprintf("/api/v1/token/workspaces/%s/repositories/%s/artifacts/%s", workspace.ID, uuid.NewString(), version.ArtifactVersionID)
+	if denied := authBearerHTTPRequest(fixture.handler, http.MethodGet, wrongRepository, "registry.example", "Bearer "+personal.Bearer, "", ""); denied.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-repository token request = %d", denied.Code)
+	}
+	revokePath := "/api/v1/personal-read-tokens/" + personal.Token.TokenID
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, revokePath, "", authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("token revocation without CSRF = %d", denied.Code)
+	}
+	revokedToken := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, revokePath, "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if revokedToken.Code != http.StatusNoContent {
+		t.Fatalf("token revocation = %d", revokedToken.Code)
+	}
+	if denied := authBearerHTTPRequest(fixture.handler, http.MethodGet, filePath, "assets.example", "Bearer "+personal.Bearer, "", ""); denied.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked bearer request = %d", denied.Code)
 	}
 	manifestPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/%s",
 		workspace.ID, repository.ID, version.ArtifactVersionID)
@@ -1315,6 +1364,25 @@ func authRawHTTPRequestWithCookies(
 	}
 	if csrfHeader != "" {
 		request.Header.Set(csrfHeaderName, csrfHeader)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func authBearerHTTPRequest(handler http.Handler, method, path, host, authorization, rangeHeader, origin string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "https://"+host+path, nil)
+	request.Host = host
+	request.TLS = &tls.ConnectionState{}
+	request.RemoteAddr = "192.0.2.10:54321"
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	if rangeHeader != "" {
+		request.Header.Set("Range", rangeHeader)
+	}
+	if origin != "" {
+		request.Header.Set("Origin", origin)
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

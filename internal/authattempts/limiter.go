@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	windowDuration = 15 * time.Minute
-	accountLimit   = 5
-	sourceLimit    = 20
-	maxBuckets     = 50000
+	windowDuration           = 15 * time.Minute
+	accountLimit             = 5
+	sourceLimit              = 20
+	maxBuckets               = 50000
+	personalTokenSourceLimit = 20
 )
 
 var (
@@ -36,6 +37,24 @@ type Limiter struct {
 	driver         config.DatabaseDriver
 	now            func() time.Time
 	bucketCapacity int
+}
+
+// BeginPersonalToken bounds repeated bearer failures separately from password
+// and MFA source buckets. Successful bearer validation clears this bucket.
+func (l *Limiter) BeginPersonalToken(ctx context.Context, source string) (time.Duration, error) {
+	canonicalSource, err := normalizeSource(source)
+	if err != nil {
+		return 0, err
+	}
+	return l.begin(ctx, []bucket{{key: bucketKey("personal-token-source", canonicalSource), limit: personalTokenSourceLimit}})
+}
+
+func (l *Limiter) CompletePersonalToken(ctx context.Context, source string) error {
+	canonicalSource, err := normalizeSource(source)
+	if err != nil {
+		return err
+	}
+	return l.reset(ctx, bucketKey("personal-token-source", canonicalSource))
 }
 
 type bucket struct {

@@ -96,6 +96,34 @@ func TestPasswordAttemptLimitsAndSuccessReset(t *testing.T) {
 	}
 }
 
+func TestPersonalTokenFailuresAreBoundedAndSeparateFromPassword(t *testing.T) {
+	fixture := newSQLiteFixture(t)
+	ctx := context.Background()
+	for range personalTokenSourceLimit - 1 {
+		if _, err := fixture.limiter.BeginPersonalToken(ctx, "192.0.2.44:1234"); err != nil {
+			t.Fatal("token attempt rejected early:", err)
+		}
+	}
+	if err := fixture.limiter.CompletePersonalToken(ctx, "192.0.2.44"); err != nil {
+		t.Fatal("reset after successful token validation:", err)
+	}
+	for range personalTokenSourceLimit {
+		if _, err := fixture.limiter.BeginPersonalToken(ctx, "192.0.2.44"); err != nil {
+			t.Fatal("token attempt rejected early:", err)
+		}
+	}
+	if _, err := fixture.limiter.BeginPersonalToken(ctx, "192.0.2.44"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("repeated bad tokens were not rate limited: %v", err)
+	}
+	if _, err := fixture.limiter.BeginPassword(ctx, "synthetic", "192.0.2.44"); err != nil {
+		t.Fatalf("token failures blocked unrelated password bucket: %v", err)
+	}
+	fixture.now = fixture.now.Add(windowDuration + time.Second)
+	if _, err := fixture.limiter.BeginPersonalToken(ctx, "192.0.2.44"); err != nil {
+		t.Fatalf("token source did not recover after window: %v", err)
+	}
+}
+
 func TestSourceLimitIsSharedAcrossAccountsAndMFA(t *testing.T) {
 	fixture := newSQLiteFixture(t)
 	ctx := context.Background()

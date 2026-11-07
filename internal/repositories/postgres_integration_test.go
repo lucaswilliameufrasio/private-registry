@@ -209,4 +209,5 @@ func TestPostgresRepositoryIdentityAuthorizationAndVisibility(t *testing.T) {
 	if auditCount != 4 {
 		t.Fatalf("PostgreSQL repository and policy mutations were not audited: %d", auditCount)
 	}
+	exercisePersonalReadTokens(t, ctx, db, config.Postgres)
 }

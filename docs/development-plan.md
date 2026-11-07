@@ -1,5 +1,7 @@
 # Plano de desenvolvimento — Registry privado de pacotes e artefatos
 
+**Atualização de credenciais:** a fatia inicial de tokens pessoais de leitura, schema v15, restringe cada token a um repositório e ao grant `reader` específico; emissão exige MFA recente e o segredo é exibido uma vez. Manifesto e download genéricos aceitam bearer em origens separadas. Requisições já autenticadas podem concluir após revogação; publicação automatizada, contas de serviço e clientes nativos continuam pendentes. Detalhes e limites: [ADR 0021](adr/0021-personal-read-tokens.md).
+
 **Atualização de serving público:** repositórios explicitamente `listed`/`unlisted` podem servir arquivos genéricos publicados por rota limitada na origem de assets, conforme [ADR 0020](adr/0020-public-generic-assets.md). A allowlist CORS global é opcional e restrita; configurações mais granulares, outros formatos, cache público e aceite completo de bundles seguem pendentes. As referências históricas abaixo à ausência total de serving público precedem essa fatia.
 
 **Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso atualizado em 22/10/2026

@@ -607,38 +607,47 @@ func (s *Service) OpenFile(
 	offset int64,
 	length int64,
 ) (OpenedFile, error) {
-	if s == nil || ctx == nil {
-		return OpenedFile{}, errors.New("artifact read service is unavailable")
-	}
-	userID, err := parseID(userID, repositories.ErrUnauthenticated)
-	if err != nil {
-		return OpenedFile{}, repositories.ErrUnauthenticated
-	}
-	workspaceID, err = parseID(workspaceID, repositories.ErrInvalidWorkspaceID)
-	if err != nil {
-		return OpenedFile{}, repositories.ErrInvalidWorkspaceID
-	}
-	repositoryID, err = parseID(repositoryID, repositories.ErrInvalidRepositoryID)
-	if err != nil {
-		return OpenedFile{}, repositories.ErrInvalidRepositoryID
-	}
-	fileID, err = parseID(fileID, ErrArtifactNotFound)
-	if err != nil {
-		return OpenedFile{}, ErrArtifactNotFound
-	}
-	granted, err := s.repositories.HasRepositoryGrant(ctx, userID, workspaceID, repositoryID, repositories.GrantReader)
-	if err != nil {
-		return OpenedFile{}, err
-	}
-	if !granted {
-		return OpenedFile{}, repositories.ErrForbidden
-	}
-
-	file, err := s.readPublishedFile(ctx, workspaceID, repositoryID, fileID)
+	file, err := s.ResolvePrivateFile(ctx, userID, workspaceID, repositoryID, fileID)
 	if err != nil {
 		return OpenedFile{}, err
 	}
 	return s.openObject(ctx, workspaceID, file, offset, length)
+}
+
+// ResolvePrivateFile checks the current reader grant before exposing metadata.
+func (s *Service) ResolvePrivateFile(ctx context.Context, userID, workspaceID, repositoryID, fileID string) (File, error) {
+	if s == nil || ctx == nil {
+		return File{}, errors.New("artifact read service is unavailable")
+	}
+	userID, err := parseID(userID, repositories.ErrUnauthenticated)
+	if err != nil {
+		return File{}, repositories.ErrUnauthenticated
+	}
+	workspaceID, err = parseID(workspaceID, repositories.ErrInvalidWorkspaceID)
+	if err != nil {
+		return File{}, repositories.ErrInvalidWorkspaceID
+	}
+	repositoryID, err = parseID(repositoryID, repositories.ErrInvalidRepositoryID)
+	if err != nil {
+		return File{}, repositories.ErrInvalidRepositoryID
+	}
+	fileID, err = parseID(fileID, ErrArtifactNotFound)
+	if err != nil {
+		return File{}, ErrArtifactNotFound
+	}
+	granted, err := s.repositories.HasRepositoryGrant(ctx, userID, workspaceID, repositoryID, repositories.GrantReader)
+	if err != nil {
+		return File{}, err
+	}
+	if !granted {
+		return File{}, repositories.ErrForbidden
+	}
+
+	file, err := s.readPublishedFile(ctx, workspaceID, repositoryID, fileID)
+	if err != nil {
+		return File{}, err
+	}
+	return file, nil
 }
 
 func (s *Service) IssueDownloadTicket(
