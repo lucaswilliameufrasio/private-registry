@@ -82,6 +82,7 @@ func TestPostgresRepositoryIdentityAuthorizationAndVisibility(t *testing.T) {
 		t.Fatalf("PostgreSQL repository was not private by default: %q", repository.Visibility)
 	}
 	exerciseQuotaAdministration(t, ctx, db, repositoryService, config.Postgres, instanceAdminID, memberID, workspace.ID, repository.ID)
+	exerciseRecoveryJobAdministration(t, ctx, db, repositoryService, config.Postgres, instanceAdminID, memberID)
 	exerciseDeadJobAdministration(t, ctx, db, repositoryService, config.Postgres, instanceAdminID, memberID)
 	if _, _, err := repositoryService.ListForWorkspace(ctx, memberID, workspace.ID, "", 10); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("PostgreSQL membership implied repository read access: %v", err)
@@ -203,7 +204,7 @@ func TestPostgresRepositoryIdentityAuthorizationAndVisibility(t *testing.T) {
 	}
 	var auditCount int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events
-		WHERE target_type IN ('repository', 'installation') AND action <> 'logical_quota.changed'`).Scan(&auditCount); err != nil {
+		WHERE target_type IN ('repository', 'installation') AND actor_type = 'user' AND action <> 'logical_quota.changed'`).Scan(&auditCount); err != nil {
 		t.Fatal(err)
 	}
 	if auditCount != 4 {

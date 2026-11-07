@@ -859,6 +859,39 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	if staleRetry.Code != http.StatusConflict || !strings.Contains(staleRetry.Body.String(), `"dead_job_revision_conflict"`) {
 		t.Fatalf("stale dead-job retry = status %d body %s", staleRetry.Code, staleRetry.Body.String())
 	}
+	recoveryID, err := queue.Enqueue(ctx, "synthetic-recovery-key", "expire-generic-uploads", `{"secret":"synthetic-hidden"}`, 3, jobNow, jobNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_jobs SET recovery_previous_status = 'pending', revision = 1 WHERE job_id = ?`, recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	listRecovery := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, "/api/v1/admin/jobs/recovery", "", authTestOrigin, "registry.example", mfaCookies, "")
+	if listRecovery.Code != http.StatusOK || !strings.Contains(listRecovery.Body.String(), recoveryID) || strings.Contains(listRecovery.Body.String(), "synthetic-hidden") || strings.Contains(listRecovery.Body.String(), "synthetic-recovery-key") {
+		t.Fatalf("recovery job list = status %d body %s", listRecovery.Code, listRecovery.Body.String())
+	}
+	releasePath := "/api/v1/admin/jobs/" + recoveryID + "/release-recovery"
+	releaseBody := `{"expected_revision":1,"confirm_destinations_and_policies":true}`
+	noMFARelease := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, releasePath, releaseBody, authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
+	if noMFARelease.Code == http.StatusNoContent {
+		t.Fatal("recovery release accepted a session without recent MFA")
+	}
+	noReleaseCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, releasePath, releaseBody, authTestOrigin, "registry.example", mfaCookies, "")
+	if noReleaseCSRF.Code != http.StatusForbidden {
+		t.Fatalf("recovery release without CSRF = %d", noReleaseCSRF.Code)
+	}
+	noConfirmation := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, releasePath, `{"expected_revision":1,"confirm_destinations_and_policies":false}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if noConfirmation.Code != http.StatusPreconditionFailed {
+		t.Fatalf("recovery release without confirmation = %d", noConfirmation.Code)
+	}
+	released := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, releasePath, releaseBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if released.Code != http.StatusNoContent {
+		t.Fatalf("recovery release = status %d body %s", released.Code, released.Body.String())
+	}
+	staleRelease := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, releasePath, releaseBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if staleRelease.Code != http.StatusConflict || !strings.Contains(staleRelease.Body.String(), `"recovery_job_revision_conflict"`) {
+		t.Fatalf("stale recovery release = status %d body %s", staleRelease.Code, staleRelease.Body.String())
+	}
 
 	payload := []byte("synthetic generic artifact")
 	digest := sha256.Sum256(payload)

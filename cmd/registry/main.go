@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,6 +107,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if len(cfg.TrustedProxies) == 0 {
 		return errors.New("REGISTRY_TRUSTED_PROXIES must include the TLS-terminating proxy for serve")
 	}
+	if err := verifyServeSchema(ctx, db, cfg.DatabaseDriver); err != nil {
+		return err
+	}
 	masterKey, err := secrets.LoadMasterKeyFile(cfg.MasterKeyFile, cfg.DataDir)
 	if err != nil {
 		return err
@@ -176,6 +180,22 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		return errors.Join(errors.New("HTTP server failed"), serveErr)
 	}
 	logger.Info("registry HTTP server stopped")
+	return nil
+}
+
+func verifyServeSchema(ctx context.Context, db *sql.DB, driver config.DatabaseDriver) error {
+	if ctx == nil || db == nil {
+		return errors.New("database schema verification is unavailable")
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var installationID string
+	if err := db.QueryRowContext(checkCtx, `SELECT installation_id FROM registry_installation WHERE singleton_id = 1`).Scan(&installationID); err != nil {
+		return errors.New("database schema is not ready; run migrations explicitly")
+	}
+	if err := migrations.VerifyCurrent(checkCtx, db, driver, installationID); err != nil {
+		return errors.New("database schema verification failed; run or inspect migrations explicitly")
+	}
 	return nil
 }
 

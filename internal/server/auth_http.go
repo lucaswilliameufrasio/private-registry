@@ -280,6 +280,8 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
 	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
 	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
+	router.Get("/api/v1/admin/jobs/recovery", h.listRecoveryJobs)
+	router.Post("/api/v1/admin/jobs/{jobID}/release-recovery", h.releaseRecoveryJob)
 	router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/personal-read-tokens", h.issuePersonalReadToken)
 	router.Get("/api/v1/personal-read-tokens", h.listPersonalReadTokens)
 	router.Delete("/api/v1/personal-read-tokens/{tokenID}", h.revokePersonalReadToken)
@@ -1227,6 +1229,8 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusConflict, "logical_quota_revision_conflict")
 	case errors.Is(err, repositories.ErrDeadJobConflict):
 		writeAPIError(response, http.StatusConflict, "dead_job_revision_conflict")
+	case errors.Is(err, repositories.ErrRecoveryJobConflict):
+		writeAPIError(response, http.StatusConflict, "recovery_job_revision_conflict")
 	case errors.Is(err, repositories.ErrVisibilityNotAllowed):
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):

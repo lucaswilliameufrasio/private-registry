@@ -2,6 +2,10 @@
 
 Registry privado self-hosted em desenvolvimento. A fundação contém migrations explícitas de identidade/tenancy/MFA/sessões, autenticação local e rotas HTTP protegidas para workspaces, memberships, metadados/configuração de repositórios e gestão de grants explícitos. **Ainda não há UI, passkeys, convites ou adapters produtivos. O serving genérico privado e público é parcial; não há suporte anunciado aos sete formatos.** Fase 1 permanece incompleta e não há servidor utilizável, release ou suporte anunciado a protocolos. O repositório permanece privado, sem licença definida.
 
+**Atualização de schema:** a migration atual é a v16. O comando `serve` verifica o histórico e os checksums das migrations antes de abrir o listener, mas não executa migrations. Referências históricas abaixo a v15 precedem essa atualização.
+
+**Trabalhos recuperados:** após uma futura promoção segura, `GET /api/v1/admin/jobs/recovery` lista metadados limitados de jobs suspensos para administradores. `POST /api/v1/admin/jobs/{jobID}/release-recovery` libera somente o job idempotente de expiração de uploads, com MFA recente, CSRF, `expected_revision` e `confirm_destinations_and_policies: true`; a confirmação é declaração do operador, não validação automática. Outros jobs e uploads invalidados seguem bloqueados. A preparação experimental de SQLite continua deixando `RECOVERY_INCOMPLETE`, e não há promoção operacional completa.
+
 ## Especificação
 
 - [Plano completo da v1](docs/development-plan.md)

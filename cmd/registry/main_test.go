@@ -14,6 +14,7 @@ import (
 
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/migrations"
 	"private-registry/internal/secrets"
 )
 
@@ -91,6 +92,54 @@ func TestServeRejectsIncompleteRecoveryBeforeOpeningDatabase(t *testing.T) {
 	err = run(context.Background(), []string{"serve"}, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "incomplete recovery") {
 		t.Fatalf("serve recovered SQLite under another data directory = %v", err)
+	}
+}
+
+func TestServeSchemaVerificationIsReadOnlyAndFailsClosed(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "registry-data")
+	cfg := config.Config{DataDir: root, DatabaseDriver: config.SQLite, DatabaseDSN: filepath.Join(root, "registry.sqlite"), DatabaseMaxOpenConns: 2}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := verifyServeSchema(ctx, db, config.SQLite); err == nil {
+		t.Fatal("serve schema verification accepted an unmigrated database")
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'goose_db_version')`).Scan(&exists); err != nil || exists {
+		t.Fatalf("serve schema verification performed migrations: exists=%t err=%v", exists, err)
+	}
+	if _, err := migrations.Migrate(ctx, db, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyServeSchema(ctx, db, config.SQLite); err != nil {
+		t.Fatal("verify current schema:", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_migration_checksums SET checksum = ? WHERE version_id = 16`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyServeSchema(ctx, db, config.SQLite); err == nil {
+		t.Fatal("serve schema verification accepted a changed migration checksum")
+	}
+}
+
+func TestServeRefusesUnmigratedSchemaBeforeOpeningListener(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "registry-data")
+	t.Setenv("REGISTRY_DATA_DIR", dataDir)
+	t.Setenv("REGISTRY_DATABASE_DRIVER", "sqlite")
+	t.Setenv("REGISTRY_DATABASE_DSN", filepath.Join(dataDir, "registry.sqlite"))
+	t.Setenv("REGISTRY_MASTER_KEY_FILE", filepath.Join(root, "missing-key"))
+	t.Setenv("REGISTRY_CANONICAL_ORIGIN", "https://registry.example")
+	t.Setenv("REGISTRY_ASSET_ORIGIN", "https://assets.example")
+	t.Setenv("REGISTRY_TRUSTED_PROXIES", "127.0.0.1")
+	t.Setenv("REGISTRY_LISTEN_ADDRESS", "127.0.0.1:34567")
+	err := run(context.Background(), []string{"serve"}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "schema is not ready") {
+		t.Fatalf("serve accepted unmigrated schema or proceeded to key/listener: %v", err)
 	}
 }
 
