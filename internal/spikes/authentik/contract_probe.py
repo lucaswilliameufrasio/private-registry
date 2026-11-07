@@ -645,7 +645,36 @@ def main():
             return None
         return current, groups_a[0], still_assigned_group, remote
 
-    removal = wait_until("SCIM group membership removal while user remains assigned", removed_from_group_a)
+    try:
+        removal = wait_until("SCIM group membership removal while user remains assigned", removed_from_group_a)
+    except RuntimeError:
+        current = get_target_state()
+        group_ids = {
+            item.get("id")
+            for item in current["groups"].values()
+            if item.get("displayName") in (group_a_name, group_b_name)
+        }
+        relevant_requests = []
+        for item in current.get("requests", []):
+            resource = item.get("resource") or {}
+            if resource.get("displayName") not in (group_a_name, group_b_name) and not any(
+                item.get("path", "").endswith("/" + str(group_id)) for group_id in group_ids if group_id
+            ):
+                continue
+            relevant_requests.append({
+                "method": item.get("method"),
+                "path": item.get("path"),
+                "status": item.get("status"),
+                "resource": resource,
+                "request": item.get("request"),
+            })
+        diagnostic = {
+            "target_user": next((item for item in current["users"].values() if item.get("userName") == user_name), None),
+            "target_groups": [item for item in current["groups"].values() if item.get("id") in group_ids],
+            "group_requests": relevant_requests[-40:],
+            "provider_tasks": recent_task_diagnostics(scim_provider_id),
+        }
+        raise RuntimeError("SCIM removal diagnostics=" + json.dumps(diagnostic, sort_keys=True)) from None
     removal_state, removed_group, still_assigned_group_b, still_assigned_user = removal
     if not still_assigned_user.get("active") or not still_assigned_group_b.get("members"):
         raise RuntimeError("removing one group removed the user or its independent second membership")
