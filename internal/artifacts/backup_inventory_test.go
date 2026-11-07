@@ -37,6 +37,10 @@ func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) 
 		t.Fatal("inventory exceeded its bound without an error")
 	}
 	for _, object := range objects {
+		var copied bytes.Buffer
+		if err := backup.CopyGenericObject(ctx, fixture.storage, object, &copied); err != nil || int64(copied.Len()) != object.Size {
+			t.Fatalf("copy inventoried object length=%d err=%v", copied.Len(), err)
+		}
 		reader, info, err := fixture.storage.Open(ctx, object.Key)
 		if err != nil {
 			t.Fatal("open inventoried object:", err)

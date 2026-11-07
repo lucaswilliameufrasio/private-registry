@@ -178,6 +178,10 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if inventoryErr != nil || rollbackErr != nil || len(objects) != 1 || objects[0].Size != int64(len(payload)) {
 		t.Fatalf("PostgreSQL inventory count=%d inventory error=%v rollback error=%v", len(objects), inventoryErr, rollbackErr)
 	}
+	var copied bytes.Buffer
+	if err := backup.CopyGenericObject(ctx, objectStore, objects[0], &copied); err != nil || !bytes.Equal(copied.Bytes(), payload) {
+		t.Fatalf("copy PostgreSQL-inventoried object: %v", err)
+	}
 	if _, err := service.ResolvePublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", "dist/package.tar"); !errors.Is(err, ErrArtifactNotFound) {
 		t.Fatalf("private PostgreSQL public resolution = %v", err)
 	}
