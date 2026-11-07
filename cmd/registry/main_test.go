@@ -65,6 +65,35 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestServeRejectsIncompleteRecoveryBeforeOpeningDatabase(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "recovery")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dataDir, "RECOVERY_INCOMPLETE")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(dataDir, "registry.sqlite")
+	t.Setenv("REGISTRY_DATA_DIR", dataDir)
+	t.Setenv("REGISTRY_DATABASE_DRIVER", "sqlite")
+	t.Setenv("REGISTRY_DATABASE_DSN", databasePath)
+	t.Setenv("REGISTRY_DATABASE_MAX_OPEN_CONNS", "4")
+	err := run(context.Background(), []string{"serve"}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "incomplete recovery") {
+		t.Fatalf("serve incomplete recovery = %v", err)
+	}
+	if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("serve touched recovery database: %v", err)
+	}
+	otherData := filepath.Join(t.TempDir(), "other-data")
+	t.Setenv("REGISTRY_DATA_DIR", otherData)
+	err = run(context.Background(), []string{"serve"}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "incomplete recovery") {
+		t.Fatalf("serve recovered SQLite under another data directory = %v", err)
+	}
+}
+
 func TestRunInitMasterKeyCreatesPrivateKeyWithoutDatabase(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("local master key files are supported only on Linux")

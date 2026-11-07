@@ -3,12 +3,17 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
@@ -59,6 +64,94 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	path := filepath.Join(root, "registry.sqlite")
 	if _, err := sqlitebackup.Snapshot(ctx, fixture.db, path, sqlitebackup.Options{PagesPerStep: 16}); err != nil {
 		t.Fatal(err)
+	}
+	snapshotBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDigest := sha256.Sum256(snapshotBytes)
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupID := uuid.NewString()
+	object := version.Files[0]
+	syntheticCipher := sha256.Sum256([]byte("synthetic ciphertext identity"))
+	receipt := backup.ObjectReceipt{Version: 1, InstallationID: expectedInstallationID, BackupID: backupID, WorkspaceID: fixture.workspaceID, PlainSHA256: object.SHA256, PlainBytes: object.Size, CipherSHA256: hex.EncodeToString(syntheticCipher[:]), CipherBytes: 1}
+	set := backup.GenericSet{Version: 1, InstallationID: expectedInstallationID, BackupID: backupID, SnapshotSHA256: hex.EncodeToString(snapshotDigest[:]), Objects: []backup.ObjectReceipt{receipt}}
+	setEnvelope, err := backup.SignGenericSet(set, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := backup.GenericSetRecovery{Signer: public, InstallationID: expectedInstallationID, BackupID: backupID, SnapshotSHA256: set.SnapshotSHA256}
+	parent := filepath.Join(t.TempDir(), "private-parent")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.DownloadTickets != 1 {
+		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("recovery incomplete marker missing:", err)
+	}
+	beforeRetry, err := os.ReadFile(prepared.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared"); err == nil {
+		t.Fatal("existing recovery destination was overwritten")
+	}
+	afterRetry, err := os.ReadFile(prepared.DatabasePath)
+	if err != nil || !bytes.Equal(beforeRetry, afterRetry) {
+		t.Fatalf("existing recovery destination changed on retry: %v", err)
+	}
+	corrupt := bytes.Clone(snapshotBytes)
+	corrupt[len(corrupt)-1] ^= 1
+	if _, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(corrupt), 64<<20, 10, 10, setEnvelope, trusted, parent, "corrupt"); err == nil {
+		t.Fatal("snapshot with incorrect signed digest was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "corrupt", "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("failed recovery marker missing:", err)
+	}
+	preparedCfg := config.Config{DataDir: filepath.Join(parent, "prepared"), DatabaseDriver: config.SQLite, DatabaseDSN: prepared.DatabasePath, DatabaseMaxOpenConns: 2}
+	preparedDB, err := database.Open(ctx, preparedCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = preparedDB.Close() })
+	preparedSessions, err := sessions.New(preparedDB, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preparedSessions.Validate(ctx, session.BearerToken); !errors.Is(err, sessions.ErrSessionUnavailable) {
+		t.Fatalf("prepared old session accepted: %v", err)
+	}
+	preparedRepositories, err := repositories.New(preparedDB, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preparedRepositories.VerifyPersonalReadToken(ctx, personal.Bearer, fixture.workspaceID, fixture.repositoryID); !errors.Is(err, repositories.ErrPersonalTokenUnavailable) {
+		t.Fatalf("prepared old token accepted: %v", err)
+	}
+	preparedArtifacts, err := New(preparedDB, config.SQLite, preparedRepositories, fixture.storage, Options{MaxUploadBytes: 1024, MaxConcurrentUploads: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := preparedArtifacts.ResolveDownloadTicket(ctx, ticket.Token); !errors.Is(err, ErrDownloadTicketUnavailable) {
+		t.Fatalf("prepared old ticket accepted: %v", err)
+	}
+	wrongSet := set
+	wrongSet.Objects = []backup.ObjectReceipt{}
+	wrongEnvelope, err := backup.SignGenericSet(wrongSet, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, wrongEnvelope, trusted, parent, "missing-object"); err == nil {
+		t.Fatal("signed set missing snapshot object was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "missing-object", "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("incomplete recovery marker missing:", err)
 	}
 	cfg := config.Config{DataDir: root, DatabaseDriver: config.SQLite, DatabaseDSN: path, DatabaseMaxOpenConns: 2}
 	recoveredDB, err := database.Open(ctx, cfg)

@@ -62,6 +62,16 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	if args[0] == "serve" {
+		if err := rejectIncompleteRecovery(cfg.DataDir); err != nil {
+			return err
+		}
+		if cfg.DatabaseDriver == config.SQLite {
+			if err := rejectIncompleteRecovery(filepath.Dir(cfg.DatabaseDSN)); err != nil {
+				return err
+			}
+		}
+	}
 
 	db, err := database.Open(ctx, cfg)
 	if err != nil {
@@ -166,6 +176,17 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		return errors.Join(errors.New("HTTP server failed"), serveErr)
 	}
 	logger.Info("registry HTTP server stopped")
+	return nil
+}
+
+func rejectIncompleteRecovery(dataDir string) error {
+	_, err := os.Lstat(filepath.Join(dataDir, "RECOVERY_INCOMPLETE"))
+	if err == nil {
+		return errors.New("cannot serve an incomplete recovery directory")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("recovery directory status could not be checked")
+	}
 	return nil
 }
 
