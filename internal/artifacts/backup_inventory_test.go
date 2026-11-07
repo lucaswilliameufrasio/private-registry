@@ -93,12 +93,47 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if _, err := sqlitebackup.Snapshot(ctx, fixture.db, snapshotPath, sqlitebackup.Options{PagesPerStep: 16}); err != nil {
 		t.Fatal("create synthetic online snapshot:", err)
 	}
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertextPath := filepath.Join(snapshotDir, "snapshot.age")
+	if err := sqlitebackup.Encrypt(ctx, snapshotPath, ciphertextPath, identity.Recipient()); err != nil {
+		t.Fatal("encrypt synthetic snapshot:", err)
+	}
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	if err := os.Mkdir(recoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failedPath := filepath.Join(recoveryDir, "wrong-key.sqlite")
+	if err := sqlitebackup.Decrypt(ctx, ciphertextPath, failedPath, wrongIdentity); err == nil {
+		t.Fatal("incorrect recovery key decrypted snapshot")
+	}
+	if _, err := os.Stat(failedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed snapshot recovery left output: %v", err)
+	}
+	recoveredPath := filepath.Join(recoveryDir, "registry.sqlite")
+	if err := sqlitebackup.Decrypt(ctx, ciphertextPath, recoveredPath, identity); err != nil {
+		t.Fatal("recover synthetic snapshot:", err)
+	}
+	originalDigest, err := sqlitebackup.Digest(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredDigest, err := sqlitebackup.Digest(recoveredPath)
+	if err != nil || originalDigest != recoveredDigest {
+		t.Fatalf("recovered snapshot digest differs: %v", err)
+	}
 	after := []byte("synthetic after snapshot")
 	second := startFixtureUpload(t, fixture, actor, "snapshot", "v2", "second", after)
 	if _, err := fixture.service.ReceiveUpload(ctx, actor, fixture.workspaceID, fixture.repositoryID, second.ID, bytes.NewReader(after)); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{DataDir: snapshotDir, DatabaseDriver: config.SQLite, DatabaseDSN: snapshotPath, DatabaseMaxOpenConns: 1}
+	cfg := config.Config{DataDir: recoveryDir, DatabaseDriver: config.SQLite, DatabaseDSN: recoveredPath, DatabaseMaxOpenConns: 1}
 	snapshotDB, err := database.Open(ctx, cfg)
 	if err != nil {
 		t.Fatal("open isolated snapshot:", err)
@@ -114,16 +149,8 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		t.Fatalf("snapshot inventory count=%d err=%v; want one", len(objects), err)
 	}
 	var copied bytes.Buffer
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := backup.EncryptGenericObject(ctx, fixture.storage, objects[0], &copied, identity.Recipient()); err != nil {
 		t.Fatalf("encrypt object from snapshot inventory: %v", err)
-	}
-	wrongIdentity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
 	}
 	if _, err := age.Decrypt(bytes.NewReader(copied.Bytes()), wrongIdentity); err == nil {
 		t.Fatal("incorrect recovery identity decrypted synthetic object")
