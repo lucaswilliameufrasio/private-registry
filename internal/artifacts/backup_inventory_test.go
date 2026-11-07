@@ -174,8 +174,12 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := restoredStore.Put(ctx, objects[0].Key.WorkspaceID, bytes.NewReader(recoveredBytes), objects[0].Size)
-	if err != nil || restored.Key != objects[0].Key || restored.Size != objects[0].Size {
+	staging, err := os.CreateTemp(t.TempDir(), "recovery-stage-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = staging.Close() })
+	if err := backup.RestoreGenericObject(ctx, bytes.NewReader(copied.Bytes()), int64(copied.Len()), objects[0], identity, staging, restoredStore); err != nil {
 		t.Fatalf("restore synthetic object: %v", err)
 	}
 	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)
