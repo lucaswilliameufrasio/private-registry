@@ -17,6 +17,7 @@ import (
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
 	"private-registry/internal/repositories"
+	"private-registry/internal/sessions"
 	"private-registry/internal/storage"
 	"private-registry/internal/testinfra"
 )
@@ -232,6 +233,44 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	}
 	if err != nil || !opened.Range || !bytes.Equal(content, payload[7:18]) || !expiry.Equal(ticket.ExpiresAt) {
 		t.Fatalf("PostgreSQL ticket range = %q range=%t expiry=%s err=%v", content, opened.Range, expiry, err)
+	}
+	postgresSessions, err := sessions.New(db, config.Postgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSession, err := postgresSessions.Create(ctx, readerID, sessions.LevelStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldToken, err := repositoryService.IssuePersonalReadToken(ctx, readerID, workspaceID, repositoryID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidated, err := backup.InvalidateRestoredCredentials(ctx, recoveryTx, config.Postgres, time.Now())
+	if err != nil || invalidated.Sessions != 1 || invalidated.PersonalTokens != 1 || invalidated.DownloadTickets != 1 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery invalidation counts=%+v error=%v", invalidated, err)
+	}
+	repeated, err := backup.InvalidateRestoredCredentials(ctx, recoveryTx, config.Postgres, time.Now())
+	if err != nil || repeated != (backup.InvalidatedCredentials{}) {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("repeated PostgreSQL invalidation counts=%+v error=%v", repeated, err)
+	}
+	if err := recoveryTx.Rollback(); err != nil {
+		t.Fatal("roll back isolated PostgreSQL recovery test:", err)
+	}
+	if _, err := postgresSessions.Validate(ctx, oldSession.BearerToken); err != nil {
+		t.Fatal("source session changed after rolled back recovery:", err)
+	}
+	if _, err := repositoryService.VerifyPersonalReadToken(ctx, oldToken.Bearer, workspaceID, repositoryID); err != nil {
+		t.Fatal("source token changed after rolled back recovery:", err)
+	}
+	if _, _, err := service.ResolveDownloadTicket(ctx, ticket.Token); err != nil {
+		t.Fatal("source ticket changed after rolled back recovery:", err)
 	}
 	var publicationAuditCount int
 	if err := db.QueryRowContext(ctx,
