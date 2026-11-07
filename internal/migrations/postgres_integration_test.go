@@ -75,7 +75,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 			migrationErrors = append(migrationErrors, result.err)
 			continue
 		}
-		if result.report.CurrentVersion != 12 || result.report.TargetVersion != 12 || result.report.InstallationID == "" {
+		if result.report.CurrentVersion != 13 || result.report.TargetVersion != 13 || result.report.InstallationID == "" {
 			migrationErrors = append(migrationErrors, errors.New("unexpected concurrent PostgreSQL migration report"))
 			continue
 		}
@@ -84,7 +84,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		} else if result.report.InstallationID != installationID {
 			migrationErrors = append(migrationErrors, errors.New("concurrent migrations created different installation identities"))
 		}
-		if len(result.report.AppliedVersions) == 12 {
+		if len(result.report.AppliedVersions) == 13 {
 			first = result.report
 			appliedCount++
 		} else if len(result.report.AppliedVersions) != 0 {
@@ -94,7 +94,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 	if err := errors.Join(migrationErrors...); err != nil {
 		t.Fatal(err)
 	}
-	if appliedCount != 1 || first.CurrentVersion != 12 || first.TargetVersion != 12 || first.InstallationID == "" {
+	if appliedCount != 1 || first.CurrentVersion != 13 || first.TargetVersion != 13 || first.InstallationID == "" {
 		t.Fatalf("PostgreSQL advisory lock did not serialize migration callers: first=%+v applied=%d", first, appliedCount)
 	}
 
@@ -103,7 +103,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		"SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 12 {
+	if attempts != 13 {
 		t.Fatalf("unexpected successful PostgreSQL migration attempts: %d", attempts)
 	}
 	var checksumCount int
@@ -111,7 +111,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		"SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 12 {
+	if checksumCount != 13 {
 		t.Fatalf("unexpected PostgreSQL migration checksum count: %d", checksumCount)
 	}
 }

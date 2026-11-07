@@ -29,15 +29,15 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 12 {
+	if len(first.AppliedVersions) != 13 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
 	for index, version := range first.AppliedVersions {
 		if version != int64(index+1) {
-			t.Fatalf("migration %d at position %d; want sequential versions 1–12", version, index)
+			t.Fatalf("migration %d at position %d; want sequential versions 1–13", version, index)
 		}
 	}
-	if first.CurrentVersion != 12 || first.TargetVersion != 12 {
+	if first.CurrentVersion != 13 || first.TargetVersion != 13 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -60,14 +60,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 12 {
+	if succeeded != 13 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 12 {
+	if checksumCount != 13 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -264,6 +264,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000010_artifact_download_tickets.sql",
 		"sql/sqlite/000011_jobs.sql",
 		"sql/sqlite/000012_generic_logical_quotas.sql",
+		"sql/sqlite/000013_quota_revisions.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
@@ -276,6 +277,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/postgres/000010_artifact_download_tickets.sql",
 		"sql/postgres/000011_jobs.sql",
 		"sql/postgres/000012_generic_logical_quotas.sql",
+		"sql/postgres/000013_quota_revisions.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {

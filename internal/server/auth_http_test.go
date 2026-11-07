@@ -813,16 +813,47 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	digest := sha256.Sum256(payload)
 	startPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/uploads", workspace.ID, repository.ID)
 	startBody := fmt.Sprintf(`{"collection":"widget","version":"2026.10","path":"dist/widget.js","content_type":"application/javascript","size":%d,"sha256":"%x"}`, len(payload), digest)
-	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = ? WHERE workspace_id = ?`, len(payload)-1, workspace.ID); err != nil {
-		t.Fatal("set synthetic workspace quota:", err)
+	quotaPath := fmt.Sprintf("/api/v1/admin/workspaces/%s/generic-logical-quota", workspace.ID)
+	quotaGet := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, quotaPath, "", authTestOrigin, "registry.example", mfaCookies, "")
+	if quotaGet.Code != http.StatusOK || !strings.Contains(quotaGet.Body.String(), `"mode":"unlimited"`) || !strings.Contains(quotaGet.Body.String(), `"revision":0`) {
+		t.Fatalf("initial quota policy = status %d body %s", quotaGet.Code, quotaGet.Body.String())
+	}
+	quotaBody := fmt.Sprintf(`{"mode":"limited","limit_bytes":%d,"expected_revision":0}`, len(payload)-1)
+	anonymous := authHTTPRequest(fixture.handler, http.MethodGet, quotaPath, "", authTestOrigin, "registry.example")
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous quota read = %d", anonymous.Code)
+	}
+	noCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, quotaPath, quotaBody, authTestOrigin, "registry.example", mfaCookies, "")
+	if noCSRF.Code != http.StatusForbidden {
+		t.Fatalf("quota update without CSRF = %d", noCSRF.Code)
+	}
+	quotaSet := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, quotaPath, quotaBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if quotaSet.Code != http.StatusOK || !strings.Contains(quotaSet.Body.String(), `"revision":1`) {
+		t.Fatalf("set quota policy = status %d body %s", quotaSet.Code, quotaSet.Body.String())
+	}
+	nullLimit := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, quotaPath, `{"mode":"unlimited","limit_bytes":null,"expected_revision":1}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if nullLimit.Code != http.StatusBadRequest {
+		t.Fatalf("quota update with null optional value = %d", nullLimit.Code)
+	}
+	repositoryQuotaPath := fmt.Sprintf("/api/v1/admin/workspaces/%s/repositories/%s/generic-logical-quota", workspace.ID, repository.ID)
+	repositoryQuotaBody := fmt.Sprintf(`{"mode":"limited","limit_bytes":%d,"expected_revision":0}`, len(payload))
+	repositoryQuota := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, repositoryQuotaPath, repositoryQuotaBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if repositoryQuota.Code != http.StatusOK || !strings.Contains(repositoryQuota.Body.String(), `"revision":1`) {
+		t.Fatalf("set repository quota = status %d body %s", repositoryQuota.Code, repositoryQuota.Body.String())
 	}
 	quotaDenied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, startPath, startBody,
 		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
 	if quotaDenied.Code != http.StatusConflict || !strings.Contains(quotaDenied.Body.String(), `"logical_quota_exceeded"`) {
 		t.Fatalf("quota rejection = status %d body %s", quotaDenied.Code, quotaDenied.Body.String())
 	}
-	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = ? WHERE workspace_id = ?`, len(payload), workspace.ID); err != nil {
-		t.Fatal("increase synthetic workspace quota:", err)
+	stale := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, quotaPath, quotaBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"logical_quota_revision_conflict"`) {
+		t.Fatalf("stale quota update = status %d body %s", stale.Code, stale.Body.String())
+	}
+	quotaBody = fmt.Sprintf(`{"mode":"limited","limit_bytes":%d,"expected_revision":1}`, len(payload))
+	quotaSet = authHTTPRequestWithCookies(fixture.handler, http.MethodPut, quotaPath, quotaBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if quotaSet.Code != http.StatusOK || !strings.Contains(quotaSet.Body.String(), `"revision":2`) {
+		t.Fatalf("increase quota policy = status %d body %s", quotaSet.Code, quotaSet.Body.String())
 	}
 	start := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, startPath, startBody,
 		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)

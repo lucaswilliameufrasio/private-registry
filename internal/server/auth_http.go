@@ -257,6 +257,10 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	h.registerArtifactAssetRoutes(router)
 	router.Get("/api/v1/admin/repository-visibility-policy", h.getRepositoryVisibilityPolicy)
 	router.Put("/api/v1/admin/repository-visibility-policy", h.setRepositoryVisibilityPolicy)
+	router.Get("/api/v1/admin/workspaces/{workspaceID}/generic-logical-quota", h.getLogicalQuota)
+	router.Put("/api/v1/admin/workspaces/{workspaceID}/generic-logical-quota", h.setLogicalQuota)
+	router.Get("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.getLogicalQuota)
+	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
 }
 
 func (h *authHTTP) login(response http.ResponseWriter, request *http.Request) {
@@ -1178,6 +1182,7 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 	case errors.Is(err, repositories.ErrForbidden):
 		writeAPIError(response, http.StatusForbidden, "forbidden")
 	case errors.Is(err, repositories.ErrInvalidWorkspaceID),
+		errors.Is(err, repositories.ErrInvalidQuota),
 		errors.Is(err, repositories.ErrInvalidRepositoryID),
 		errors.Is(err, repositories.ErrInvalidSlug),
 		errors.Is(err, repositories.ErrInvalidName),
@@ -1190,6 +1195,8 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, repositories.ErrSlugConflict):
 		writeAPIError(response, http.StatusConflict, "repository_slug_conflict")
+	case errors.Is(err, repositories.ErrQuotaRevision):
+		writeAPIError(response, http.StatusConflict, "logical_quota_revision_conflict")
 	case errors.Is(err, repositories.ErrVisibilityNotAllowed):
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):
