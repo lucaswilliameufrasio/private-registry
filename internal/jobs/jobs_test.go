@@ -124,4 +124,25 @@ func exerciseQueue(t *testing.T, db *sql.DB, driver config.DatabaseDriver) {
 	if _, err := q.Claim(ctx, "expire-upload", now.Add(4*time.Minute), time.Minute); !errors.Is(err, ErrNoJob) {
 		t.Fatalf("completed job was claimed: %v", err)
 	}
+	recurringID, err := q.Enqueue(ctx, "recurring-key", "expire-upload", "{}", 2, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := q.Claim(ctx, "expire-upload", now, time.Minute)
+	if err != nil || run.ID != recurringID {
+		t.Fatalf("recurring claim = %+v, %v", run, err)
+	}
+	if err := q.Reschedule(ctx, recurringID, run.LeaseToken, now.Add(time.Second), now.Add(2*time.Minute)); err != nil {
+		t.Fatal("reschedule recurring job:", err)
+	}
+	if err := q.Reschedule(ctx, recurringID, run.LeaseToken, now.Add(2*time.Second), now.Add(3*time.Minute)); !errors.Is(err, ErrLease) {
+		t.Fatalf("stale reschedule = %v", err)
+	}
+	if _, err := q.Claim(ctx, "expire-upload", now.Add(119*time.Second), time.Minute); !errors.Is(err, ErrNoJob) {
+		t.Fatalf("recurring job ran early: %v", err)
+	}
+	secondRun, err := q.Claim(ctx, "expire-upload", now.Add(2*time.Minute), time.Minute)
+	if err != nil || secondRun.ID != recurringID || secondRun.Attempts != 1 || secondRun.LeaseToken == run.LeaseToken {
+		t.Fatalf("recurring second run = %+v, %v", secondRun, err)
+	}
 }

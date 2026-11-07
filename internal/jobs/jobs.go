@@ -44,6 +44,21 @@ func New(db *sql.DB, driver config.DatabaseDriver) (*Queue, error) {
 	return &Queue{db: db, driver: driver}, nil
 }
 
+// Status returns only the lifecycle state, without exposing a job payload.
+func (q *Queue) Status(ctx context.Context, id string) (string, error) {
+	if q == nil || q.db == nil || ctx == nil {
+		return "", ErrUnavailable
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return "", ErrInvalid
+	}
+	var status string
+	if err := q.db.QueryRowContext(ctx, `SELECT status FROM registry_jobs WHERE job_id = `+q.bind(1), id).Scan(&status); err != nil {
+		return "", errors.New("job status could not be read")
+	}
+	return status, nil
+}
+
 func (q *Queue) bind(n int) string {
 	if q.driver == config.Postgres {
 		return fmt.Sprintf("$%d", n)
@@ -212,6 +227,35 @@ func (q *Queue) Finish(ctx context.Context, id, token string, success bool, now,
 		query = `UPDATE registry_jobs SET status = ` + q.bind(1) + `, available_at_ms = ` + q.bind(2) + `, lease_token = NULL, lease_until_ms = NULL, updated_at_ms = ` + q.bind(3) + ` WHERE job_id = ` + q.bind(4)
 		if _, err := tx.ExecContext(ctx, query, status, available, now.UnixMilli(), id); err != nil {
 			return errors.New("job completion could not be recorded")
+		}
+		return nil
+	})
+}
+
+// Reschedule completes a recurring job and atomically prepares its next run.
+// It may be called only while the current lease is valid. Attempts reset for
+// the new run; the original idempotency record remains unchanged.
+func (q *Queue) Reschedule(ctx context.Context, id, token string, now, next time.Time) error {
+	if _, err := uuid.Parse(id); err != nil || now.IsZero() || next.IsZero() || next.UnixMilli() <= now.UnixMilli() {
+		return ErrInvalid
+	}
+	if _, err := uuid.Parse(token); err != nil {
+		return ErrInvalid
+	}
+	return q.transaction(ctx, func(tx *sql.Tx) error {
+		query := `UPDATE registry_jobs SET status = 'pending', attempts = 0, available_at_ms = ` + q.bind(1) +
+			`, lease_token = NULL, lease_until_ms = NULL, updated_at_ms = ` + q.bind(2) +
+			` WHERE job_id = ` + q.bind(3) + ` AND status = 'running' AND lease_token = ` + q.bind(4) + ` AND lease_until_ms > ` + q.bind(5)
+		result, err := tx.ExecContext(ctx, query, next.UnixMilli(), now.UnixMilli(), id, token, now.UnixMilli())
+		if err != nil {
+			return errors.New("recurring job could not be rescheduled")
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return errors.New("recurring job result could not be checked")
+		}
+		if count != 1 {
+			return ErrLease
 		}
 		return nil
 	})

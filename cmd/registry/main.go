@@ -21,6 +21,8 @@ import (
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/jobs"
+	"private-registry/internal/maintenance"
 	"private-registry/internal/migrations"
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
@@ -123,6 +125,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	jobQueue, err := jobs.New(db, cfg.DatabaseDriver)
+	if err != nil {
+		return err
+	}
+	expirationWorker, err := maintenance.NewUploadExpiration(jobQueue, artifactService)
+	if err != nil {
+		return err
+	}
 	health := server.NewHealth(db)
 	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, server.AuthHTTPConfig{
 		CanonicalOrigin: cfg.CanonicalOrigin,
@@ -137,9 +147,22 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return errors.Join(errors.New("HTTP listener could not be opened"), err)
 	}
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		expirationWorker.Run(workerCtx, logger)
+	}()
 	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver)
-	if err := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout); err != nil {
-		return errors.Join(errors.New("HTTP server failed"), err)
+	serveErr := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout)
+	stopWorker()
+	select {
+	case <-workerDone:
+	case <-time.After(shutdownTimeout):
+		return errors.Join(serveErr, errors.New("upload expiration worker did not stop before shutdown deadline"))
+	}
+	if serveErr != nil {
+		return errors.Join(errors.New("HTTP server failed"), serveErr)
 	}
 	logger.Info("registry HTTP server stopped")
 	return nil

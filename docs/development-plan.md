@@ -437,6 +437,8 @@ O formato interno do storage OCI não se mistura implicitamente ao CAS dos demai
 
 ### 7.7 Artefatos genéricos e assets
 
+**Atualização:** a descrição histórica abaixo precede o worker de expiração periódica de sessões documentado no ADR 0017. Limpeza de staging, reconciliação e GC de objetos órfãos continuam pendentes.
+
 **Implementação parcial em 22/10/2026 — não aceita como feature completa da v1:** migrations v9/v10 e serviço genérico dão identidade imutável `(repositório, coleção, label opaco)`, sessões de upload limitadas, paths relativos validados, verificação de tamanho/SHA-256 e publicação explícita transacional. A sessão faz claim transacional `receiving → uploading` antes de ler o body: PUT concorrente para o mesmo ID falha sem consumir conteúdo; falhas transitórias restauram o claim para retry. Claims abandonadas expiram após 24h e sessões expiradas são reconciliadas lazy em Receive/StartUpload/Publish; não há job periódico nem reconciliação de objetos órfãos. O leitor precisa de grant `reader`; o publicador precisa de `publisher`, e o router exige MFA recente nas mutações de upload/publicação/emissão de link. A API administrativa não entrega bytes. O endpoint de link cria capability aleatória armazenada somente como SHA-256; GET/HEAD na origem `REGISTRY_ASSET_ORIGIN` distinta responde como attachment, `nosniff`, ETag, Range simples e `private, no-store`; default de 5 minutos, máximo de 15. Um ticket já emitido continua utilizável até expirar mesmo após revogação do grant. Cobertura SQLite e PostgreSQL exercita catálogo, publicação, grants, claim concorrente e ticket/range. Permanecem ausentes quotas agregadas/reserva, jobs periódicos de expiração/limpeza, reconciliação/GC de objetos órfãos, métricas, S3, CLI/UI e adapters Pub/Go/Cargo/npm/Hex/OCI. Limites atuais são por processo: 1 GiB por arquivo por default (até 1 GiB configurável) e quatro uploads simultâneos por default; isso não é quota de workspace nem controle distribuído.
 
 - Publicação de coleção versionada com manifest de arquivos: path, tamanho, MIME, digest e política de acesso.
@@ -1091,7 +1093,7 @@ Links usam a URL canônica e levam a telas autenticadas quando apropriado. Token
 
 ### 20.1 Jobs
 
-**Fundação parcial:** a migration v11 e `internal/jobs` persistem jobs idempotentes e claims com token, lease e limite de tentativas em SQLite/PostgreSQL. O teste exercita concorrência, heartbeat, retomada e fencing; o gate `make verify` passou com integrações 3× e race 1×. Isso ainda não é execução periódica: worker, scheduler, outbox, retry automático com backoff/jitter, recuperação operacional, limites e UI continuam pendentes. Não há garantia exatamente-once para efeitos externos. A decisão e seus limites estão no [ADR 0017](adr/0017-persistent-job-claims.md).
+**Fundação parcial:** a migration v11 e `internal/jobs` persistem jobs idempotentes e claims com token, lease e limite de tentativas em SQLite/PostgreSQL. Um worker iniciado por `serve` processa periodicamente lotes limitados de expiração de sessões de upload, com retry e reagendamento persistidos; objetos órfãos não são apagados. Scheduler genérico, outbox, recuperação operacional, limites, alertas e UI continuam pendentes. Não há garantia exatamente-once para efeitos externos. A decisão e seus limites estão no [ADR 0017](adr/0017-persistent-job-claims.md).
 
 - Job persistente e outbox transacional evitam perda entre commit e notificação.
 - Lease com expiração, heartbeat, retry exponencial limitado e jitter.

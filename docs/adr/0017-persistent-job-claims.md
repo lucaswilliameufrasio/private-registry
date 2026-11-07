@@ -1,6 +1,6 @@
 # ADR 0017 — Fundação da fila persistente de jobs
 
-- **Status:** Decisão para a fundação; worker, agendamento, outbox e operação ainda pendentes
+- **Status:** Fundação e worker limitado de expiração de uploads; outbox e operação ainda pendentes
 - **Data:** 2026-11-06
 
 ## Contexto
@@ -17,7 +17,9 @@ O plano exige trabalho recuperável após restart, leases, retries e dead-letter
 
 ## Limites e trabalho posterior
 
-Esta decisão não implementa, por si só, scheduler periódico, outbox transacional, UI, retry manual autorizado, alertas, prioridade sob pressão nem workers. Expiração de upload e GC não são automaticamente executados apenas porque a fila existe. Qualquer worker precisa tratar cancelamento, shutdown e operações parcialmente concluídas. Backup e GC exigem coordenação adicional específica; uma lease genérica não prova consistência de storage.
+O servidor inicia um worker único para expiração de uploads: existe um registro recorrente fixo, claim com lease de 30 segundos, operação limitada a 10 segundos e até 128 sessões, reagendamento por minuto e retry com backoff e jitter. O worker para ao cancelar o servidor; após interrupção, uma lease expirada permite retomada. O job é idempotente e não remove objetos. Ao esgotar oito tentativas, fica em dead-letter e o worker registra erro; UI, alerta operacional e retry manual autorizado ainda não existem.
+
+Esta implementação não entrega scheduler genérico, outbox transacional, UI, prioridade sob pressão, nem GC ou limpeza de staging. Backup e GC exigem coordenação adicional específica; uma lease genérica não prova consistência de storage. O agendamento recorrente expira sessões, não limpa objetos órfãos, e não é garantia de execução pontual sob falha ou indisponibilidade.
 
 ## Alternativas
 
