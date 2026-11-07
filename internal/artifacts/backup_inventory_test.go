@@ -189,7 +189,11 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	cipherDigest := sha256.Sum256(copied.Bytes())
-	installationID, backupID := uuid.NewString(), uuid.NewString()
+	var installationID string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT installation_id FROM registry_installation WHERE singleton_id = 1`).Scan(&installationID); err != nil {
+		t.Fatal(err)
+	}
+	backupID := uuid.NewString()
 	receipt := backup.ObjectReceipt{Version: 1, InstallationID: installationID, BackupID: backupID, WorkspaceID: objects[0].Key.WorkspaceID, PlainSHA256: objects[0].Key.SHA256, PlainBytes: objects[0].Size, CipherSHA256: hex.EncodeToString(cipherDigest[:]), CipherBytes: int64(copied.Len())}
 	envelope, err := backup.SignObjectReceipt(receipt, signingKey)
 	if err != nil {
@@ -275,6 +279,57 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	var capturedBytes bytes.Buffer
 	if err := backup.CopyGenericObject(ctx, capturedRestore, objects[0], &capturedBytes); err != nil || !bytes.Equal(capturedBytes.Bytes(), before) {
 		t.Fatalf("verify captured snapshot inventory bytes: %v", err)
+	}
+	preparedParent := filepath.Join(t.TempDir(), "prepared-parent")
+	if err := os.Mkdir(preparedParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prepareInput := filepath.Join(snapshotDir, "prepare-input.sqlite")
+	if err := sqlitebackup.Decrypt(ctx, ciphertextPath, prepareInput, identity); err != nil {
+		t.Fatal("decrypt isolated preparation input:", err)
+	}
+	inputFile, err := os.Open(prepareInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepareErr := backup.PrepareSQLiteRecovery(ctx, inputFile, 64<<20, 10, 10, captured.Set, trusted, preparedParent, "isolated")
+	inputCloseErr := inputFile.Close()
+	if prepareErr != nil || inputCloseErr != nil || prepared.GenericObjects != 1 {
+		t.Fatalf("prepare captured SQLite recovery count=%d prepare=%v close=%v", prepared.GenericObjects, prepareErr, inputCloseErr)
+	}
+	preparedDir := filepath.Dir(prepared.DatabasePath)
+	preparedStore, err := storage.NewFileSystem(filepath.Join(preparedDir, "object-store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.RestoreGenericSet(ctx, captured.Set, trusted, capturedSources, identity, newStage, preparedStore); err != nil {
+		t.Fatal("recover captured set into prepared destination:", err)
+	}
+	if _, err := os.Stat(filepath.Join(preparedDir, "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("prepared destination must remain incomplete:", err)
+	}
+	preparedCfg := config.Config{DataDir: preparedDir, DatabaseDriver: config.SQLite, DatabaseDSN: prepared.DatabasePath, DatabaseMaxOpenConns: 2}
+	preparedDB, err := database.Open(ctx, preparedCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = preparedDB.Close() })
+	preparedRepositories, err := repositories.New(preparedDB, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedService, err := New(preparedDB, config.SQLite, preparedRepositories, preparedStore, Options{MaxUploadBytes: 1024, MaxConcurrentUploads: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedFile, err := preparedService.OpenFile(ctx, fixture.userIDs["reader"], fixture.workspaceID, fixture.repositoryID, version.Files[0].ID, 0, int64(len(before)))
+	if err != nil {
+		t.Fatal("read prepared isolated recovery:", err)
+	}
+	preparedBytes, preparedReadErr := io.ReadAll(preparedFile.Reader)
+	preparedCloseErr := preparedFile.Reader.Close()
+	if preparedReadErr != nil || preparedCloseErr != nil || !bytes.Equal(preparedBytes, before) {
+		t.Fatalf("prepared isolated recovery read=%v close=%v", preparedReadErr, preparedCloseErr)
 	}
 	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)
 	if err != nil {
