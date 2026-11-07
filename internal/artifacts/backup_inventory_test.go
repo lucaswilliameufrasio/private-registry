@@ -3,6 +3,8 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +13,9 @@ import (
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/repositories"
 	"private-registry/internal/spikes/sqlitebackup"
+	"private-registry/internal/storage"
 )
 
 func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) {
@@ -76,6 +80,10 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if _, err := fixture.service.ReceiveUpload(ctx, actor, fixture.workspaceID, fixture.repositoryID, first.ID, bytes.NewReader(before)); err != nil {
 		t.Fatal(err)
 	}
+	version, err := fixture.service.Publish(ctx, actor, fixture.workspaceID, fixture.repositoryID, first.ArtifactVersionID)
+	if err != nil || len(version.Files) != 1 {
+		t.Fatalf("publish synthetic snapshot object: %v", err)
+	}
 	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
 	if err := os.Mkdir(snapshotDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -108,8 +116,39 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err := backup.CopyGenericObject(ctx, fixture.storage, objects[0], &copied); err != nil || !bytes.Equal(copied.Bytes(), before) {
 		t.Fatalf("copy object from snapshot inventory: %v", err)
 	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal("close snapshot inventory transaction:", err)
+	}
+	restoredStore, err := storage.NewFileSystem(filepath.Join(t.TempDir(), "restored-objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoredStore.Put(ctx, objects[0].Key.WorkspaceID, bytes.NewReader(copied.Bytes()), objects[0].Size)
+	if err != nil || restored.Key != objects[0].Key || restored.Size != objects[0].Size {
+		t.Fatalf("restore synthetic object: %v", err)
+	}
+	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredService, err := New(snapshotDB, config.SQLite, restoredRepositories, restoredStore, Options{MaxUploadBytes: 1024, MaxConcurrentUploads: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := restoredService.OpenFile(ctx, fixture.userIDs["reader"], fixture.workspaceID, fixture.repositoryID, version.Files[0].ID, 0, int64(len(before)))
+	if err != nil {
+		t.Fatal("read restored synthetic content:", err)
+	}
+	restoredBytes, readErr := io.ReadAll(opened.Reader)
+	closeErr := opened.Reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(restoredBytes, before) {
+		t.Fatalf("restored synthetic content read=%v close=%v", readErr, closeErr)
+	}
+	if _, err := restoredService.OpenFile(ctx, fixture.userIDs["member"], fixture.workspaceID, fixture.repositoryID, version.Files[0].ID, 0, int64(len(before))); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("ungranted restored content read = %v", err)
+	}
 	var liveCount int
-	if err := fixture.db.QueryRowContext(ctx, `SELECT count(*) FROM registry_generic_upload_sessions WHERE status = 'uploaded'`).Scan(&liveCount); err != nil || liveCount != 2 {
+	if err := fixture.db.QueryRowContext(ctx, `SELECT count(*) FROM registry_generic_upload_sessions WHERE status IN ('uploaded', 'published')`).Scan(&liveCount); err != nil || liveCount != 2 {
 		t.Fatalf("live synthetic state count=%d err=%v; want 2", liveCount, err)
 	}
 }
