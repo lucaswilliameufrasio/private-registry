@@ -24,6 +24,16 @@ import (
 	"private-registry/internal/storage"
 )
 
+type syntheticRecoveryStage struct{ *os.File }
+
+func (s syntheticRecoveryStage) Close() error {
+	name := s.Name()
+	if err := s.File.Close(); err != nil {
+		return err
+	}
+	return os.Remove(name)
+}
+
 func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -213,18 +223,19 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staging, err := os.CreateTemp(t.TempDir(), "recovery-stage-*")
-	if err != nil {
-		t.Fatal(err)
+	stagingDir := t.TempDir()
+	newStage := func() (backup.RecoveryStage, error) {
+		file, err := os.CreateTemp(stagingDir, "synthetic-stage-*")
+		if err != nil {
+			return nil, err
+		}
+		return syntheticRecoveryStage{File: file}, nil
 	}
-	t.Cleanup(func() { _ = staging.Close() })
-	cipherStaging, err := os.CreateTemp(t.TempDir(), "cipher-stage-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cipherStaging.Close() })
 	trusted := backup.GenericSetRecovery{Signer: publicKey, InstallationID: installationID, BackupID: backupID, SnapshotSHA256: recoveredDigest, Inventory: objects}
-	if err := backup.RestoreGenericSetObject(ctx, bytes.NewReader(copied.Bytes()), setEnvelope, envelope, trusted, identity, cipherStaging, staging, restoredStore); err != nil {
+	sources := []backup.RecoveryObjectSource{{Receipt: envelope, Open: func(context.Context) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(copied.Bytes())), nil
+	}}}
+	if err := backup.RestoreGenericSet(ctx, setEnvelope, trusted, sources, identity, newStage, restoredStore); err != nil {
 		t.Fatalf("restore synthetic object: %v", err)
 	}
 	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)
