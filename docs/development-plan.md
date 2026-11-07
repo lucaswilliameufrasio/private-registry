@@ -1091,6 +1091,8 @@ Links usam a URL canônica e levam a telas autenticadas quando apropriado. Token
 
 ### 20.1 Jobs
 
+**Fundação parcial:** a migration v11 e `internal/jobs` persistem jobs idempotentes e claims com token, lease e limite de tentativas em SQLite/PostgreSQL. O teste exercita concorrência, heartbeat, retomada e fencing; o gate `make verify` passou com integrações 3× e race 1×. Isso ainda não é execução periódica: worker, scheduler, outbox, retry automático com backoff/jitter, recuperação operacional, limites e UI continuam pendentes. Não há garantia exatamente-once para efeitos externos. A decisão e seus limites estão no [ADR 0017](adr/0017-persistent-job-claims.md).
+
 - Job persistente e outbox transacional evitam perda entre commit e notificação.
 - Lease com expiração, heartbeat, retry exponencial limitado e jitter.
 - Workers retomam jobs interrompidos; operações externas não são exatamente-once por promessa.
