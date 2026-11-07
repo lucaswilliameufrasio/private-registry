@@ -22,6 +22,58 @@ import (
 	"private-registry/internal/storage"
 )
 
+func TestStartUploadEnforcesVersionFileLimit(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	ctx := context.Background()
+	publisher := fixture.userIDs["publisher"]
+	first := startFixtureUpload(t, fixture, publisher, "bounded", "v1", "first", []byte("x"))
+
+	// Populate the remaining slots without receiving 9,999 physical objects.
+	_, err := fixture.db.ExecContext(ctx, `WITH RECURSIVE n(i) AS (
+		SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?
+	) INSERT INTO registry_generic_upload_sessions
+		(upload_session_id, artifact_version_id, workspace_id, repository_id, path,
+		 content_type, expected_size, expected_sha256, status, created_by, created_at, expires_at, updated_at)
+	SELECT printf('%036d', i), artifact_version_id, workspace_id, repository_id, printf('file-%d', i),
+		content_type, expected_size, expected_sha256, status, created_by, created_at, expires_at, updated_at
+	FROM registry_generic_upload_sessions, n WHERE upload_session_id = ?`, MaxCollectionFiles-1, first.ID)
+	if err != nil {
+		t.Fatal("populate file reservations:", err)
+	}
+	digest := sha256.Sum256([]byte("x"))
+	request := StartUploadRequest{Collection: "bounded", Version: "v1", Path: "overflow", ContentType: "text/plain", Size: 1, SHA256: hex.EncodeToString(digest[:])}
+	_, err = fixture.service.StartUpload(ctx, publisher, fixture.workspaceID, fixture.repositoryID, request)
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("start beyond file limit = %v; want ErrVersionConflict", err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_generic_upload_sessions SET status = 'expired' WHERE upload_session_id = ?`, first.ID); err != nil {
+		t.Fatal("expire reservation:", err)
+	}
+	results := make(chan error, 2)
+	for _, name := range []string{"overflow-a", "overflow-b"} {
+		request := request
+		request.Path = name
+		go func() {
+			_, err := fixture.service.StartUpload(ctx, publisher, fixture.workspaceID, fixture.repositoryID, request)
+			results <- err
+		}()
+	}
+	var successes, conflicts int
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrVersionConflict) {
+			conflicts++
+		} else {
+			t.Fatalf("concurrent start failed unexpectedly: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent starts: %d successes and %d conflicts; want one of each", successes, conflicts)
+	}
+}
+
 func TestGenericArtifactUploadPublishAndAuthorizedRead(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	publisherID := fixture.userIDs["publisher"]

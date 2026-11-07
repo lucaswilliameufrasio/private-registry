@@ -222,6 +222,17 @@ func (s *Service) StartUpload(
 			if pathExists {
 				return ErrPathConflict
 			}
+			// The repository transaction serializes writers via the installation
+			// lock, so checking active reservations here also bounds concurrent starts.
+			var fileCount int
+			countQuery := `SELECT count(*) FROM registry_generic_upload_sessions
+				WHERE artifact_version_id = ` + bind(s.driver, 1) + ` AND status IN ('receiving', 'uploading', 'uploaded')`
+			if err := tx.QueryRowContext(ctx, countQuery, versionID).Scan(&fileCount); err != nil {
+				return errors.New("artifact file reservation count could not be checked")
+			}
+			if fileCount >= MaxCollectionFiles {
+				return ErrVersionConflict
+			}
 			sessionID, err := uuid.NewV7()
 			if err != nil {
 				return errors.New("upload session identity could not be generated")

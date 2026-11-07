@@ -195,4 +195,42 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if publicationAuditCount != 1 {
 		t.Fatalf("PostgreSQL publication audit count = %d; want 1", publicationAuditCount)
 	}
+
+	limitSession, err := service.StartUpload(ctx, publisherID, workspaceID, repositoryID,
+		requestFor("bounded", "v1", "first", payload))
+	if err != nil {
+		t.Fatal("start bounded PostgreSQL version:", err)
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO registry_generic_upload_sessions
+		(upload_session_id, artifact_version_id, workspace_id, repository_id, path,
+		 content_type, expected_size, expected_sha256, status, created_by, created_at, expires_at, updated_at)
+	SELECT lpad(i::text, 36, '0'), artifact_version_id, workspace_id, repository_id, 'file-' || i::text,
+		content_type, expected_size, expected_sha256, status, created_by, created_at, expires_at, updated_at
+	FROM registry_generic_upload_sessions CROSS JOIN generate_series(1, $1::integer) AS i
+	WHERE upload_session_id = $2`, MaxCollectionFiles-2, limitSession.ID)
+	if err != nil {
+		t.Fatal("populate PostgreSQL reservations:", err)
+	}
+	results := make(chan error, 2)
+	for _, name := range []string{"last-a", "last-b"} {
+		request := requestFor("bounded", "v1", name, payload)
+		go func() {
+			_, err := service.StartUpload(ctx, publisherID, workspaceID, repositoryID, request)
+			results <- err
+		}()
+	}
+	var successes, conflicts int
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrVersionConflict) {
+			conflicts++
+		} else {
+			t.Fatalf("concurrent PostgreSQL reservation failed: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("PostgreSQL concurrent starts: %d successes and %d conflicts; want one of each", successes, conflicts)
+	}
 }
