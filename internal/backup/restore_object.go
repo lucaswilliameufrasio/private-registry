@@ -14,8 +14,9 @@ import (
 // must independently authenticate the inventory, choose an isolated recovery
 // destination, provide exclusively owned private staging, bound its resources
 // and discard staging after every call.
-// A destination write can leave an orphan after an ambiguous failure; callers
-// must not promote a recovery set until they have reconciled and verified it.
+// The stored bytes are read back and verified before success. A destination
+// write can leave an orphan after a failure; callers must not promote a recovery
+// set until they have reconciled and verified the complete installation.
 func RestoreGenericObject(ctx context.Context, ciphertext io.Reader, maxCiphertext int64, object GenericObject, identity age.Identity, staging io.ReadWriteSeeker, destination storage.Driver) error {
 	if ctx == nil || ciphertext == nil || identity == nil || staging == nil || destination == nil {
 		return errors.New("generic object recovery parameters are invalid")
@@ -42,6 +43,9 @@ func RestoreGenericObject(ctx context.Context, ciphertext io.Reader, maxCipherte
 	}
 	if info.Key != object.Key || info.Size != object.Size {
 		return errors.New("generic object recovery destination did not match inventory")
+	}
+	if err := CopyGenericObject(ctx, destination, object, io.Discard); err != nil {
+		return errors.New("generic object recovery destination verification failed")
 	}
 	return nil
 }

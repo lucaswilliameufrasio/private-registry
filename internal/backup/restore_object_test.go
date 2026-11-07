@@ -65,6 +65,13 @@ func TestRestoreGenericObjectAuthenticatesBeforeDestinationWrite(t *testing.T) {
 		_ = reader.Close()
 		t.Fatal("truncated recovery wrote to destination")
 	}
+	corruptDestination, err := storage.NewFileSystem(filepath.Join(t.TempDir(), "corrupt-objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreGenericObject(ctx, bytes.NewReader(encrypted.Bytes()), int64(encrypted.Len()), object, identity, newStaging(), corruptCaptureReadback{Driver: corruptDestination}); err == nil {
+		t.Fatal("recovery accepted corrupt destination readback")
+	}
 	if err := RestoreGenericObject(ctx, bytes.NewReader(encrypted.Bytes()), int64(encrypted.Len()), object, identity, newStaging(), destination); err != nil {
 		t.Fatal("restore authenticated object:", err)
 	}
