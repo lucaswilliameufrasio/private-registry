@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
@@ -113,8 +114,40 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		t.Fatalf("snapshot inventory count=%d err=%v; want one", len(objects), err)
 	}
 	var copied bytes.Buffer
-	if err := backup.CopyGenericObject(ctx, fixture.storage, objects[0], &copied); err != nil || !bytes.Equal(copied.Bytes(), before) {
-		t.Fatalf("copy object from snapshot inventory: %v", err)
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := age.Encrypt(&copied, identity.Recipient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.CopyGenericObject(ctx, fixture.storage, objects[0], encrypted); err != nil {
+		t.Fatalf("encrypt object from snapshot inventory: %v", err)
+	}
+	if err := encrypted.Close(); err != nil {
+		t.Fatal("complete synthetic ciphertext:", err)
+	}
+	wrongIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := age.Decrypt(bytes.NewReader(copied.Bytes()), wrongIdentity); err == nil {
+		t.Fatal("incorrect recovery identity decrypted synthetic object")
+	}
+	truncated, err := age.Decrypt(bytes.NewReader(copied.Bytes()[:copied.Len()-1]), identity)
+	if err == nil {
+		if _, err := io.Copy(io.Discard, truncated); err == nil {
+			t.Fatal("truncated ciphertext was accepted")
+		}
+	}
+	decrypted, err := age.Decrypt(bytes.NewReader(copied.Bytes()), identity)
+	if err != nil {
+		t.Fatal("decrypt synthetic object:", err)
+	}
+	recoveredBytes, err := io.ReadAll(decrypted)
+	if err != nil || !bytes.Equal(recoveredBytes, before) {
+		t.Fatalf("verify synthetic recovery identity: %v", err)
 	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal("close snapshot inventory transaction:", err)
@@ -123,7 +156,7 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := restoredStore.Put(ctx, objects[0].Key.WorkspaceID, bytes.NewReader(copied.Bytes()), objects[0].Size)
+	restored, err := restoredStore.Put(ctx, objects[0].Key.WorkspaceID, bytes.NewReader(recoveredBytes), objects[0].Size)
 	if err != nil || restored.Key != objects[0].Key || restored.Size != objects[0].Size {
 		t.Fatalf("restore synthetic object: %v", err)
 	}
