@@ -233,4 +233,16 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("PostgreSQL concurrent starts: %d successes and %d conflicts; want one of each", successes, conflicts)
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_generic_upload_sessions SET expires_at = $1 WHERE upload_session_id = $2`,
+		time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), limitSession.ID); err != nil {
+		t.Fatal("expire PostgreSQL upload:", err)
+	}
+	count, err := service.ExpireUploadBatch(ctx, time.Now().UTC(), 10)
+	if err != nil || count != 1 {
+		t.Fatalf("PostgreSQL expiration count = %d, error = %v; want 1", count, err)
+	}
+	count, err = service.ExpireUploadBatch(ctx, time.Now().UTC(), 10)
+	if err != nil || count != 0 {
+		t.Fatalf("repeated PostgreSQL expiration count = %d, error = %v; want 0", count, err)
+	}
 }
