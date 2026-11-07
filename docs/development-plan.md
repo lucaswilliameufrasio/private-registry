@@ -750,6 +750,8 @@ Quando implementados, scanners obrigatórios para um repositório impedem public
 
 ### 13.1 Drivers
 
+**Fatia experimental:** `internal/storage/S3` implementa Put condicional e leitura verificada por staging privado com cliente injetado, testado contra Floci e fixture HTTP local. Não está selecionável no servidor nem aceito para produção: atomicidade em S3 real, configuração de credenciais/egress, multipart, espaço temporário agregado, crash recovery e GC permanecem obrigatórios. Ver [ADR 0019](adr/0019-s3-content-driver.md).
+
 Interface mínima: abrir, escrever staging, finalizar objeto, HEAD/verificar, ler range, listar para reconciliação, apagar autorizado e abortar multipart. Opções específicas de S3 permanecem específicas; não fingir que filesystem e object store têm o mesmo modelo.
 
 - Local: diretório persistente, staging separado, escrita temporária + rename atômico no mesmo filesystem e política de durabilidade.
