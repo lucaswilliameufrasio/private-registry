@@ -22,17 +22,18 @@ const (
 )
 
 type Config struct {
-	ListenAddress        string
-	DataDir              string
-	MasterKeyFile        string
-	CanonicalOrigin      string
-	AssetOrigin          string
-	TrustedProxies       []netip.Prefix
-	DatabaseDriver       DatabaseDriver
-	DatabaseDSN          string
-	DatabaseMaxOpenConns int
-	MaxUploadBytes       int64
-	MaxConcurrentUploads int
+	ListenAddress          string
+	DataDir                string
+	MasterKeyFile          string
+	CanonicalOrigin        string
+	AssetOrigin            string
+	PublicAssetCORSOrigins []string
+	TrustedProxies         []netip.Prefix
+	DatabaseDriver         DatabaseDriver
+	DatabaseDSN            string
+	DatabaseMaxOpenConns   int
+	MaxUploadBytes         int64
+	MaxConcurrentUploads   int
 }
 
 type MasterKeySettings struct {
@@ -127,6 +128,19 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	var publicAssetCORSOrigins []string
+	if raw, exists := lookup("REGISTRY_PUBLIC_ASSET_CORS_ORIGINS"); exists {
+		if len(raw) > 4096 || strings.TrimSpace(raw) == "" {
+			return Config{}, errors.New("public asset CORS origins must be a nonempty bounded list")
+		}
+		for _, part := range strings.Split(raw, ",") {
+			origin := strings.TrimSpace(part)
+			if origin == "" || len(publicAssetCORSOrigins) >= 32 {
+				return Config{}, errors.New("public asset CORS origins must contain at most 32 nonempty entries")
+			}
+			publicAssetCORSOrigins = append(publicAssetCORSOrigins, origin)
+		}
+	}
 
 	driverValue, err := value(lookup, "REGISTRY_DATABASE_DRIVER", string(SQLite))
 	if err != nil {
@@ -187,17 +201,18 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	}
 
 	return Config{
-		ListenAddress:        listenAddress,
-		DataDir:              filepath.Clean(dataDir),
-		MasterKeyFile:        masterKeyFile,
-		CanonicalOrigin:      canonicalOrigin,
-		AssetOrigin:          assetOrigin,
-		TrustedProxies:       trustedProxies,
-		DatabaseDriver:       driver,
-		DatabaseDSN:          dsn,
-		DatabaseMaxOpenConns: maxOpenConns,
-		MaxUploadBytes:       maxUploadBytes,
-		MaxConcurrentUploads: maxConcurrentUploads,
+		ListenAddress:          listenAddress,
+		DataDir:                filepath.Clean(dataDir),
+		MasterKeyFile:          masterKeyFile,
+		CanonicalOrigin:        canonicalOrigin,
+		AssetOrigin:            assetOrigin,
+		PublicAssetCORSOrigins: publicAssetCORSOrigins,
+		TrustedProxies:         trustedProxies,
+		DatabaseDriver:         driver,
+		DatabaseDSN:            dsn,
+		DatabaseMaxOpenConns:   maxOpenConns,
+		MaxUploadBytes:         maxUploadBytes,
+		MaxConcurrentUploads:   maxConcurrentUploads,
 	}, nil
 }
 

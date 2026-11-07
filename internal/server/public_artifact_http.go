@@ -25,6 +25,26 @@ func (h *authHTTP) downloadPublicArtifact(response http.ResponseWriter, request 
 		writeArtifactError(response, err)
 		return
 	}
+	response.Header().Add("Vary", "Origin")
+	origin, allowed := h.publicAssetCORSOrigin(request)
+	if request.Method == http.MethodOptions {
+		response.Header().Add("Vary", "Access-Control-Request-Method")
+		response.Header().Add("Vary", "Access-Control-Request-Headers")
+		if !allowed || !validPublicAssetPreflight(request) {
+			writeAPIError(response, http.StatusForbidden, "cors_rejected")
+			return
+		}
+		response.Header().Set("Access-Control-Allow-Origin", origin)
+		response.Header().Set("Access-Control-Allow-Methods", "GET, HEAD")
+		response.Header().Set("Access-Control-Allow-Headers", "Range, If-Range, If-None-Match")
+		response.Header().Set("Cache-Control", "no-store")
+		response.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if allowed {
+		response.Header().Set("Access-Control-Allow-Origin", origin)
+		response.Header().Set("Access-Control-Expose-Headers", "ETag, Accept-Ranges, Content-Range")
+	}
 	etag := `"` + file.SHA256 + `"`
 	response.Header().Set("Content-Type", file.ContentType)
 	response.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": path.Base(file.Path)}))
@@ -80,4 +100,40 @@ func (h *authHTTP) downloadPublicArtifact(response http.ResponseWriter, request 
 	if request.Method != http.MethodHead {
 		_, _ = io.Copy(response, opened.Reader)
 	}
+}
+
+func (h *authHTTP) publicAssetCORSOrigin(request *http.Request) (string, bool) {
+	values := request.Header.Values("Origin")
+	if len(values) != 1 {
+		return "", false
+	}
+	value := values[0]
+	origin, err := normalizeOrigin(value)
+	if err != nil {
+		return "", false
+	}
+	_, allowed := h.publicAssetCORSOrigins[origin]
+	return value, allowed
+}
+
+func validPublicAssetPreflight(request *http.Request) bool {
+	methods := request.Header.Values("Access-Control-Request-Method")
+	if len(methods) != 1 || (methods[0] != http.MethodGet && methods[0] != http.MethodHead) {
+		return false
+	}
+	values := request.Header.Values("Access-Control-Request-Headers")
+	if len(values) > 1 {
+		return false
+	}
+	if len(values) == 0 {
+		return true
+	}
+	for _, header := range strings.Split(values[0], ",") {
+		switch strings.ToLower(strings.TrimSpace(header)) {
+		case "range", "if-range", "if-none-match":
+		default:
+			return false
+		}
+	}
+	return true
 }

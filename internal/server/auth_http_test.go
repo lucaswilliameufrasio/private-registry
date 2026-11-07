@@ -755,8 +755,18 @@ func TestAuthHTTPMembershipManagementRequiresRecentMFAAndProtectsOwner(t *testin
 	}
 }
 
-func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *testing.T) {
+func TestPublicAssetCORSRejectsUnsafeOrigins(t *testing.T) {
 	fixture := newAuthHTTPFixture(t)
+	for _, origin := range []string{"*", "null", "http://consumer.example", "https://consumer.example/path", "https://user@consumer.example"} {
+		cfg := AuthHTTPConfig{CanonicalOrigin: authTestOrigin, AssetOrigin: authTestAssetOrigin, PublicAssetCORSOrigins: []string{origin}}
+		if _, err := NewHandler(NewHealth(fixture.db), fixture.service, fixture.workspaceService, fixture.repositoryService, fixture.artifactService, cfg); err == nil {
+			t.Fatalf("unsafe CORS origin %q was accepted", origin)
+		}
+	}
+}
+
+func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *testing.T) {
+	fixture := newAuthHTTPFixtureWithConfig(t, AuthHTTPConfig{CanonicalOrigin: authTestOrigin, AssetOrigin: authTestAssetOrigin, PublicAssetCORSOrigins: []string{"https://consumer.example"}})
 	ctx := context.Background()
 	var ownerID string
 	if err := fixture.db.QueryRowContext(ctx, "SELECT user_id FROM registry_instance_admins").Scan(&ownerID); err != nil {
@@ -941,6 +951,14 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	if privatePublic.Code != http.StatusNotFound || missingPublic.Code != privatePublic.Code || missingPublic.Body.String() != privatePublic.Body.String() {
 		t.Fatalf("private and missing public responses differ: private=%d/%s missing=%d/%s", privatePublic.Code, privatePublic.Body.String(), missingPublic.Code, missingPublic.Body.String())
 	}
+	privateCORS := authAssetCORSHTTPRequest(fixture.handler, http.MethodGet, publicPath, "https://consumer.example", "", "")
+	if privateCORS.Code != http.StatusNotFound || privateCORS.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("private public CORS = status %d headers %v", privateCORS.Code, privateCORS.Header())
+	}
+	privatePreflight := authAssetCORSHTTPRequest(fixture.handler, http.MethodOptions, publicPath, "https://consumer.example", "GET", "")
+	if privatePreflight.Code != http.StatusNotFound || privatePreflight.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("private public preflight = status %d headers %v", privatePreflight.Code, privatePreflight.Header())
+	}
 	if err := fixture.repositoryService.SetVisibilityPolicy(ctx, ownerID, repositories.PolicyAll); err != nil {
 		t.Fatal("allow public visibility:", err)
 	}
@@ -950,6 +968,26 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	publicAsset := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "")
 	if publicAsset.Code != http.StatusOK || publicAsset.Body.String() != string(payload) || publicAsset.Header().Get("Cache-Control") != "no-store" || publicAsset.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.HasPrefix(publicAsset.Header().Get("Content-Disposition"), "inline") || publicAsset.Header().Get("Content-Security-Policy") != "sandbox; default-src 'none'" || publicAsset.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("public asset = status %d headers %v body %q", publicAsset.Code, publicAsset.Header(), publicAsset.Body.String())
+	}
+	allowedCORS := authAssetCORSHTTPRequest(fixture.handler, http.MethodGet, publicPath, "https://consumer.example", "", "")
+	if allowedCORS.Code != http.StatusOK || allowedCORS.Header().Get("Access-Control-Allow-Origin") != "https://consumer.example" || allowedCORS.Header().Get("Access-Control-Allow-Credentials") != "" || !strings.Contains(allowedCORS.Header().Get("Vary"), "Origin") {
+		t.Fatalf("allowed public CORS = status %d headers %v", allowedCORS.Code, allowedCORS.Header())
+	}
+	deniedCORS := authAssetCORSHTTPRequest(fixture.handler, http.MethodGet, publicPath, "https://other.example", "", "")
+	if deniedCORS.Code != http.StatusOK || deniedCORS.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("unlisted public CORS = status %d headers %v", deniedCORS.Code, deniedCORS.Header())
+	}
+	preflight := authAssetCORSHTTPRequest(fixture.handler, http.MethodOptions, publicPath, "https://consumer.example", "GET", "range, if-none-match")
+	if preflight.Code != http.StatusNoContent || preflight.Header().Get("Access-Control-Allow-Origin") != "https://consumer.example" || preflight.Header().Get("Access-Control-Allow-Credentials") != "" {
+		t.Fatalf("public preflight = status %d headers %v", preflight.Code, preflight.Header())
+	}
+	unsafePreflight := authAssetCORSHTTPRequest(fixture.handler, http.MethodOptions, publicPath, "https://consumer.example", "GET", "authorization")
+	if unsafePreflight.Code != http.StatusForbidden || unsafePreflight.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("unsafe public preflight = status %d headers %v", unsafePreflight.Code, unsafePreflight.Header())
+	}
+	deniedPreflight := authAssetCORSHTTPRequest(fixture.handler, http.MethodOptions, publicPath, "https://other.example", "GET", "")
+	if deniedPreflight.Code != http.StatusForbidden || deniedPreflight.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("unlisted public preflight = status %d headers %v", deniedPreflight.Code, deniedPreflight.Header())
 	}
 	publicRange := authAssetHTTPRequest(fixture.handler, http.MethodGet, publicPath, "assets.example", "bytes=4-9")
 	if publicRange.Code != http.StatusPartialContent || publicRange.Body.String() != string(payload[4:10]) {
@@ -1016,6 +1054,10 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	assetDownload := authAssetHTTPRequest(fixture.handler, http.MethodGet, assetPath, "assets.example", "")
 	if assetDownload.Code != http.StatusOK || assetDownload.Body.String() != string(payload) {
 		t.Fatalf("asset-origin download failed: status=%d body=%q", assetDownload.Code, assetDownload.Body.String())
+	}
+	privateTicketCORS := authAssetCORSHTTPRequest(fixture.handler, http.MethodGet, assetPath, "https://consumer.example", "", "")
+	if privateTicketCORS.Code != http.StatusOK || privateTicketCORS.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("private ticket CORS = status %d headers %v", privateTicketCORS.Code, privateTicketCORS.Header())
 	}
 	if assetDownload.Header().Get("Content-Disposition") == "" ||
 		!strings.HasPrefix(assetDownload.Header().Get("Content-Disposition"), "attachment") ||
@@ -1273,6 +1315,23 @@ func authRawHTTPRequestWithCookies(
 	}
 	if csrfHeader != "" {
 		request.Header.Set(csrfHeaderName, csrfHeader)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func authAssetCORSHTTPRequest(handler http.Handler, method, path, origin, requestedMethod, requestedHeaders string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "https://assets.example"+path, nil)
+	request.Host = "assets.example"
+	request.TLS = &tls.ConnectionState{}
+	request.RemoteAddr = "192.0.2.10:54321"
+	request.Header.Set("Origin", origin)
+	if requestedMethod != "" {
+		request.Header.Set("Access-Control-Request-Method", requestedMethod)
+	}
+	if requestedHeaders != "" {
+		request.Header.Set("Access-Control-Request-Headers", requestedHeaders)
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

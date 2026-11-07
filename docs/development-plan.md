@@ -1,6 +1,6 @@
 # Plano de desenvolvimento — Registry privado de pacotes e artefatos
 
-**Atualização de serving público:** repositórios explicitamente `listed`/`unlisted` podem servir arquivos genéricos publicados por rota limitada na origem de assets, conforme [ADR 0020](adr/0020-public-generic-assets.md). As referências históricas abaixo à ausência total de serving público precedem essa fatia; outros formatos, CORS, cache público e aceite completo de bundles seguem pendentes.
+**Atualização de serving público:** repositórios explicitamente `listed`/`unlisted` podem servir arquivos genéricos publicados por rota limitada na origem de assets, conforme [ADR 0020](adr/0020-public-generic-assets.md). A allowlist CORS global é opcional e restrita; configurações mais granulares, outros formatos, cache público e aceite completo de bundles seguem pendentes. As referências históricas abaixo à ausência total de serving público precedem essa fatia.
 
 **Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso atualizado em 22/10/2026
 

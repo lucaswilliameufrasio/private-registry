@@ -135,9 +135,10 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	}
 	health := server.NewHealth(db)
 	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, server.AuthHTTPConfig{
-		CanonicalOrigin: cfg.CanonicalOrigin,
-		AssetOrigin:     cfg.AssetOrigin,
-		TrustedProxies:  cfg.TrustedProxies,
+		CanonicalOrigin:        cfg.CanonicalOrigin,
+		AssetOrigin:            cfg.AssetOrigin,
+		PublicAssetCORSOrigins: cfg.PublicAssetCORSOrigins,
+		TrustedProxies:         cfg.TrustedProxies,
 	})
 	if err != nil {
 		return err

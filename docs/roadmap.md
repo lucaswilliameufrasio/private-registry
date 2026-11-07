@@ -1,6 +1,6 @@
 # Roadmap — recursos adiados e gaps conhecidos
 
-**Atualização de serving público:** arquivos genéricos publicados em repositórios explicitamente públicos têm rota inicial na origem de assets ([ADR 0020](adr/0020-public-generic-assets.md)). O estado histórico abaixo que afirma ausência total desse serving precede a fatia; CORS, cache público e demais formatos continuam pendentes.
+**Atualização de serving público:** arquivos genéricos publicados em repositórios explicitamente públicos têm rota inicial na origem de assets e allowlist CORS global opcional ([ADR 0020](adr/0020-public-generic-assets.md)). O estado histórico abaixo que afirma ausência total desse serving precede a fatia; CORS granular, cache público e demais formatos continuam pendentes.
 
 **Atualizado:** 22/10/2026
 

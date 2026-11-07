@@ -33,6 +33,21 @@ func TestLoadFromDefaultsToLoopbackAndPersistentSQLite(t *testing.T) {
 	if config.MaxUploadBytes != MaxConfiguredUploadBytes || config.MaxConcurrentUploads != 4 {
 		t.Fatalf("unexpected upload limits: bytes=%d concurrent=%d", config.MaxUploadBytes, config.MaxConcurrentUploads)
 	}
+	if len(config.PublicAssetCORSOrigins) != 0 {
+		t.Fatal("public asset CORS must default to disabled")
+	}
+}
+
+func TestPublicAssetCORSOriginListIsBounded(t *testing.T) {
+	cfg, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_PUBLIC_ASSET_CORS_ORIGINS": " https://app.example,https://docs.example "}))
+	if err != nil || len(cfg.PublicAssetCORSOrigins) != 2 || cfg.PublicAssetCORSOrigins[0] != "https://app.example" || cfg.PublicAssetCORSOrigins[1] != "https://docs.example" {
+		t.Fatalf("CORS list = %v, %v", cfg.PublicAssetCORSOrigins, err)
+	}
+	for _, value := range []string{"", "https://app.example,", strings.Repeat("https://a.example,", 33) + "https://b.example"} {
+		if _, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_PUBLIC_ASSET_CORS_ORIGINS": value})); err == nil {
+			t.Fatalf("invalid CORS list %q was accepted", value)
+		}
+	}
 }
 
 func TestLoadFromAcceptsPostgresDSNWithoutConnecting(t *testing.T) {

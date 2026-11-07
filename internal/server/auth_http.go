@@ -34,20 +34,22 @@ const (
 )
 
 type AuthHTTPConfig struct {
-	CanonicalOrigin string
-	AssetOrigin     string
-	TrustedProxies  []netip.Prefix
+	CanonicalOrigin        string
+	AssetOrigin            string
+	TrustedProxies         []netip.Prefix
+	PublicAssetCORSOrigins []string
 }
 
 type authHTTP struct {
-	service         *auth.Service
-	workspaces      *workspaces.Service
-	repositories    *repositories.Service
-	artifacts       *artifacts.Service
-	maxUploadBytes  int64
-	canonicalOrigin string
-	assetOrigin     string
-	trustedProxies  []netip.Prefix
+	service                *auth.Service
+	workspaces             *workspaces.Service
+	repositories           *repositories.Service
+	artifacts              *artifacts.Service
+	maxUploadBytes         int64
+	canonicalOrigin        string
+	assetOrigin            string
+	trustedProxies         []netip.Prefix
+	publicAssetCORSOrigins map[string]struct{}
 }
 
 type loginRequest struct {
@@ -210,6 +212,17 @@ func NewHandler(
 	if err != nil || assetOrigin == canonicalOrigin {
 		return nil, errors.New("a distinct HTTPS asset origin is required")
 	}
+	if len(cfg.PublicAssetCORSOrigins) > 32 {
+		return nil, errors.New("public asset CORS origins exceed the limit")
+	}
+	corsOrigins := make(map[string]struct{}, len(cfg.PublicAssetCORSOrigins))
+	for _, raw := range cfg.PublicAssetCORSOrigins {
+		origin, err := normalizeOrigin(raw)
+		if err != nil {
+			return nil, errors.New("public asset CORS origins must be HTTPS origins")
+		}
+		corsOrigins[origin] = struct{}{}
+	}
 	for _, proxy := range cfg.TrustedProxies {
 		if !proxy.IsValid() {
 			return nil, errors.New("trusted proxy configuration is invalid")
@@ -219,14 +232,15 @@ func NewHandler(
 	router := chi.NewRouter()
 	health.registerRoutes(router)
 	authentication := &authHTTP{
-		service:         service,
-		workspaces:      workspaceService,
-		repositories:    repositoryService,
-		artifacts:       artifactService,
-		maxUploadBytes:  artifactService.MaxUploadBytes(),
-		canonicalOrigin: canonicalOrigin,
-		assetOrigin:     assetOrigin,
-		trustedProxies:  append([]netip.Prefix(nil), cfg.TrustedProxies...),
+		service:                service,
+		workspaces:             workspaceService,
+		repositories:           repositoryService,
+		artifacts:              artifactService,
+		maxUploadBytes:         artifactService.MaxUploadBytes(),
+		canonicalOrigin:        canonicalOrigin,
+		assetOrigin:            assetOrigin,
+		trustedProxies:         append([]netip.Prefix(nil), cfg.TrustedProxies...),
+		publicAssetCORSOrigins: corsOrigins,
 	}
 	authentication.registerRoutes(router)
 	return router, nil
