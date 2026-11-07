@@ -20,10 +20,15 @@ type GenericObject struct {
 // InventoryGeneric reads a caller-provided consistent database snapshot. The
 // caller must ensure objects remain available while copying: this function does
 // not establish a snapshot, pin objects, or coordinate with garbage collection.
-// The result is bounded by maxObjects and is rejected rather than truncated.
-func InventoryGeneric(ctx context.Context, snapshot *sql.Tx, maxObjects int) ([]GenericObject, error) {
-	if ctx == nil || snapshot == nil || maxObjects < 1 || maxObjects > 1000000 {
+// Distinct objects and scanned references have separate bounds; exceeding
+// either rejects the result rather than silently truncating it. The caller must
+// provide a deadline and bound database resources, including the SQL sort.
+func InventoryGeneric(ctx context.Context, snapshot *sql.Tx, maxObjects, maxReferences int) ([]GenericObject, error) {
+	if ctx == nil || snapshot == nil || maxObjects < 1 || maxObjects > 1000000 || maxReferences < 1 || maxReferences > 10000000 {
 		return nil, errors.New("generic backup inventory requires a snapshot and bounded object limit")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return nil, errors.New("generic backup inventory requires a context deadline")
 	}
 	rows, err := snapshot.QueryContext(ctx, `SELECT workspace_id, sha256, size_bytes FROM registry_generic_artifact_files
 		UNION ALL
@@ -34,7 +39,12 @@ func InventoryGeneric(ctx context.Context, snapshot *sql.Tx, maxObjects int) ([]
 	}
 	defer rows.Close()
 	objects := make([]GenericObject, 0)
+	references := 0
 	for rows.Next() {
+		references++
+		if references > maxReferences {
+			return nil, errors.New("generic backup reference inventory exceeds its limit")
+		}
 		var workspace, digest string
 		var size int64
 		if err := rows.Scan(&workspace, &digest, &size); err != nil {

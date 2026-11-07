@@ -173,7 +173,7 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal("begin PostgreSQL inventory snapshot:", err)
 	}
-	objects, inventoryErr := backup.InventoryGeneric(ctx, snapshot, 1)
+	objects, inventoryErr := backup.InventoryGeneric(ctx, snapshot, 1, 2)
 	rollbackErr := snapshot.Rollback()
 	if inventoryErr != nil || rollbackErr != nil || len(objects) != 1 || objects[0].Size != int64(len(payload)) {
 		t.Fatalf("PostgreSQL inventory count=%d inventory error=%v rollback error=%v", len(objects), inventoryErr, rollbackErr)

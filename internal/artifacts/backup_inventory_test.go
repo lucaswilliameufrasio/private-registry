@@ -26,7 +26,8 @@ import (
 
 func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) {
 	fixture := newArtifactFixture(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
 	actor := fixture.userIDs["publisher"]
 	content := []byte("synthetic shared content")
 	first := startFixtureUpload(t, fixture, actor, "inventory", "v1", "one", content)
@@ -45,12 +46,18 @@ func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback() })
-	objects, err := backup.InventoryGeneric(ctx, tx, 2)
+	objects, err := backup.InventoryGeneric(ctx, tx, 2, 3)
 	if err != nil || len(objects) != 2 {
 		t.Fatalf("generic inventory count=%d error=%v; want two distinct objects", len(objects), err)
 	}
-	if _, err := backup.InventoryGeneric(ctx, tx, 1); err == nil {
+	if _, err := backup.InventoryGeneric(ctx, tx, 1, 3); err == nil {
 		t.Fatal("inventory exceeded its bound without an error")
+	}
+	if _, err := backup.InventoryGeneric(ctx, tx, 2, 2); err == nil {
+		t.Fatal("duplicate references exceeded their bound without an error")
+	}
+	if _, err := backup.InventoryGeneric(context.Background(), tx, 2, 3); err == nil {
+		t.Fatal("inventory without a deadline was accepted")
 	}
 	for _, object := range objects {
 		var copied bytes.Buffer
@@ -71,7 +78,7 @@ func TestGenericBackupInventoryIncludesPublishedAndPendingObjects(t *testing.T) 
 	if _, err := tx.ExecContext(ctx, `UPDATE registry_generic_upload_sessions SET status = 'rejected', object_size = 1 WHERE upload_session_id = ?`, first.ID); err != nil {
 		t.Fatal("inject inconsistent synthetic reference:", err)
 	}
-	if _, err := backup.InventoryGeneric(ctx, tx, 2); err == nil {
+	if _, err := backup.InventoryGeneric(ctx, tx, 2, 3); err == nil {
 		t.Fatal("conflicting object sizes were accepted")
 	}
 }
@@ -149,7 +156,7 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback() })
-	objects, err := backup.InventoryGeneric(ctx, tx, 10)
+	objects, err := backup.InventoryGeneric(ctx, tx, 10, 10)
 	if err != nil || len(objects) != 1 {
 		t.Fatalf("snapshot inventory count=%d err=%v; want one", len(objects), err)
 	}
