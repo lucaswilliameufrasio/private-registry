@@ -3,6 +3,10 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -11,6 +15,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"github.com/google/uuid"
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
@@ -151,6 +156,21 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	var copied bytes.Buffer
 	if err := backup.EncryptGenericObject(ctx, fixture.storage, objects[0], &copied, identity.Recipient()); err != nil {
 		t.Fatalf("encrypt object from snapshot inventory: %v", err)
+	}
+	publicKey, signingKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipherDigest := sha256.Sum256(copied.Bytes())
+	installationID, backupID := uuid.NewString(), uuid.NewString()
+	receipt := backup.ObjectReceipt{Version: 1, InstallationID: installationID, BackupID: backupID, WorkspaceID: objects[0].Key.WorkspaceID, PlainSHA256: objects[0].Key.SHA256, PlainBytes: objects[0].Size, CipherSHA256: hex.EncodeToString(cipherDigest[:]), CipherBytes: int64(copied.Len())}
+	envelope, err := backup.SignObjectReceipt(receipt, signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedReceipt, err := backup.VerifyObjectReceipt(envelope, publicKey, installationID, backupID)
+	if err != nil || verifiedReceipt != receipt {
+		t.Fatalf("verify synthetic object receipt: %v", err)
 	}
 	if _, err := age.Decrypt(bytes.NewReader(copied.Bytes()), wrongIdentity); err == nil {
 		t.Fatal("incorrect recovery identity decrypted synthetic object")
