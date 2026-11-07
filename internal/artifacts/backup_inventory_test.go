@@ -118,15 +118,8 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encrypted, err := age.Encrypt(&copied, identity.Recipient())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := backup.CopyGenericObject(ctx, fixture.storage, objects[0], encrypted); err != nil {
+	if err := backup.EncryptGenericObject(ctx, fixture.storage, objects[0], &copied, identity.Recipient()); err != nil {
 		t.Fatalf("encrypt object from snapshot inventory: %v", err)
-	}
-	if err := encrypted.Close(); err != nil {
-		t.Fatal("complete synthetic ciphertext:", err)
 	}
 	wrongIdentity, err := age.GenerateX25519Identity()
 	if err != nil {
