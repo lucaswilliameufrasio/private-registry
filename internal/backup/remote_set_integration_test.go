@@ -145,6 +145,34 @@ func TestRemoteGenericSetRecoveryFromIsolatedFloci(t *testing.T) {
 	if readErr != nil || closeErr != nil || !bytes.Equal(actual, payload) {
 		t.Fatalf("verify isolated restored object read=%v close=%v", readErr, closeErr)
 	}
+	remoteStore, err := storage.NewS3(client, bucket, "capture", filepath.Join(root, "s3-staging"), 4096)
+	if err != nil {
+		t.Fatal("create experimental fixture storage:", err)
+	}
+	captured, err := CaptureGenericSet(ctx, trusted, syntheticDriver{body: payload, info: storage.ObjectInfo{Key: key, Size: object.Size}}, remoteStore, identity.Recipient(), private, 4096, newStage)
+	if err != nil || len(captured.Receipts) != 1 {
+		t.Fatalf("capture isolated remote set receipts=%d error=%v", len(captured.Receipts), err)
+	}
+	capturedReceipt, err := VerifyObjectReceipt(captured.Receipts[0], public, installationID, backupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipherKey := storage.ObjectKey{WorkspaceID: workspace, SHA256: capturedReceipt.CipherSHA256}
+	capturedSources := []RecoveryObjectSource{{Receipt: captured.Receipts[0], Open: func(ctx context.Context) (io.ReadCloser, error) {
+		reader, _, err := remoteStore.Open(ctx, cipherKey)
+		return reader, err
+	}}}
+	capturedDestination, err := storage.NewFileSystem(filepath.Join(root, "captured-restore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreGenericSet(ctx, captured.Set, trusted, capturedSources, identity, newStage, capturedDestination); err != nil {
+		t.Fatal("recover captured Floci object:", err)
+	}
+	var capturedBytes bytes.Buffer
+	if err := CopyGenericObject(ctx, capturedDestination, object, &capturedBytes); err != nil || !bytes.Equal(capturedBytes.Bytes(), payload) {
+		t.Fatalf("verify captured remote recovery: %v", err)
+	}
 	entries, err := os.ReadDir(stageDir)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("owned staging remains entries=%d error=%v", len(entries), err)
