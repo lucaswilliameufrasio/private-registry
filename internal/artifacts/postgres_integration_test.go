@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
@@ -167,6 +168,15 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	}
 	if version.Status != "published" || len(version.Files) != 1 {
 		t.Fatalf("PostgreSQL published version = %+v", version)
+	}
+	snapshot, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal("begin PostgreSQL inventory snapshot:", err)
+	}
+	objects, inventoryErr := backup.InventoryGeneric(ctx, snapshot, 1)
+	rollbackErr := snapshot.Rollback()
+	if inventoryErr != nil || rollbackErr != nil || len(objects) != 1 || objects[0].Size != int64(len(payload)) {
+		t.Fatalf("PostgreSQL inventory count=%d inventory error=%v rollback error=%v", len(objects), inventoryErr, rollbackErr)
 	}
 	if _, err := service.ResolvePublicFile(ctx, "artifact-postgres", "artifacts", "postgres-release", "build-42", "dist/package.tar"); !errors.Is(err, ErrArtifactNotFound) {
 		t.Fatalf("private PostgreSQL public resolution = %v", err)

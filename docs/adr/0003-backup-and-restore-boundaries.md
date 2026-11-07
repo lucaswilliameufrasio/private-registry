@@ -18,6 +18,7 @@ Os spikes 0.1–0.4 comprovaram snapshots SQLite/PostgreSQL e transporte criptog
 - Distinguir `completed` de `validated`. Validação exige GET remoto, autenticação completa do conteúdo e restauração real em banco/storage novos e descartáveis, seguida por checks de integridade e smoke tests dos formatos presentes.
 - Oferecer validação manual com chave offline e verificador externo automático com chave protegida fora do registry. Verificador recebe somente acesso ao destino de backup e ambiente isolado; não acessa produção nem libera administração da instalação.
 - Restore inicia em recovery mode, não reativa sessões/tokens por padrão, reconstrói referências antes de escrita e só promove o destino após validação explícita.
+- A primitiva inicial `internal/backup.InventoryGeneric` enumera, a partir de uma transação de snapshot fornecida pelo chamador, objetos do catálogo genérico e recibos de upload, deduplicados por workspace e digest, com limite explícito e rejeição de tamanhos conflitantes. Ela não cria o snapshot nem protege objetos de GC, não verifica ou copia os bytes, e não abrange outros formatos. Não representa um manifesto completo nem um backup recuperável.
 
 ## Alternativas rejeitadas
 
