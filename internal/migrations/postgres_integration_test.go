@@ -97,6 +97,12 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 	if appliedCount != 1 || first.CurrentVersion != 15 || first.TargetVersion != 15 || first.InstallationID == "" {
 		t.Fatalf("PostgreSQL advisory lock did not serialize migration callers: first=%+v applied=%d", first, appliedCount)
 	}
+	if err := VerifyCurrent(ctx, firstDB, config.Postgres, first.InstallationID); err != nil {
+		t.Fatal("verify PostgreSQL migration history:", err)
+	}
+	if err := VerifyCurrent(ctx, firstDB, config.Postgres, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("PostgreSQL verification accepted wrong installation identity")
+	}
 
 	var attempts int
 	if err := firstDB.QueryRowContext(ctx,

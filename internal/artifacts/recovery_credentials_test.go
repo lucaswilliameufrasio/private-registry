@@ -12,6 +12,7 @@ import (
 	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/migrations"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
 	"private-registry/internal/spikes/sqlitebackup"
@@ -22,6 +23,10 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	readerID := fixture.userIDs["reader"]
+	var expectedInstallationID string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT installation_id FROM registry_installation WHERE singleton_id = 1`).Scan(&expectedInstallationID); err != nil {
+		t.Fatal(err)
+	}
 	payload := []byte("synthetic recovery credentials")
 	upload := startFixtureUpload(t, fixture, fixture.userIDs["publisher"], "recovery", "v1", "file", payload)
 	if _, err := fixture.service.ReceiveUpload(ctx, fixture.userIDs["publisher"], fixture.workspaceID, fixture.repositoryID, upload.ID, bytes.NewReader(payload)); err != nil {
@@ -61,6 +66,9 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = recoveredDB.Close() })
+	if err := migrations.VerifyCurrent(ctx, recoveredDB, config.SQLite, expectedInstallationID); err != nil {
+		t.Fatal("verify isolated recovery schema:", err)
+	}
 	failedTx, err := recoveredDB.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
