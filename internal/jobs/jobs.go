@@ -167,7 +167,7 @@ func (q *Queue) Claim(ctx context.Context, kind string, now time.Time, duration 
 				return errors.New("ready job could not be read")
 			}
 			if job.Attempts >= job.MaxAttempts {
-				query = `UPDATE registry_jobs SET status = 'dead', lease_token = NULL, lease_until_ms = NULL, updated_at_ms = ` + q.bind(1) + ` WHERE job_id = ` + q.bind(2)
+				query = `UPDATE registry_jobs SET status = 'dead', lease_token = NULL, lease_until_ms = NULL, last_failure_code = 'lease_expired', revision = revision + 1, updated_at_ms = ` + q.bind(1) + ` WHERE job_id = ` + q.bind(2)
 				if _, err := tx.ExecContext(ctx, query, now.UnixMilli(), job.ID); err != nil {
 					return errors.New("exhausted job could not be recorded")
 				}
@@ -180,7 +180,7 @@ func (q *Queue) Claim(ctx context.Context, kind string, now time.Time, duration 
 			job.LeaseToken = token.String()
 			job.LeaseUntil = now.Add(duration).UTC()
 			job.Attempts++
-			query = `UPDATE registry_jobs SET status = 'running', attempts = ` + q.bind(1) + `, lease_token = ` + q.bind(2) + `, lease_until_ms = ` + q.bind(3) + `, updated_at_ms = ` + q.bind(4) + ` WHERE job_id = ` + q.bind(5)
+			query = `UPDATE registry_jobs SET last_failure_code = CASE WHEN status = 'running' THEN 'lease_expired' ELSE last_failure_code END, status = 'running', attempts = ` + q.bind(1) + `, lease_token = ` + q.bind(2) + `, lease_until_ms = ` + q.bind(3) + `, revision = revision + 1, updated_at_ms = ` + q.bind(4) + ` WHERE job_id = ` + q.bind(5)
 			if _, err := tx.ExecContext(ctx, query, job.Attempts, job.LeaseToken, job.LeaseUntil.UnixMilli(), now.UnixMilli(), job.ID); err != nil {
 				return errors.New("job claim could not be recorded")
 			}
@@ -217,15 +217,17 @@ func (q *Queue) Finish(ctx context.Context, id, token string, success bool, now,
 		}
 		status := "succeeded"
 		available := now.UnixMilli()
+		var failureCode any
 		if !success {
+			failureCode = "operation_failed"
 			status = "pending"
 			available = next.UnixMilli()
 			if attempts >= maxAttempts {
 				status = "dead"
 			}
 		}
-		query = `UPDATE registry_jobs SET status = ` + q.bind(1) + `, available_at_ms = ` + q.bind(2) + `, lease_token = NULL, lease_until_ms = NULL, updated_at_ms = ` + q.bind(3) + ` WHERE job_id = ` + q.bind(4)
-		if _, err := tx.ExecContext(ctx, query, status, available, now.UnixMilli(), id); err != nil {
+		query = `UPDATE registry_jobs SET status = ` + q.bind(1) + `, available_at_ms = ` + q.bind(2) + `, lease_token = NULL, lease_until_ms = NULL, last_failure_code = ` + q.bind(3) + `, revision = revision + 1, updated_at_ms = ` + q.bind(4) + ` WHERE job_id = ` + q.bind(5)
+		if _, err := tx.ExecContext(ctx, query, status, available, failureCode, now.UnixMilli(), id); err != nil {
 			return errors.New("job completion could not be recorded")
 		}
 		return nil
@@ -244,7 +246,7 @@ func (q *Queue) Reschedule(ctx context.Context, id, token string, now, next time
 	}
 	return q.transaction(ctx, func(tx *sql.Tx) error {
 		query := `UPDATE registry_jobs SET status = 'pending', attempts = 0, available_at_ms = ` + q.bind(1) +
-			`, lease_token = NULL, lease_until_ms = NULL, updated_at_ms = ` + q.bind(2) +
+			`, lease_token = NULL, lease_until_ms = NULL, last_failure_code = NULL, revision = revision + 1, updated_at_ms = ` + q.bind(2) +
 			` WHERE job_id = ` + q.bind(3) + ` AND status = 'running' AND lease_token = ` + q.bind(4) + ` AND lease_until_ms > ` + q.bind(5)
 		result, err := tx.ExecContext(ctx, query, next.UnixMilli(), now.UnixMilli(), id, token, now.UnixMilli())
 		if err != nil {
@@ -281,7 +283,7 @@ func (q *Queue) Heartbeat(ctx context.Context, id, token string, now time.Time, 
 		if until <= leaseUntil {
 			return nil
 		}
-		query = `UPDATE registry_jobs SET lease_until_ms = ` + q.bind(1) + `, updated_at_ms = ` + q.bind(2) + ` WHERE job_id = ` + q.bind(3)
+		query = `UPDATE registry_jobs SET lease_until_ms = ` + q.bind(1) + `, revision = revision + 1, updated_at_ms = ` + q.bind(2) + ` WHERE job_id = ` + q.bind(3)
 		if _, err := tx.ExecContext(ctx, query, until, now.UnixMilli(), id); err != nil {
 			return errors.New("job heartbeat could not be recorded")
 		}

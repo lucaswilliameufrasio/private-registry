@@ -262,6 +262,8 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/generic-logical-quota", h.setLogicalQuota)
 	router.Get("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.getLogicalQuota)
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
+	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
+	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
 }
 
 func (h *authHTTP) login(response http.ResponseWriter, request *http.Request) {
@@ -1184,6 +1186,8 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusForbidden, "forbidden")
 	case errors.Is(err, repositories.ErrInvalidWorkspaceID),
 		errors.Is(err, repositories.ErrInvalidQuota),
+		errors.Is(err, repositories.ErrInvalidJobCursor),
+		errors.Is(err, repositories.ErrInvalidJobRequest),
 		errors.Is(err, repositories.ErrInvalidRepositoryID),
 		errors.Is(err, repositories.ErrInvalidSlug),
 		errors.Is(err, repositories.ErrInvalidName),
@@ -1198,6 +1202,8 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusConflict, "repository_slug_conflict")
 	case errors.Is(err, repositories.ErrQuotaRevision):
 		writeAPIError(response, http.StatusConflict, "logical_quota_revision_conflict")
+	case errors.Is(err, repositories.ErrDeadJobConflict):
+		writeAPIError(response, http.StatusConflict, "dead_job_revision_conflict")
 	case errors.Is(err, repositories.ErrVisibilityNotAllowed):
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):

@@ -145,4 +145,19 @@ func exerciseQueue(t *testing.T, db *sql.DB, driver config.DatabaseDriver) {
 	if err != nil || secondRun.ID != recurringID || secondRun.Attempts != 1 || secondRun.LeaseToken == run.LeaseToken {
 		t.Fatalf("recurring second run = %+v, %v", secondRun, err)
 	}
+	expiredID, err := q.Enqueue(ctx, "expired-lease-key", "lease-probe", "{}", 1, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Claim(ctx, "lease-probe", now, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Claim(ctx, "lease-probe", now.Add(time.Second), time.Second); !errors.Is(err, ErrNoJob) {
+		t.Fatalf("exhausted expired lease claim = %v", err)
+	}
+	var status, reason string
+	var revision int64
+	if err := db.QueryRowContext(ctx, `SELECT status, last_failure_code, revision FROM registry_jobs WHERE job_id = `+q.bind(1), expiredID).Scan(&status, &reason, &revision); err != nil || status != "dead" || reason != "lease_expired" || revision != 2 {
+		t.Fatalf("expired lease status=%q reason=%q revision=%d err=%v", status, reason, revision, err)
+	}
 }

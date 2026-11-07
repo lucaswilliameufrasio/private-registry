@@ -82,6 +82,7 @@ func TestPostgresRepositoryIdentityAuthorizationAndVisibility(t *testing.T) {
 		t.Fatalf("PostgreSQL repository was not private by default: %q", repository.Visibility)
 	}
 	exerciseQuotaAdministration(t, ctx, db, repositoryService, config.Postgres, instanceAdminID, memberID, workspace.ID, repository.ID)
+	exerciseDeadJobAdministration(t, ctx, db, repositoryService, config.Postgres, instanceAdminID, memberID)
 	if _, _, err := repositoryService.ListForWorkspace(ctx, memberID, workspace.ID, "", 10); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("PostgreSQL membership implied repository read access: %v", err)
 	}

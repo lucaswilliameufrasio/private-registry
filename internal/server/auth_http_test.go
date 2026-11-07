@@ -31,6 +31,7 @@ import (
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/jobs"
 	"private-registry/internal/migrations"
 	"private-registry/internal/password"
 	"private-registry/internal/repositories"
@@ -808,6 +809,41 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		t.Fatalf("MFA enrollment failed: status=%d body=%s", completeEnrollment.Code, completeEnrollment.Body.String())
 	}
 	mfaCookies := assertSessionCookies(t, completeEnrollment)
+	queue, err := jobs.New(fixture.db, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobNow := time.Now().UTC()
+	deadID, err := queue.Enqueue(ctx, "synthetic-private-key", "expire-generic-uploads", `{"token":"synthetic-secret"}`, 1, jobNow, jobNow)
+	if err != nil {
+		t.Fatal("enqueue synthetic failed job:", err)
+	}
+	claimed, err := queue.Claim(ctx, "expire-generic-uploads", jobNow, time.Minute)
+	if err != nil {
+		t.Fatal("claim synthetic failed job:", err)
+	}
+	if err := queue.Finish(ctx, deadID, claimed.LeaseToken, false, jobNow.Add(time.Second), jobNow.Add(2*time.Second)); err != nil {
+		t.Fatal("fail synthetic job:", err)
+	}
+	listJobs := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, "/api/v1/admin/jobs/dead", "", authTestOrigin, "registry.example", mfaCookies, "")
+	var deadList deadJobListResponse
+	if listJobs.Code != http.StatusOK || json.Unmarshal(listJobs.Body.Bytes(), &deadList) != nil || len(deadList.Jobs) != 1 || deadList.Jobs[0].ID != deadID || deadList.Jobs[0].Kind != "expire-generic-uploads" || strings.Contains(listJobs.Body.String(), "synthetic-secret") || strings.Contains(listJobs.Body.String(), "synthetic-private-key") {
+		t.Fatalf("dead-job list = status %d body %s", listJobs.Code, listJobs.Body.String())
+	}
+	retryPath := "/api/v1/admin/jobs/" + deadID + "/retry"
+	retryBody := fmt.Sprintf(`{"expected_revision":%d}`, deadList.Jobs[0].Revision)
+	noJobCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, retryPath, retryBody, authTestOrigin, "registry.example", mfaCookies, "")
+	if noJobCSRF.Code != http.StatusForbidden {
+		t.Fatalf("dead-job retry without CSRF = %d", noJobCSRF.Code)
+	}
+	retryJob := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, retryPath, retryBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if retryJob.Code != http.StatusNoContent {
+		t.Fatalf("dead-job retry = status %d body %s", retryJob.Code, retryJob.Body.String())
+	}
+	staleRetry := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, retryPath, retryBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if staleRetry.Code != http.StatusConflict || !strings.Contains(staleRetry.Body.String(), `"dead_job_revision_conflict"`) {
+		t.Fatalf("stale dead-job retry = status %d body %s", staleRetry.Code, staleRetry.Body.String())
+	}
 
 	payload := []byte("synthetic generic artifact")
 	digest := sha256.Sum256(payload)

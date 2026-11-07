@@ -17,9 +17,11 @@ O plano exige trabalho recuperável após restart, leases, retries e dead-letter
 
 ## Limites e trabalho posterior
 
-O servidor inicia um worker único para expiração de uploads: existe um registro recorrente fixo, claim com lease de 30 segundos, operação limitada a 10 segundos e até 128 sessões, reagendamento por minuto e retry com backoff e jitter. O worker para ao cancelar o servidor; após interrupção, uma lease expirada permite retomada. O job é idempotente e não remove objetos. Ao esgotar oito tentativas, fica em dead-letter e o worker registra erro; UI, alerta operacional e retry manual autorizado ainda não existem.
+O servidor inicia um worker único para expiração de uploads: existe um registro recorrente fixo, claim com lease de 30 segundos, operação limitada a 10 segundos e até 128 sessões, reagendamento por minuto e retry com backoff e jitter. O worker para ao cancelar o servidor; após interrupção, uma lease expirada permite retomada. O job é idempotente e não remove objetos. Ao esgotar oito tentativas, fica em dead-letter e o worker registra erro.
 
-Esta implementação não entrega scheduler genérico, outbox transacional, UI, prioridade sob pressão, nem GC ou limpeza de staging. Backup e GC exigem coordenação adicional específica; uma lease genérica não prova consistência de storage. O agendamento recorrente expira sessões, não limpa objetos órfãos, e não é garantia de execução pontual sob falha ou indisponibilidade.
+O administrador ativo pode listar metadados limitados em `GET /api/v1/admin/jobs/dead` e reenfileirar `expire-generic-uploads` via `POST /api/v1/admin/jobs/{jobID}/retry`, com MFA recente, CSRF, `expected_revision` e auditoria transacional. A revisão muda em cada transição de lease/estado, impedindo que uma tela antiga reenvie um job que voltou a falhar. Outras espécies de job aparecem apenas como `other` e não podem ser reprocessadas por essa rota até que seus efeitos e autorização tenham política própria. O código de falha é apenas `operation_failed`, `lease_expired` ou `unknown` para registros históricos; não contém mensagem bruta nem prova causa-raiz. Payload, chave de idempotência e lease nunca são retornados. A listagem é paginada; UI e alertas operacionais continuam pendentes.
+
+Esta implementação não entrega scheduler genérico, outbox transacional, UI, alertas, prioridade sob pressão, nem GC ou limpeza de staging. Backup e GC exigem coordenação adicional específica; uma lease genérica não prova consistência de storage. O agendamento recorrente expira sessões, não limpa objetos órfãos, e não é garantia de execução pontual sob falha ou indisponibilidade.
 
 ## Alternativas
 

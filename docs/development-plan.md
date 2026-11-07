@@ -1099,6 +1099,8 @@ Links usam a URL canônica e levam a telas autenticadas quando apropriado. Token
 
 **Fundação parcial:** a migration v11 e `internal/jobs` persistem jobs idempotentes e claims com token, lease e limite de tentativas em SQLite/PostgreSQL. Um worker iniciado por `serve` processa periodicamente lotes limitados de expiração de sessões de upload, com retry e reagendamento persistidos; objetos órfãos não são apagados. Scheduler genérico, outbox, recuperação operacional, limites, alertas e UI continuam pendentes. Não há garantia exatamente-once para efeitos externos. A decisão e seus limites estão no [ADR 0017](adr/0017-persistent-job-claims.md).
 
+A migration v14 acrescenta revisão por transição e código de falha limitado; administrador da instalação pode listar dead-letters e solicitar retry auditado apenas para expiração genérica, com revisão observada e MFA recente. A interface ainda não substitui uma área operacional completa nem prova segurança para retry de outros tipos de job.
+
 - Job persistente e outbox transacional evitam perda entre commit e notificação.
 - Lease com expiração, heartbeat, retry exponencial limitado e jitter.
 - Workers retomam jobs interrompidos; operações externas não são exatamente-once por promessa.
