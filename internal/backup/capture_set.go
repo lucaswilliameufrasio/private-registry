@@ -28,7 +28,7 @@ type CapturedGenericSet struct {
 // removed on Close. Failures can leave orphaned destination objects; this
 // function neither publishes a completed backup nor deletes/reconciles them.
 func CaptureGenericSet(ctx context.Context, trusted GenericSetRecovery, source, destination storage.Driver, recipient age.Recipient, signer ed25519.PrivateKey, maxCiphertext int64, newStage func() (RecoveryStage, error)) (CapturedGenericSet, error) {
-	if ctx == nil || source == nil || destination == nil || recipient == nil || newStage == nil || maxCiphertext < 1 || maxCiphertext > 1<<30 || len(signer) != ed25519.PrivateKeySize || len(trusted.Inventory) > maxGenericSetObjects {
+	if ctx == nil || source == nil || destination == nil || recipient == nil || newStage == nil || maxCiphertext < 1 || maxCiphertext > 2<<30 || len(signer) != ed25519.PrivateKeySize || len(trusted.Inventory) > maxGenericSetObjects {
 		return CapturedGenericSet{}, errors.New("generic backup capture parameters are invalid")
 	}
 	if _, ok := ctx.Deadline(); !ok {
@@ -111,7 +111,7 @@ func captureGenericObject(ctx context.Context, trusted GenericSetRecovery, objec
 	if stored.Key != expected.Key || stored.Size != expected.Size {
 		return receipt, envelope, errors.New("stored generic backup ciphertext metadata is invalid")
 	}
-	if err := CopyGenericObject(ctx, destination, expected, io.Discard); err != nil {
+	if err := copyBoundedObject(ctx, destination, expected, io.Discard, maxCiphertext); err != nil {
 		return receipt, envelope, errors.New("stored generic backup ciphertext could not be verified")
 	}
 	receipt = ObjectReceipt{Version: 1, InstallationID: trusted.InstallationID, BackupID: trusted.BackupID, WorkspaceID: object.Key.WorkspaceID, PlainSHA256: object.Key.SHA256, PlainBytes: object.Size, CipherSHA256: cipherDigest, CipherBytes: writer.written}

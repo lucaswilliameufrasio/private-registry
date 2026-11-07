@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -18,6 +19,22 @@ type syntheticDriver struct {
 	body     []byte
 	info     storage.ObjectInfo
 	closeErr error
+}
+
+func TestCiphertextReadbackAllowsEncryptionOverhead(t *testing.T) {
+	digest := sha256.Sum256([]byte("synthetic"))
+	key, err := storage.NewObjectKey(uuid.NewString(), hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	object := GenericObject{Key: key, Size: (1 << 30) + 1}
+	driver := syntheticDriver{info: storage.ObjectInfo{Key: key, Size: object.Size}}
+	if err := CopyGenericObject(context.Background(), driver, object, io.Discard); err == nil || !strings.Contains(err.Error(), "parameters") {
+		t.Fatalf("plaintext limit not enforced: %v", err)
+	}
+	if err := copyBoundedObject(context.Background(), driver, object, io.Discard, 2<<30); err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("ciphertext readback must reach and reject truncated content: %v", err)
+	}
 }
 
 func (s syntheticDriver) Open(_ context.Context, _ storage.ObjectKey) (io.ReadCloser, storage.ObjectInfo, error) {

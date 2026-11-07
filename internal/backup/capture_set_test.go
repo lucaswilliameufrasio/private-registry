@@ -84,6 +84,12 @@ func TestCaptureAndRecoverGenericSet(t *testing.T) {
 	if result, err := CaptureGenericSet(context.Background(), trusted, source, remote, identity.Recipient(), private, 4096, newStage); err == nil || len(result.Set.Payload) != 0 {
 		t.Fatal("capture without deadline returned a signed set")
 	}
+	if _, err := CaptureGenericSet(ctx, trusted, source, remote, identity.Recipient(), private, 2<<30, newStage); err != nil {
+		t.Fatalf("capture with supported ciphertext limit: %v", err)
+	}
+	if result, err := CaptureGenericSet(ctx, trusted, source, remote, identity.Recipient(), private, (2<<30)+1, newStage); err == nil || len(result.Set.Payload) != 0 {
+		t.Fatal("capture above ciphertext limit returned a signed set")
+	}
 	result, err := CaptureGenericSet(ctx, trusted, source, remote, identity.Recipient(), private, 4096, newStage)
 	if err != nil || len(result.Receipts) != len(inventory) {
 		t.Fatalf("capture generic set receipts=%d err=%v", len(result.Receipts), err)

@@ -15,7 +15,12 @@ import (
 // must discard partial output on any error and publish it only after success.
 // This operation neither pins the source nor creates a complete backup.
 func CopyGenericObject(ctx context.Context, source storage.Driver, object GenericObject, destination io.Writer) (retErr error) {
-	if ctx == nil || source == nil || destination == nil || object.Size < 0 || object.Size > 1<<30 {
+	return copyBoundedObject(ctx, source, object, destination, 1<<30)
+}
+
+// Ciphertext has a separate larger limit because encryption adds overhead.
+func copyBoundedObject(ctx context.Context, source storage.Driver, object GenericObject, destination io.Writer, maxSize int64) (retErr error) {
+	if ctx == nil || source == nil || destination == nil || object.Size < 0 || object.Size > maxSize {
 		return errors.New("generic backup object copy parameters are invalid")
 	}
 	key, err := storage.NewObjectKey(object.Key.WorkspaceID, object.Key.SHA256)
