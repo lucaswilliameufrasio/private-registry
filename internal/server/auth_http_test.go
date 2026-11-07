@@ -813,6 +813,17 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	digest := sha256.Sum256(payload)
 	startPath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/artifacts/uploads", workspace.ID, repository.ID)
 	startBody := fmt.Sprintf(`{"collection":"widget","version":"2026.10","path":"dist/widget.js","content_type":"application/javascript","size":%d,"sha256":"%x"}`, len(payload), digest)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = ? WHERE workspace_id = ?`, len(payload)-1, workspace.ID); err != nil {
+		t.Fatal("set synthetic workspace quota:", err)
+	}
+	quotaDenied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, startPath, startBody,
+		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if quotaDenied.Code != http.StatusConflict || !strings.Contains(quotaDenied.Body.String(), `"logical_quota_exceeded"`) {
+		t.Fatalf("quota rejection = status %d body %s", quotaDenied.Code, quotaDenied.Body.String())
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = ? WHERE workspace_id = ?`, len(payload), workspace.ID); err != nil {
+		t.Fatal("increase synthetic workspace quota:", err)
+	}
 	start := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, startPath, startBody,
 		authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
 	if start.Code != http.StatusCreated {

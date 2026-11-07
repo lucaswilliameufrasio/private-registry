@@ -245,4 +245,18 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if err != nil || count != 0 {
 		t.Fatalf("repeated PostgreSQL expiration count = %d, error = %v; want 0", count, err)
 	}
+	quotaWorkspace, quotaRepository := uuid.NewString(), uuid.NewString()
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspaces (workspace_id, slug, display_name, status, created_by, created_at) VALUES ($1, 'quota-postgres', 'Quota', 'active', $2, $3)`, quotaWorkspace, ownerID, now); err != nil {
+		t.Fatal("seed quota workspace:", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspace_memberships (workspace_id, user_id, role, status, created_by, created_at, updated_at) VALUES ($1, $2, 'member', 'active', $3, $4, $4)`, quotaWorkspace, publisherID, ownerID, now); err != nil {
+		t.Fatal("seed quota membership:", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, visibility, status, created_by, created_at, updated_at) VALUES ($1, $2, 'quota', 'Quota', 'private', 'active', $3, $4, $4)`, quotaRepository, quotaWorkspace, ownerID, now); err != nil {
+		t.Fatal("seed quota repository:", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_repository_grants (grant_id, repository_id, workspace_id, user_id, role, granted_by, granted_at) VALUES ($1, $2, $3, $4, 'publisher', $5, $6)`, uuid.NewString(), quotaRepository, quotaWorkspace, publisherID, ownerID, now); err != nil {
+		t.Fatal("seed quota grant:", err)
+	}
+	exerciseGenericQuota(t, service, db, config.Postgres, publisherID, quotaWorkspace, quotaRepository)
 }

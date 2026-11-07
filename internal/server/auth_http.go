@@ -1236,6 +1236,8 @@ func writeArtifactError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusConflict, "artifact_state_conflict")
 	case errors.Is(err, artifacts.ErrUploadExpired):
 		writeAPIError(response, http.StatusGone, "upload_session_expired")
+	case errors.Is(err, artifacts.ErrLogicalQuotaExceeded):
+		writeAPIError(response, http.StatusConflict, "logical_quota_exceeded")
 	case errors.Is(err, artifacts.ErrUploadTooLarge), errors.As(err, &maxBytesError):
 		writeAPIError(response, http.StatusRequestEntityTooLarge, "request_too_large")
 	case errors.Is(err, artifacts.ErrUploadDigestMismatch):

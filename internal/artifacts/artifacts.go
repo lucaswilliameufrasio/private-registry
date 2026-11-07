@@ -48,6 +48,7 @@ var (
 	ErrUploadDigestMismatch      = errors.New("uploaded artifact does not match its declared digest")
 	ErrUploadSizeMismatch        = errors.New("uploaded artifact does not match its declared size")
 	ErrUploadCapacity            = errors.New("artifact upload capacity is temporarily unavailable")
+	ErrLogicalQuotaExceeded      = errors.New("artifact logical storage quota is exceeded")
 	ErrVersionIncomplete         = errors.New("artifact version has incomplete uploads")
 	ErrVersionEmpty              = errors.New("artifact version has no files")
 	ErrInvalidRange              = errors.New("artifact byte range is invalid")
@@ -232,6 +233,9 @@ func (s *Service) StartUpload(
 			}
 			if fileCount >= MaxCollectionFiles {
 				return ErrVersionConflict
+			}
+			if err := s.checkGenericQuota(ctx, tx, workspaceID, repositoryID, request.Size); err != nil {
+				return err
 			}
 			sessionID, err := uuid.NewV7()
 			if err != nil {
