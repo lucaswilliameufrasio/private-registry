@@ -142,13 +142,23 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	if err := sqlitebackup.Decrypt(ctx, ciphertextPath, recoveredPath, identity); err != nil {
 		t.Fatal("recover synthetic snapshot:", err)
 	}
-	originalDigest, err := sqlitebackup.Digest(snapshotPath)
-	if err != nil {
-		t.Fatal(err)
+	digestSnapshot := func(path string) (string, int64) {
+		t.Helper()
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, size, digestErr := backup.DigestSnapshot(ctx, file, 64<<20)
+		closeErr := file.Close()
+		if digestErr != nil || closeErr != nil {
+			t.Fatalf("digest synthetic snapshot: digest=%v close=%v", digestErr, closeErr)
+		}
+		return digest, size
 	}
-	recoveredDigest, err := sqlitebackup.Digest(recoveredPath)
-	if err != nil || originalDigest != recoveredDigest {
-		t.Fatalf("recovered snapshot digest differs: %v", err)
+	originalDigest, originalSize := digestSnapshot(snapshotPath)
+	recoveredDigest, recoveredSize := digestSnapshot(recoveredPath)
+	if originalDigest != recoveredDigest || originalSize != recoveredSize {
+		t.Fatal("recovered snapshot digest or size differs")
 	}
 	after := []byte("synthetic after snapshot")
 	second := startFixtureUpload(t, fixture, actor, "snapshot", "v2", "second", after)
@@ -237,6 +247,34 @@ func TestSQLiteSnapshotInventoryCopiesOnlySnapshotObjects(t *testing.T) {
 	}}}
 	if err := backup.RestoreGenericSet(ctx, setEnvelope, trusted, sources, identity, newStage, restoredStore); err != nil {
 		t.Fatalf("restore synthetic object: %v", err)
+	}
+	archiveStore, err := storage.NewFileSystem(filepath.Join(t.TempDir(), "captured-objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, err := backup.CaptureGenericSet(ctx, trusted, fixture.storage, archiveStore, identity.Recipient(), signingKey, 4096, newStage)
+	if err != nil || len(captured.Receipts) != 1 {
+		t.Fatalf("capture generic snapshot inventory receipts=%d error=%v", len(captured.Receipts), err)
+	}
+	capturedReceipt, err := backup.VerifyObjectReceipt(captured.Receipts[0], publicKey, installationID, backupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capturedKey := storage.ObjectKey{WorkspaceID: capturedReceipt.WorkspaceID, SHA256: capturedReceipt.CipherSHA256}
+	capturedSources := []backup.RecoveryObjectSource{{Receipt: captured.Receipts[0], Open: func(ctx context.Context) (io.ReadCloser, error) {
+		reader, _, err := archiveStore.Open(ctx, capturedKey)
+		return reader, err
+	}}}
+	capturedRestore, err := storage.NewFileSystem(filepath.Join(t.TempDir(), "captured-restore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.RestoreGenericSet(ctx, captured.Set, trusted, capturedSources, identity, newStage, capturedRestore); err != nil {
+		t.Fatal("recover captured snapshot inventory:", err)
+	}
+	var capturedBytes bytes.Buffer
+	if err := backup.CopyGenericObject(ctx, capturedRestore, objects[0], &capturedBytes); err != nil || !bytes.Equal(capturedBytes.Bytes(), before) {
+		t.Fatalf("verify captured snapshot inventory bytes: %v", err)
 	}
 	restoredRepositories, err := repositories.New(snapshotDB, config.SQLite)
 	if err != nil {
