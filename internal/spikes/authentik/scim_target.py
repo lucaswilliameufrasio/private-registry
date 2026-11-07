@@ -1,5 +1,6 @@
 """Bounded local SCIM target for the Authentik interoperability spike."""
 
+import copy
 import json
 import os
 import re
@@ -175,12 +176,25 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             response(self, 400, {"detail": "invalid JSON"})
             return
-        resource_id = str(uuid.uuid4())
-        value["id"] = resource_id
-        value["meta"] = {"resourceType": collection[:-1].title()}
         with LOCK:
+            external_id = value.get("externalId")
+            if external_id and any(item.get("externalId") == external_id for item in STATE[collection].values()):
+                STATE["requests"].append({
+                    "collection": collection,
+                    "method": "POST",
+                    "path": parsed.path,
+                    "request": copy.deepcopy(value),
+                    "status": 409,
+                    "observed_at_monotonic_ns": time.monotonic_ns(),
+                })
+                save_state()
+                response(self, 409, {"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "409", "scimType": "uniqueness", "detail": "externalId already exists"})
+                return
+            resource_id = str(uuid.uuid4())
+            value["id"] = resource_id
+            value["meta"] = {"resourceType": collection[:-1].title()}
             STATE[collection][resource_id] = value
-            self.record(collection, "POST", parsed.path, value)
+            self.record(collection, "POST", parsed.path, value, status=201)
             save_state()
         response(self, 201, value)
 
@@ -260,14 +274,14 @@ class Handler(BaseHTTPRequestHandler):
                     members = resource.setdefault("members", [])
                     members[:] = [item for item in members if item.get("value") != match.group(1)]
 
-    def record(self, collection, method, path, value, request=None):
+    def record(self, collection, method, path, value, request=None, status=200):
         STATE["requests"].append({
             "collection": collection,
             "method": method,
             "path": path,
-            "resource": value,
-            "request": request,
-            "status": 200,
+            "resource": copy.deepcopy(value),
+            "request": copy.deepcopy(request),
+            "status": status,
             "observed_at_monotonic_ns": time.monotonic_ns(),
         })
 
