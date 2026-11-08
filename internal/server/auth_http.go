@@ -293,6 +293,9 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/personal-read-tokens", h.issuePersonalReadToken)
 	router.Get("/api/v1/personal-read-tokens", h.listPersonalReadTokens)
 	router.Delete("/api/v1/personal-read-tokens/{tokenID}", h.revokePersonalReadToken)
+	router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/cargo-write-tokens", h.issueCargoWriteToken)
+	router.Get("/api/v1/cargo-write-tokens", h.listCargoWriteTokens)
+	router.Delete("/api/v1/cargo-write-tokens/{tokenID}", h.revokeCargoWriteToken)
 	router.Get("/api/v1/token/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/{artifactVersionID}", h.personalTokenManifest)
 	router.Get("/api/v1/token/workspaces/{workspaceID}/repositories/{repositoryID}/files/{fileID}", h.personalTokenFile)
 	router.Head("/api/v1/token/workspaces/{workspaceID}/repositories/{repositoryID}/files/{fileID}", h.personalTokenFile)
@@ -1268,7 +1271,7 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):
 		writeAPIError(response, http.StatusPreconditionFailed, "public_visibility_confirmation_required")
-	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable):
+	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable):
 		writeAPIError(response, http.StatusNotFound, "resource_unavailable")
 	case errors.Is(err, repositories.ErrMembershipUnavailable):
 		writeAPIError(response, http.StatusNotFound, "membership_unavailable")

@@ -812,6 +812,14 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		ownerID, repositories.GrantReader); err != nil {
 		t.Fatal("explicitly grant reader role:", err)
 	}
+	cargoRepository := uuid.NewString()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'cargo-fixture', 'Cargo fixture', ?, 'now', 'now', 'cargo')`, cargoRepository, workspace.ID, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, ownerID, workspace.ID, cargoRepository, ownerID, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	cargoIssuePath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/cargo-write-tokens", workspace.ID, cargoRepository)
 
 	login := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
 		fmt.Sprintf(`{"login_name":%q,"password":%q}`, authTestLogin, authTestPassword),
@@ -824,6 +832,9 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	preMFAIssue := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, preMFAIssuePath, `{}`, authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value)
 	if preMFAIssue.Code == http.StatusCreated {
 		t.Fatal("personal token was issued before MFA")
+	}
+	if preMFA := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value); preMFA.Code == http.StatusCreated {
+		t.Fatal("Cargo write token was issued before MFA")
 	}
 	beginEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
 		"/api/v1/auth/mfa/enrollment", "", authTestOrigin, "registry.example",
@@ -1083,6 +1094,48 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		t.Fatalf("conditional public request after privatization = %d", privateAgain.Code)
 	}
 	tokenIssuePath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/personal-read-tokens", workspace.ID, repository.ID)
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo credential issuance without CSRF: %d", denied.Code)
+	}
+	cargoIssue := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	var cargoCredential issuedPersonalTokenResponse
+	if cargoIssue.Code != http.StatusCreated || json.Unmarshal(cargoIssue.Body.Bytes(), &cargoCredential) != nil || cargoCredential.Bearer == "" || cargoCredential.Token.TokenID == "" || cargoIssue.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cargo credential issuance failed: status=%d", cargoIssue.Code)
+	}
+	cargoList := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, "/api/v1/cargo-write-tokens", "", authTestOrigin, "registry.example", mfaCookies, "")
+	var cargoTokens personalTokenListResponse
+	if cargoList.Code != http.StatusOK || json.Unmarshal(cargoList.Body.Bytes(), &cargoTokens) != nil || len(cargoTokens.Tokens) != 1 || cargoTokens.Tokens[0].TokenID != cargoCredential.Token.TokenID || strings.Contains(cargoList.Body.String(), cargoCredential.Bearer) {
+		t.Fatalf("Cargo credential metadata listing failed: status=%d", cargoList.Code)
+	}
+	cargoRevoke := "/api/v1/cargo-write-tokens/" + cargoCredential.Token.TokenID
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, cargoRevoke, "", authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo credential revocation without CSRF: %d", denied.Code)
+	}
+	if revoked := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, cargoRevoke, "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); revoked.Code != http.StatusNoContent {
+		t.Fatalf("Cargo credential revocation failed: %d", revoked.Code)
+	}
+	if err := fixture.repositoryService.WithCargoWriteTokenTransaction(ctx, cargoCredential.Bearer, workspace.ID, cargoRepository, func(_ *sql.Tx, _ string) error { return nil }); !errors.Is(err, repositories.ErrCargoWriteTokenUnavailable) {
+		t.Fatalf("revoked Cargo credential remained valid: %v", err)
+	}
+	if err := fixture.repositoryService.RevokeRepositoryRole(ctx, ownerID, workspace.ID, cargoRepository, ownerID, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); denied.Code == http.StatusCreated {
+		t.Fatal("Cargo credential issued after publisher grant revocation")
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, ownerID, workspace.ID, cargoRepository, ownerID, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	cargoStaleMFA := time.Now().UTC().Add(-workspaceCreationMFAMaxAge - time.Minute).Format(time.RFC3339Nano)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_auth_sessions SET mfa_verified_at = ? WHERE user_id = ? AND level = 'mfa' AND revoked_at IS NULL`, cargoStaleMFA, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo credential issuance with stale MFA: %d", denied.Code)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_auth_sessions SET mfa_verified_at = ? WHERE user_id = ? AND level = 'mfa' AND revoked_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), ownerID); err != nil {
+		t.Fatal(err)
+	}
 	withoutTokenCSRF := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, tokenIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, "")
 	if withoutTokenCSRF.Code != http.StatusForbidden {
 		t.Fatalf("token issuance without CSRF = %d", withoutTokenCSRF.Code)

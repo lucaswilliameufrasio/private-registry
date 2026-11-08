@@ -12,9 +12,10 @@ import (
 )
 
 type InvalidatedCredentials struct {
-	Sessions        int64
-	PersonalTokens  int64
-	DownloadTickets int64
+	Sessions         int64
+	PersonalTokens   int64
+	CargoWriteTokens int64
+	DownloadTickets  int64
 }
 
 // InvalidateRestoredCredentials mutates the caller's transaction and must ONLY
@@ -31,7 +32,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 		return InvalidatedCredentials{}, errors.New("isolated credential recovery requires a deadline")
 	}
 	var count, minimum, maximum int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != 19 || minimum != 1 || maximum != 19 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != 20 || minimum != 1 || maximum != 20 {
 		return InvalidatedCredentials{}, errors.New("recovered database schema is not supported for credential invalidation")
 	}
 	bind := func(index int) string {
@@ -55,6 +56,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 	}{
 		{`UPDATE registry_auth_sessions SET revoked_at = ` + bind(1) + ` WHERE revoked_at IS NULL`, []any{now.UTC().Format(time.RFC3339Nano)}, &result.Sessions},
 		{`UPDATE registry_personal_read_tokens SET revoked_at_ms = ` + bind(1) + ` WHERE revoked_at_ms IS NULL`, []any{now.UTC().UnixMilli()}, &result.PersonalTokens},
+		{`UPDATE registry_cargo_write_tokens SET revoked_at_ms = ` + bind(1) + ` WHERE revoked_at_ms IS NULL`, []any{now.UTC().UnixMilli()}, &result.CargoWriteTokens},
 		// Ticket revocations require a human revoked_by value. Delete capability
 		// records in the recovered copy instead of falsely attributing revocation.
 		{`DELETE FROM registry_generic_download_tickets`, nil, &result.DownloadTickets},
@@ -69,7 +71,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 			return InvalidatedCredentials{}, errors.New("recovered credential invalidation could not be counted; rollback required")
 		}
 	}
-	if result.Sessions+result.PersonalTokens+result.DownloadTickets > 0 {
+	if result.Sessions+result.PersonalTokens+result.CargoWriteTokens+result.DownloadTickets > 0 {
 		id, err := uuid.NewV7()
 		if err != nil {
 			return InvalidatedCredentials{}, errors.New("recovery audit identity could not be created; rollback required")

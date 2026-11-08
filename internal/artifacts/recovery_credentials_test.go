@@ -44,6 +44,17 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatalf("publish synthetic artifact: %v", err)
 	}
 	publisherID := fixture.userIDs["publisher"]
+	cargoRepository := uuid.NewString()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'recovery-cargo', 'Recovery Cargo', ?, 'now', 'now', 'cargo')`, cargoRepository, fixture.workspaceID, fixture.userIDs["owner"]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, fixture.userIDs["owner"], fixture.workspaceID, cargoRepository, publisherID, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	cargoToken, err := fixture.repositoryService.IssueCargoWriteToken(ctx, publisherID, fixture.workspaceID, cargoRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 	receivingUpload := startFixtureUpload(t, fixture, publisherID, "recovery-receiving", "v1", "file", payload)
 	uploadingUpload := startFixtureUpload(t, fixture, publisherID, "recovery-uploading", "v1", "file", payload)
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_generic_upload_sessions SET status = 'uploading', upload_claim_id = ? WHERE upload_session_id = ?`, uuid.NewString(), uploadingUpload.ID); err != nil {
@@ -116,7 +127,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
-	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 3 {
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 3 {
 		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
@@ -305,6 +316,13 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if _, err := recoveredRepositories.VerifyPersonalReadToken(ctx, personal.Bearer, fixture.workspaceID, fixture.repositoryID); !errors.Is(err, repositories.ErrPersonalTokenUnavailable) {
 		t.Fatalf("recovered old personal token accepted: %v", err)
 	}
+	applyCargo := func(_ *sql.Tx, _ string) error { return nil }
+	if err := recoveredRepositories.WithCargoWriteTokenTransaction(ctx, cargoToken.Bearer, fixture.workspaceID, cargoRepository, applyCargo); !errors.Is(err, repositories.ErrCargoWriteTokenUnavailable) {
+		t.Fatalf("recovered Cargo credential accepted: %v", err)
+	}
+	if err := fixture.repositoryService.WithCargoWriteTokenTransaction(ctx, cargoToken.Bearer, fixture.workspaceID, cargoRepository, applyCargo); err != nil {
+		t.Fatalf("source Cargo credential changed by isolated recovery: %v", err)
+	}
 	recoveredArtifacts, err := New(recoveredDB, config.SQLite, recoveredRepositories, fixture.storage, Options{MaxUploadBytes: 1024, MaxConcurrentUploads: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +347,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (20, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (21, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
 		_ = futureTx.Rollback()
 		t.Fatal(err)
 	}

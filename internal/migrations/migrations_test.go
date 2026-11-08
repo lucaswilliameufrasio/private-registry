@@ -29,15 +29,15 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 19 {
+	if len(first.AppliedVersions) != 20 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
 	for index, version := range first.AppliedVersions {
 		if version != int64(index+1) {
-			t.Fatalf("migration %d at position %d; want sequential versions 1–19", version, index)
+			t.Fatalf("migration %d at position %d; want sequential versions 1–20", version, index)
 		}
 	}
-	if first.CurrentVersion != 19 || first.TargetVersion != 19 {
+	if first.CurrentVersion != 20 || first.TargetVersion != 20 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -60,14 +60,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 19 {
+	if succeeded != 20 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 19 {
+	if checksumCount != 20 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -258,6 +258,8 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 	delete(old, "sql/postgres/000018_cargo_repository_format.sql")
 	delete(old, "sql/sqlite/000019_cargo_catalog.sql")
 	delete(old, "sql/postgres/000019_cargo_catalog.sql")
+	delete(old, "sql/sqlite/000020_cargo_write_tokens.sql")
+	delete(old, "sql/postgres/000020_cargo_write_tokens.sql")
 	report, err := migrateWithFS(ctx, db, cfg, old)
 	if err != nil || report.CurrentVersion != 16 {
 		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
@@ -281,8 +283,8 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err = Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 19 || len(report.AppliedVersions) != 3 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 {
-		t.Fatalf("upgrade to v19: report=%+v err=%v", report, err)
+	if err != nil || report.CurrentVersion != 20 || len(report.AppliedVersions) != 4 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 {
+		t.Fatalf("upgrade to v20: report=%+v err=%v", report, err)
 	}
 	var format, retained, status, publishedAt string
 	if err := db.QueryRowContext(ctx, `SELECT r.format, v.artifact_version_id, v.status, v.published_at FROM registry_repositories r JOIN registry_generic_artifact_versions v ON v.repository_id = r.repository_id WHERE r.repository_id = ?`, repositoryID).Scan(&format, &retained, &status, &publishedAt); err != nil || format != "generic" || retained != versionID || status != "published" || publishedAt != now {
@@ -328,6 +330,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000017_go_modules.sql",
 		"sql/sqlite/000018_cargo_repository_format.sql",
 		"sql/sqlite/000019_cargo_catalog.sql",
+		"sql/sqlite/000020_cargo_write_tokens.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
@@ -347,6 +350,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/postgres/000017_go_modules.sql",
 		"sql/postgres/000018_cargo_repository_format.sql",
 		"sql/postgres/000019_cargo_catalog.sql",
+		"sql/postgres/000020_cargo_write_tokens.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {
