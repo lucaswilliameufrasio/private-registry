@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/npm"
 	"private-registry/internal/repositories"
@@ -453,6 +454,44 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	firstPublication, secondPublication := <-publicationResults, <-publicationResults
 	if firstPublication.err != nil || secondPublication.err != nil || firstPublication.id == "" || firstPublication.id != secondPublication.id {
 		t.Fatalf("concurrent npm publication retry failed: %v %v", firstPublication.err, secondPublication.err)
+	}
+	snapshot, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := backup.InventoryNPM(ctx, snapshot, 100, 100)
+	if err != nil || len(inventory) != 1 || inventory[0].Key.WorkspaceID != workspace || inventory[0].Key.SHA256 != request.TarballSHA256 || inventory[0].Size != request.TarballSize {
+		_ = snapshot.Rollback()
+		t.Fatalf("npm inventory did not deduplicate verified references: %+v err=%v", inventory, err)
+	}
+	if _, err := backup.InventoryNPM(ctx, snapshot, 100, 1); err == nil {
+		_ = snapshot.Rollback()
+		t.Fatal("npm inventory exceeded reference limit")
+	}
+	if err := snapshot.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	conflictTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictPackage := uuid.NewString()
+	query = `INSERT INTO registry_npm_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, 'inventory-conflict', ` + p(4) + `, 'now')`
+	if _, err := conflictTx.ExecContext(ctx, query, conflictPackage, workspace, publicationRepo, publisher); err != nil {
+		_ = conflictTx.Rollback()
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_npm_versions (npm_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, integrity, created_by, created_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, ` + p(4) + `, '1.0.0', '1.0.0', '{}', ` + p(5) + `, ` + p(6) + `, ` + p(7) + `, ` + p(8) + `, 'now')`
+	if _, err := conflictTx.ExecContext(ctx, query, uuid.NewString(), workspace, publicationRepo, conflictPackage, request.TarballSHA256, request.TarballSize+1, publication.Integrity, publisher); err != nil {
+		_ = conflictTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := backup.InventoryNPM(ctx, conflictTx, 100, 100); err == nil {
+		_ = conflictTx.Rollback()
+		t.Fatal("npm inventory accepted conflicting sizes for same object")
+	}
+	if err := conflictTx.Rollback(); err != nil {
+		t.Fatal(err)
 	}
 	retryReservation, err := reservations.Reserve(ctx, publicationToken.Bearer, workspace, publicationRepo, request)
 	if err != nil || retryReservation.ID != publicationReservation.ID {
