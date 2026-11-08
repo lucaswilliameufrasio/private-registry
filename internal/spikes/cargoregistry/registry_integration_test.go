@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"private-registry/internal/cargo"
 )
 
 const (
@@ -34,6 +37,7 @@ const (
 	rustToolchain     = "1.99.0-x86_64-unknown-linux-gnu"
 	leafCrateName     = "registry_fixture_leaf"
 	parentCrateName   = "registry_fixture_parent"
+	helperCrateName   = "registry_fixture_helper"
 	crateVersion      = "1.0.0"
 	maxUploadBytes    = 8 << 20
 )
@@ -100,6 +104,7 @@ type registryFixture struct {
 	configRequests     int
 	unauthorizedPaths  []string
 	unexpectedRequests []string
+	requireReview      bool
 }
 
 func TestCargoPublishesBuildsAndYanksAuthenticatedPrivateCrates(t *testing.T) {
@@ -118,7 +123,9 @@ func TestCargoPublishesBuildsAndYanksAuthenticatedPrivateCrates(t *testing.T) {
 	writeCargoHome(t, cargoHome, registry.URL)
 	environment := cargoEnvironment(t, root, cargoHome, registry.Token)
 
-	leafProject := writeCargoPackage(t, root, leafCrateName, crateVersion, `[lib]
+	leafProject := writeCargoPackage(t, root, leafCrateName, crateVersion, `rust-version = "1.80"
+
+[lib]
 path = "src/lib.rs"
 
 [features]
@@ -130,19 +137,27 @@ pub fn value() -> &'static str { "leaf-fast-value" }
 #[cfg(not(feature = "leaf-fast"))]
 pub fn value() -> &'static str { "leaf-basic-value" }
 `)
+	helperProject := writeCargoPackage(t, root, helperCrateName, crateVersion, "links = \"fixture_helper\"\n", "pub fn helper() {}\n")
+	if err := os.WriteFile(filepath.Join(helperProject, "build.rs"), []byte("fn main() {}\n"), 0o600); err != nil {
+		t.Fatal("write synthetic build script:", err)
+	}
 	parentProject := writeCargoPackage(t, root, parentCrateName, crateVersion, `[dependencies]
-registry_fixture_leaf = { version = "1.0.0", registry = "private" }
+leaf_alias = { package = "registry_fixture_leaf", version = "1.0.0", registry = "private", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+registry_fixture_helper = { version = "1.0.0", registry = "private" }
 
 [features]
 default = ["fast"]
-fast = []
+fast = ["dep:leaf_alias", "leaf_alias?/leaf-fast"]
 `, `#[cfg(feature = "fast")]
-pub fn value() -> &'static str { registry_fixture_leaf::value() }
+pub fn value() -> &'static str { leaf_alias::value() }
 
 #[cfg(not(feature = "fast"))]
 pub fn value() -> &'static str { "parent-basic-value" }
 `)
 	runCargo(t, root, environment, "publish", "--allow-dirty", "--registry", cargoRegistryName, "--manifest-path", filepath.Join(leafProject, "Cargo.toml"))
+	runCargo(t, root, environment, "publish", "--allow-dirty", "--registry", cargoRegistryName, "--manifest-path", filepath.Join(helperProject, "Cargo.toml"))
 	runCargo(t, root, environment, "publish", "--allow-dirty", "--registry", cargoRegistryName, "--manifest-path", filepath.Join(parentProject, "Cargo.toml"))
 
 	consumer := writeCargoConsumer(t, root, "consumer-locked", `registry_fixture_parent = { version = "=1.0.0", registry = "private", features = ["fast"] }
@@ -165,6 +180,17 @@ pub fn value() -> &'static str { "parent-basic-value" }
 	freshHome := filepath.Join(root, "cargo-home-after-yank")
 	writeCargoHome(t, freshHome, registry.URL)
 	freshEnvironment := cargoEnvironment(t, root, freshHome, registry.Token)
+	lockedCopy := writeCargoConsumer(t, filepath.Join(root, "fresh-locked"), "consumer-locked", `registry_fixture_parent = { version = "=1.0.0", registry = "private", features = ["fast"] }
+`, `fn main() { println!("{}", registry_fixture_parent::value()); }
+`)
+	lockfile, err := os.ReadFile(filepath.Join(consumer, "Cargo.lock"))
+	if err != nil {
+		t.Fatal("read synthetic lockfile:", err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedCopy, "Cargo.lock"), lockfile, 0o600); err != nil {
+		t.Fatal("write synthetic lockfile:", err)
+	}
+	runCargo(t, root, freshEnvironment, "build", "--locked", "--manifest-path", filepath.Join(lockedCopy, "Cargo.toml"))
 	freshConsumer := writeCargoConsumer(t, root, "consumer-fresh", `registry_fixture_parent = { version = "=1.0.0", registry = "private", features = ["fast"] }
 `, `fn main() { println!("{}", registry_fixture_parent::value()); }
 `)
@@ -192,8 +218,8 @@ pub fn value() -> &'static str { "parent-basic-value" }
 
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if registry.publishRequests != 2 {
-		t.Errorf("Cargo publish requests = %d, want 2", registry.publishRequests)
+	if registry.publishRequests != 3 {
+		t.Errorf("Cargo publish requests = %d, want 3", registry.publishRequests)
 	}
 	if registry.yankRequests != 1 {
 		t.Errorf("Cargo yank requests = %d, want 1", registry.yankRequests)
@@ -206,6 +232,190 @@ pub fn value() -> &'static str { "parent-basic-value" }
 	}
 	if len(registry.unexpectedRequests) != 0 {
 		t.Errorf("Cargo requested unsupported local registry routes: %v", registry.unexpectedRequests)
+	}
+}
+
+func TestCargoRejectsTamperedCrate(t *testing.T) {
+	root := t.TempDir()
+	registry := startRegistryFixture(t)
+	cargoHome := filepath.Join(root, "cargo-home")
+	writeCargoHome(t, cargoHome, registry.URL)
+	environment := cargoEnvironment(t, root, cargoHome, registry.Token)
+	project := writeCargoPackage(t, root, "checksum_fixture", crateVersion, "", "pub fn value() {}\n")
+	runCargo(t, root, environment, "publish", "--allow-dirty", "--registry", cargoRegistryName, "--manifest-path", filepath.Join(project, "Cargo.toml"))
+	registry.mu.Lock()
+	published := registry.crates["checksum_fixture@"+crateVersion]
+	if published == nil || len(published.archive) == 0 {
+		registry.mu.Unlock()
+		t.Fatal("synthetic crate was not published")
+	}
+	published.archive[len(published.archive)/2] ^= 1
+	registry.mu.Unlock()
+	freshHome := filepath.Join(root, "fresh-home")
+	writeCargoHome(t, freshHome, registry.URL)
+	freshEnvironment := cargoEnvironment(t, root, freshHome, registry.Token)
+	consumer := writeCargoConsumer(t, root, "checksum-consumer", `checksum_fixture = { version = "=1.0.0", registry = "private" }`, "fn main() {}\n")
+	output, err := runCargoExpectedFailure(t, root, freshEnvironment, "check", "--manifest-path", filepath.Join(consumer, "Cargo.toml"))
+	if err == nil || !strings.Contains(strings.ToLower(output), "checksum") {
+		t.Fatalf("Cargo did not reject the tampered crate due to its checksum: err=%v output=%s", err, output)
+	}
+}
+
+func TestCargoDoesNotReportPendingReviewAsPublished(t *testing.T) {
+	root := t.TempDir()
+	registry := startRegistryFixture(t)
+	registry.mu.Lock()
+	registry.requireReview = true
+	registry.mu.Unlock()
+	cargoHome := filepath.Join(root, "cargo-home")
+	writeCargoHome(t, cargoHome, registry.URL)
+	environment := cargoEnvironment(t, root, cargoHome, registry.Token)
+	project := writeCargoPackage(t, root, "review_fixture", crateVersion, "", "pub fn value() {}\n")
+	output, err := runCargoExpectedFailure(t, root, environment, "publish", "--allow-dirty", "--registry", cargoRegistryName, "--manifest-path", filepath.Join(project, "Cargo.toml"))
+	if err == nil || !strings.Contains(output, "human review") {
+		t.Fatalf("Cargo reported success or an unrelated failure while review was required: err=%v output=%s", err, output)
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.crates) != 0 || registry.publishRequests != 0 {
+		t.Fatal("review-gated synthetic crate appeared as published")
+	}
+}
+
+func TestFixtureCargoBuildMetadataIdentityRace(t *testing.T) {
+	fixture := startRegistryFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	type result struct {
+		status int
+		err    error
+	}
+	results := make(chan result, 2)
+	for _, version := range []string{"1.0.0+first", "1.0.0+second"} {
+		var archive bytes.Buffer
+		gz := gzip.NewWriter(&archive)
+		tw := tar.NewWriter(gz)
+		manifest := "[package]\nname = \"identity_fixture\"\nversion = \"" + version + "\"\n"
+		if err := tw.WriteHeader(&tar.Header{Name: "identity_fixture-" + version + "/Cargo.toml", Mode: 0o600, Size: int64(len(manifest))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(tw, manifest); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		metadata, err := json.Marshal(map[string]any{"name": "identity_fixture", "vers": version, "deps": []any{}, "features": map[string]any{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body bytes.Buffer
+		for _, part := range [][]byte{metadata, archive.Bytes()} {
+			if err := binary.Write(&body, binary.LittleEndian, uint32(len(part))); err != nil {
+				t.Fatal(err)
+			}
+			body.Write(part)
+		}
+		go func(payload []byte) {
+			request, err := http.NewRequestWithContext(ctx, http.MethodPut, fixture.URL+"/api/v1/crates/new", bytes.NewReader(payload))
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			request.Header.Set("Authorization", fixture.Token)
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			_, readErr := io.Copy(io.Discard, response.Body)
+			closeErr := response.Body.Close()
+			results <- result{status: response.StatusCode, err: errors.Join(readErr, closeErr)}
+		}(bytes.Clone(body.Bytes()))
+	}
+	var accepted, conflict int
+	for range 2 {
+		item := <-results
+		if item.err != nil {
+			t.Fatal(item.err)
+		}
+		switch item.status {
+		case http.StatusOK:
+			accepted++
+		case http.StatusConflict:
+			conflict++
+		default:
+			t.Fatalf("unexpected publish status %d", item.status)
+		}
+	}
+	if accepted != 1 || conflict != 1 {
+		t.Fatalf("build-metadata identity race accepted=%d conflict=%d", accepted, conflict)
+	}
+}
+
+func TestCargoPackagesUnicodeNameLocally(t *testing.T) {
+	root := t.TempDir()
+	cargoHome := filepath.Join(root, "cargo-home")
+	if err := os.Mkdir(cargoHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	environment := cargoEnvironment(t, root, cargoHome, "synthetic-unused-token")
+	project := writeCargoPackage(t, root, "café_fixture", crateVersion, "[lib]\nname = \"cafe_fixture\"\n", "pub fn value() {}\n")
+	output, err := runCargoExpectedFailure(t, root, environment, "package", "--offline", "--allow-dirty", "--no-verify", "--manifest-path", filepath.Join(project, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("Cargo could not package Unicode name: %v\n%s", err, output)
+	}
+}
+
+func TestCargoUnicodeSparseRequestCharacterization(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	var base string
+	fixture := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/index/config.json" {
+			_, _ = fmt.Fprintf(w, `{"dl":%q}`, base+"/download")
+			return
+		}
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	fixture.Start()
+	defer fixture.Close()
+	base = fixture.URL
+	root := t.TempDir()
+	cargoHome := filepath.Join(root, "cargo-home")
+	writeCargoHome(t, cargoHome, base)
+	environment := cargoEnvironment(t, root, cargoHome, "synthetic-unused-token")
+	project := writeCargoConsumer(t, root, "unicode-consumer", `cafe_fixture = { package = "café_fixture", version = "=1.0.0", registry = "private" }`, "fn main() {}\n")
+	output, err := runCargoExpectedFailure(t, root, environment, "fetch", "--manifest-path", filepath.Join(project, "Cargo.toml"))
+	if err == nil {
+		t.Fatal("Cargo unexpectedly fetched missing Unicode package")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 0 || !strings.Contains(output, "not a char boundary") {
+		t.Fatalf("Cargo Unicode index characterization changed: paths=%v output=%s", paths, output)
+	}
+}
+
+func TestCargoUnicodeSparsePublishAndConsume(t *testing.T) {
+	root := t.TempDir()
+	fixture := startRegistryFixture(t)
+	cargoHome := filepath.Join(root, "cargo-home")
+	writeCargoHome(t, cargoHome, fixture.URL)
+	environment := cargoEnvironment(t, root, cargoHome, fixture.Token)
+	name := "testé_fixture"
+	project := writeCargoPackage(t, root, name, crateVersion, "[lib]\nname = \"unicode_fixture\"\n", "pub fn value() -> &'static str { \"unicode-ok\" }\n")
+	runCargo(t, root, environment, "publish", "--allow-dirty", "--registry", cargoRegistryName, "--manifest-path", filepath.Join(project, "Cargo.toml"))
+	consumer := writeCargoConsumer(t, root, "unicode-consumer", `unicode_fixture = { package = "testé_fixture", version = "=1.0.0", registry = "private" }`, "fn main() { println!(\"{}\", unicode_fixture::value()); }\n")
+	output := runCargo(t, root, environment, "run", "--manifest-path", filepath.Join(consumer, "Cargo.toml"))
+	if !strings.Contains(output, "unicode-ok") {
+		t.Fatalf("Cargo did not consume Unicode crate: %s", output)
 	}
 }
 
@@ -278,6 +488,12 @@ func (registry *registryFixture) authorized(writer http.ResponseWriter, request 
 
 func (registry *registryFixture) serveIndex(writer http.ResponseWriter, request *http.Request) {
 	name := path.Base(strings.TrimPrefix(request.URL.Path, "/index/"))
+	indexPath, err := cargo.SparseIndexPath(name)
+	if err != nil || request.URL.Path != "/index/"+indexPath {
+		registry.recordUnexpected(request)
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
 	registry.mu.Lock()
 	registry.indexRequests++
 	lines := make([]cargoIndexEntry, 0)
@@ -318,11 +534,16 @@ func (registry *registryFixture) serveDownload(writer http.ResponseWriter, reque
 		return
 	}
 	name, version := parts[1], parts[2]
+	identity, err := cargo.VersionIdentity(version)
+	if err != nil {
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
 	registry.mu.Lock()
 	registry.downloadRequests++
-	published := registry.crates[name+"@"+version]
+	published := registry.crates[name+"@"+identity]
 	var archive []byte
-	if published != nil {
+	if published != nil && published.entry.Version == version {
 		archive = append([]byte(nil), published.archive...)
 	}
 	registry.mu.Unlock()
@@ -347,9 +568,29 @@ func (registry *registryFixture) servePublish(writer http.ResponseWriter, reques
 		registry.writeAPIError(writer, http.StatusBadRequest, "invalid Cargo publish payload")
 		return
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+	defer cancel()
+	var staged bytes.Buffer
+	framed, err := cargo.ReadPublishFrame(ctx, bytes.NewReader(body), &staged, 1<<20, maxUploadBytes)
+	archiveHash := sha256.Sum256(archive)
+	if err != nil || cargo.CheckMetadataJSON(framed.Metadata) != nil || !bytes.Equal(staged.Bytes(), archive) || framed.Size != int64(len(archive)) || framed.SHA256 != hex.EncodeToString(archiveHash[:]) {
+		registry.writeAPIError(writer, http.StatusBadRequest, "Cargo publish framing mismatch")
+		return
+	}
 	entry, err := makeIndexEntry(metadata, archive)
 	if err != nil {
 		registry.writeAPIError(writer, http.StatusBadRequest, "invalid Cargo publish metadata")
+		return
+	}
+	projection, err := cargo.ValidateStagedPublication(ctx, framed, bytes.NewReader(staged.Bytes()), cargo.ArchiveLimits{MaxCompressedBytes: maxUploadBytes, MaxUncompressedBytes: 16 << 20, MaxFiles: 1000, MaxManifestBytes: 1 << 20}, "sparse+"+registry.URL+"/index/", "https://github.com/rust-lang/crates.io-index")
+	if err != nil {
+		registry.writeAPIError(writer, http.StatusBadRequest, "Cargo staged publication rejected")
+		return
+	}
+	projectedJSON, err := json.Marshal(projection)
+	entry = cargoIndexEntry{}
+	if err != nil || json.Unmarshal(projectedJSON, &entry) != nil {
+		registry.writeAPIError(writer, http.StatusBadRequest, "Cargo index projection invalid")
 		return
 	}
 	if err := validateCrateArchive(metadata.Name, metadata.Version, archive); err != nil {
@@ -358,7 +599,16 @@ func (registry *registryFixture) servePublish(writer http.ResponseWriter, reques
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	key := metadata.Name + "@" + metadata.Version
+	if registry.requireReview {
+		registry.writeAPIError(writer, http.StatusConflict, "human review required; use the registry publication workflow")
+		return
+	}
+	identity, err := cargo.VersionIdentity(metadata.Version)
+	if err != nil {
+		registry.writeAPIError(writer, http.StatusBadRequest, "crate version invalid")
+		return
+	}
+	key := metadata.Name + "@" + identity
 	if _, exists := registry.crates[key]; exists {
 		registry.writeAPIError(writer, http.StatusConflict, "crate version already published")
 		return
@@ -387,11 +637,18 @@ func (registry *registryFixture) serveYank(writer http.ResponseWriter, request *
 		return
 	}
 	name, version := parts[3], parts[4]
+	identity, err := cargo.VersionIdentity(version)
+	if err != nil {
+		registry.writeAPIError(writer, http.StatusNotFound, "crate version not found")
+		return
+	}
 	registry.mu.Lock()
-	published := registry.crates[name+"@"+version]
-	if published != nil {
+	published := registry.crates[name+"@"+identity]
+	if published != nil && published.entry.Version == version {
 		published.entry.Yanked = true
 		registry.yankRequests++
+	} else {
+		published = nil
 	}
 	registry.mu.Unlock()
 	if published == nil {
