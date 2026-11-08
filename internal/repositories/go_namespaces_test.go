@@ -35,6 +35,9 @@ func exerciseGoNamespacePolicy(t *testing.T, ctx context.Context, db *sql.DB, dr
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := service.CreateWithFormat(ctx, owner, workspace.ID, "cargo-disabled", "Cargo disabled", Format("cargo")); !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("unsupported Cargo format became available before its adapter: %v", err)
+	}
 	for _, user := range []string{reader, member} {
 		if err := workspaceService.SetMembershipRole(ctx, owner, workspace.ID, user, workspaces.RoleMember); err != nil {
 			t.Fatal(err)

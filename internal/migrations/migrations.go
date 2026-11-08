@@ -118,9 +118,15 @@ func migrateWithFS(
 		if err != nil {
 			return Report{}, errors.New("database migration attempt could not be recorded")
 		}
-		if _, err := provider.UpByOne(ctx); err != nil {
+		var migrationErr error
+		if driver == config.SQLite && version == 18 {
+			migrationErr = runSQLiteRepositoryRebuild(ctx, cfg, engineFS)
+		} else {
+			_, migrationErr = provider.UpByOne(ctx)
+		}
+		if migrationErr != nil {
 			markErr := finishAttempt(ctx, db, driver, attemptID, "failed", "migration_failed")
-			return Report{}, errors.Join(fmt.Errorf("database migration %d failed", version), err, markErr)
+			return Report{}, errors.Join(fmt.Errorf("database migration %d failed", version), migrationErr, markErr)
 		}
 		if err := finishAttempt(ctx, db, driver, attemptID, "succeeded", ""); err != nil {
 			return Report{}, fmt.Errorf("database migration %d succeeded but its attempt history could not be finalized", version)
