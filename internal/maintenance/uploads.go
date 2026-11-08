@@ -12,6 +12,7 @@ import (
 	"private-registry/internal/cargo"
 	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
+	"private-registry/internal/npm"
 )
 
 const (
@@ -21,6 +22,8 @@ const (
 	goExpirationKind    = "expire-go-uploads"
 	cargoExpirationKey  = "maintenance:expire-cargo-reservations:v1"
 	cargoExpirationKind = "expire-cargo-reservations"
+	npmExpirationKey    = "maintenance:expire-npm-reservations:v1"
+	npmExpirationKind   = "expire-npm-reservations"
 	batchSize           = 128
 	runInterval         = time.Minute
 	operationLimit      = 10 * time.Second
@@ -40,6 +43,15 @@ func NewCargoReservationExpiration(queue *jobs.Queue, service *cargo.Reservation
 		return nil, errors.New("Cargo reservation expiration dependencies are required")
 	}
 	return &UploadExpiration{queue: queue, artifacts: service, clock: time.Now, key: cargoExpirationKey, kind: cargoExpirationKind}, nil
+}
+
+// NewNPMReservationExpiration prepares a durable bounded worker. It is not
+// started automatically while npm publication is unavailable.
+func NewNPMReservationExpiration(queue *jobs.Queue, service *npm.ReservationService) (*UploadExpiration, error) {
+	if queue == nil || service == nil {
+		return nil, errors.New("npm reservation expiration dependencies are required")
+	}
+	return &UploadExpiration{queue: queue, artifacts: service, clock: time.Now, key: npmExpirationKey, kind: npmExpirationKind}, nil
 }
 
 type uploadExpirer interface {

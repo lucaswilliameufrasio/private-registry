@@ -62,6 +62,15 @@ func InvalidateRestoredUploads(ctx context.Context, tx *sql.Tx, driver config.Da
 		return 0, errors.New("recovered Cargo reservations could not be counted; rollback required")
 	}
 	count += cargoCount
+	npmUpdated, err := tx.ExecContext(ctx, `UPDATE registry_npm_reservations SET recovery_invalidated = 1, status = 'expired' WHERE status = 'reserved' AND recovery_invalidated = 0`)
+	if err != nil {
+		return 0, errors.New("recovered npm reservations could not be invalidated; rollback required")
+	}
+	npmCount, err := npmUpdated.RowsAffected()
+	if err != nil || npmCount < 0 || npmCount > int64(^uint64(0)>>1)-count {
+		return 0, errors.New("recovered npm reservations could not be counted; rollback required")
+	}
+	count += npmCount
 	if count > 0 {
 		id, err := uuid.NewV7()
 		if err != nil {

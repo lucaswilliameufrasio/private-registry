@@ -21,6 +21,7 @@ import (
 	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 	"private-registry/internal/migrations"
+	"private-registry/internal/npm"
 	"private-registry/internal/repositories"
 	"private-registry/internal/storage"
 )
@@ -198,6 +199,53 @@ func exerciseUploadExpiration(t *testing.T, db *sql.DB, driver config.DatabaseDr
 	var cargoJobs, cargoAttempts int
 	if err := db.QueryRowContext(ctx, bind(`SELECT count(*), max(attempts) FROM registry_jobs WHERE idempotency_key = ?`), cargoExpirationKey).Scan(&cargoJobs, &cargoAttempts); err != nil || cargoJobs != 1 || cargoAttempts != 0 {
 		t.Fatalf("Cargo recurring job count=%d attempts=%d err=%v", cargoJobs, cargoAttempts, err)
+	}
+	npmRepository, npmGrant, npmToken := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'npm-maintenance', 'npm', ?, ?, ?, 'npm')`), npmRepository, workspaceID, userID, timestamp, timestamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_repository_grants (grant_id, repository_id, workspace_id, user_id, role, granted_by, granted_at) VALUES (?, ?, ?, ?, 'publisher', ?, ?)`), npmGrant, npmRepository, workspaceID, userID, userID, timestamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_npm_write_tokens (token_id, user_id, workspace_id, repository_id, publisher_grant_id, secret_sha256, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`), npmToken, userID, workspaceID, npmRepository, npmGrant, strings.Repeat("a", 64), now.Add(-2*time.Hour).UnixMilli(), now.Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	npmIDs := []string{uuid.NewString(), uuid.NewString()}
+	for index, expires := range []time.Time{now.Add(-time.Minute), now.Add(time.Hour)} {
+		query := `INSERT INTO registry_npm_reservations (reservation_id, workspace_id, repository_id, name, version, version_identity, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, status, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, '1.0.0', '1.0.0', ?, 1, ?, ?, ?, 'reserved', ?, ?)`
+		if _, err := db.ExecContext(ctx, bind(query), npmIDs[index], workspaceID, npmRepository, fmt.Sprintf("fixture%d", index), strings.Repeat("b", 64), strings.Repeat("c", 64), npmToken, userID, now.Add(-2*time.Hour).UnixMilli(), expires.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	npmService, err := npm.NewReservationService(db, repositoryService, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmWorker, err := NewNPMReservationExpiration(queue, npmService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmWorker.clock = func() time.Time { return now }
+	if err := npmWorker.RunOnce(ctx); err != nil {
+		t.Fatal("npm maintenance run:", err)
+	}
+	for index, expected := range []string{"expired", "reserved"} {
+		var status string
+		if err := db.QueryRowContext(ctx, bind(`SELECT status FROM registry_npm_reservations WHERE reservation_id = ?`), npmIDs[index]).Scan(&status); err != nil || status != expected {
+			t.Fatalf("npm reservation %d status=%q err=%v", index, status, err)
+		}
+	}
+	npmRestarted, err := NewNPMReservationExpiration(queue, npmService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmRestarted.clock = func() time.Time { return now.Add(runInterval) }
+	if err := npmRestarted.RunOnce(ctx); err != nil {
+		t.Fatal("restart npm maintenance:", err)
+	}
+	var npmJobs, npmAttempts int
+	if err := db.QueryRowContext(ctx, bind(`SELECT count(*), max(attempts) FROM registry_jobs WHERE idempotency_key = ?`), npmExpirationKey).Scan(&npmJobs, &npmAttempts); err != nil || npmJobs != 1 || npmAttempts != 0 {
+		t.Fatalf("npm recurring job count=%d attempts=%d err=%v", npmJobs, npmAttempts, err)
 	}
 	worker, err := NewUploadExpiration(queue, service)
 	if err != nil {

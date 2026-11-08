@@ -44,6 +44,8 @@ func exerciseNPMFormatUpgrade(t *testing.T, ctx context.Context, db *sql.DB, cfg
 	delete(old, "sql/postgres/000026_npm_catalog.sql")
 	delete(old, "sql/sqlite/000027_npm_write_tokens.sql")
 	delete(old, "sql/postgres/000027_npm_write_tokens.sql")
+	delete(old, "sql/sqlite/000028_npm_reservations.sql")
+	delete(old, "sql/postgres/000028_npm_reservations.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 24 {
 		t.Fatalf("prepare v24 fixture: %+v err=%v", report, err)
 	}
@@ -118,8 +120,8 @@ func exerciseNPMFormatUpgrade(t *testing.T, ctx context.Context, db *sql.DB, cfg
 		}
 	} else {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 27 || len(report.AppliedVersions) != 3 || report.AppliedVersions[0] != 25 || report.AppliedVersions[1] != 26 || report.AppliedVersions[2] != 27 {
-			t.Fatalf("v25–v27 upgrade: %+v err=%v", report, err)
+		if err != nil || report.CurrentVersion != 28 || len(report.AppliedVersions) != 4 || report.AppliedVersions[0] != 25 || report.AppliedVersions[1] != 26 || report.AppliedVersions[2] != 27 || report.AppliedVersions[3] != 28 {
+			t.Fatalf("v25–v28 upgrade: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 			t.Fatal(err)

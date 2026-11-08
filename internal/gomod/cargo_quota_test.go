@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"private-registry/internal/cargo"
 	"private-registry/internal/config"
+	"private-registry/internal/npm"
 	"private-registry/internal/repositories"
 	"private-registry/internal/storage"
 )
@@ -132,5 +133,33 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 	}
 	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 3); err != nil {
 		t.Fatalf("remaining Go quota rejected: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, user, workspace, npmRepo, user, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	npmToken, err := repos.IssueNPMWriteToken(ctx, user, workspace, npmRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmService, err := npm.NewReservationService(db, repos, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := npmService.Reserve(ctx, npmToken.Bearer, workspace, npmRepo, npm.ReservationRequest{Name: "reserved", Version: "1.0.0", TarballSHA256: strings.Repeat("c", 64), TarballSize: 2, MetadataSHA256: strings.Repeat("d", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 2); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("npm reservation did not count towards Go quota: %v", err)
+	}
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); err != nil {
+		t.Fatalf("remaining Go quota rejected after npm reservation: %v", err)
 	}
 }

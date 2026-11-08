@@ -22,6 +22,7 @@ import (
 	"private-registry/internal/database"
 	"private-registry/internal/jobs"
 	"private-registry/internal/migrations"
+	"private-registry/internal/npm"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
 	"private-registry/internal/spikes/sqlitebackup"
@@ -65,6 +66,14 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	npmToken, err := fixture.repositoryService.IssueNPMWriteToken(ctx, publisherID, fixture.workspaceID, npmRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmReservations, err := npm.NewReservationService(fixture.db, fixture.repositoryService, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmReservation, err := npmReservations.Reserve(ctx, npmToken.Bearer, fixture.workspaceID, npmRepository, npm.ReservationRequest{Name: "fixture", Version: "1.0.0", TarballSHA256: strings.Repeat("b", 64), TarballSize: 7, MetadataSHA256: strings.Repeat("c", 64)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +157,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
-	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.NPMWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 4 {
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.NPMWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 5 {
 		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
@@ -358,6 +367,14 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err := fixture.repositoryService.WithNPMWriteTokenTransaction(ctx, npmToken.Bearer, fixture.workspaceID, npmRepository, applyCargo); err != nil {
 		t.Fatalf("source npm credential changed by isolated recovery: %v", err)
 	}
+	var npmStatus string
+	var npmInvalidated int
+	if err := preparedDB.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_npm_reservations WHERE reservation_id = ?`, npmReservation.ID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "expired" || npmInvalidated != 1 {
+		t.Fatalf("recovered npm reservation was not invalidated: status=%q invalidated=%d err=%v", npmStatus, npmInvalidated, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_npm_reservations WHERE reservation_id = ?`, npmReservation.ID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "reserved" || npmInvalidated != 0 {
+		t.Fatalf("source npm reservation changed: status=%q invalidated=%d err=%v", npmStatus, npmInvalidated, err)
+	}
 	recoveredArtifacts, err := New(recoveredDB, config.SQLite, recoveredRepositories, fixture.storage, Options{MaxUploadBytes: 1024, MaxConcurrentUploads: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +399,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (28, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (29, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
 		_ = futureTx.Rollback()
 		t.Fatal(err)
 	}
