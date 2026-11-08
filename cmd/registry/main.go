@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 	"private-registry/internal/maintenance"
 	"private-registry/internal/migrations"
@@ -132,6 +134,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	goStaging := filepath.Join(cfg.DataDir, "go-staging")
+	if err := os.MkdirAll(goStaging, 0o700); err != nil {
+		return errors.New("Go module staging directory could not be created")
+	}
+	goModules, err := gomod.NewService(db, cfg.DatabaseDriver, repositoryService, objectStore, gomod.Options{StagingDirectory: goStaging, MaxZipBytes: 500 << 20, MaxFiles: 10000, MaxConcurrent: 4})
+	if err != nil {
+		return err
+	}
 	artifactService, err := artifacts.New(db, cfg.DatabaseDriver, repositoryService, objectStore, artifacts.Options{
 		MaxUploadBytes:       cfg.MaxUploadBytes,
 		MaxConcurrentUploads: cfg.MaxConcurrentUploads,
@@ -147,12 +157,17 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	goExpirationWorker, err := maintenance.NewGoUploadExpiration(jobQueue, goModules)
+	if err != nil {
+		return err
+	}
 	health := server.NewHealth(db)
 	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, server.AuthHTTPConfig{
 		CanonicalOrigin:        cfg.CanonicalOrigin,
 		AssetOrigin:            cfg.AssetOrigin,
 		PublicAssetCORSOrigins: cfg.PublicAssetCORSOrigins,
 		TrustedProxies:         cfg.TrustedProxies,
+		GoModules:              goModules,
 	})
 	if err != nil {
 		return err
@@ -164,9 +179,17 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	}
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
+	var workers sync.WaitGroup
+	for _, worker := range []*maintenance.UploadExpiration{expirationWorker, goExpirationWorker} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			worker.Run(workerCtx, logger)
+		}()
+	}
 	go func() {
 		defer close(workerDone)
-		expirationWorker.Run(workerCtx, logger)
+		workers.Wait()
 	}()
 	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver)
 	serveErr := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout)

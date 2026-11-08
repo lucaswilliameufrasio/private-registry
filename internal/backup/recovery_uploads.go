@@ -44,6 +44,15 @@ func InvalidateRestoredUploads(ctx context.Context, tx *sql.Tx, driver config.Da
 	if err != nil {
 		return 0, errors.New("recovered uploads could not be counted; rollback required")
 	}
+	goUpdated, err := tx.ExecContext(ctx, `UPDATE registry_go_upload_sessions SET recovery_invalidated = 1, status = CASE WHEN status IN ('receiving', 'uploading') THEN 'expired' ELSE status END, upload_claim_id = NULL WHERE status IN ('receiving', 'uploading', 'uploaded') AND recovery_invalidated = 0`)
+	if err != nil {
+		return 0, errors.New("recovered Go uploads could not be invalidated; rollback required")
+	}
+	goCount, err := goUpdated.RowsAffected()
+	if err != nil || goCount < 0 || count < 0 || goCount > int64(^uint64(0)>>1)-count {
+		return 0, errors.New("recovered Go uploads could not be counted; rollback required")
+	}
+	count += goCount
 	if count > 0 {
 		id, err := uuid.NewV7()
 		if err != nil {

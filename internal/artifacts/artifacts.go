@@ -208,6 +208,9 @@ func (s *Service) StartUpload(
 	err = s.repositories.WithRepositoryGrantTransaction(
 		ctx, actorID, workspaceID, repositoryID, repositories.GrantPublisher,
 		func(tx *sql.Tx) error {
+			if err := repositories.RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, repositories.FormatGeneric); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 			versionID, err := s.findOrCreateVersion(ctx, tx, actorID, workspaceID, repositoryID, request, now)
 			if err != nil {
@@ -509,6 +512,9 @@ func (s *Service) Publish(
 			}
 			if artifact.Status != "receiving" {
 				return ErrVersionConflict
+			}
+			if err := repositories.RequireNoReview(ctx, tx, s.driver, workspaceID, repositoryID); err != nil {
+				return err
 			}
 			var invalidatedUpload bool
 			query = `SELECT EXISTS (SELECT 1 FROM registry_generic_upload_sessions WHERE artifact_version_id = ` + bind(s.driver, 1) + ` AND recovery_invalidated = 1)`

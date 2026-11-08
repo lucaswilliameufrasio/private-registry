@@ -1,0 +1,104 @@
+package backup
+
+import (
+	"context"
+	"errors"
+	"io"
+	"path/filepath"
+
+	"filippo.io/age"
+	"private-registry/internal/config"
+	"private-registry/internal/database"
+	"private-registry/internal/storage"
+)
+
+// PrepareEncryptedSQLiteGoRecovery prepares an isolated SQLite catalog plus
+// its generic and Go objects from separately signed sets. It never removes the
+// incomplete marker or promotes the installation. The caller supplies trust,
+// bounded private staging, hard resource limits and isolated source access.
+// Configuration, internal keys and all other formats remain outside this flow.
+func PrepareEncryptedSQLiteGoRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, parent, name string, genericSources, goSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (result PreparedSQLiteRecovery, retErr error) {
+	if ctx == nil || ciphertext == nil || identity == nil || newStage == nil {
+		return result, errors.New("encrypted SQLite Go recovery parameters are invalid")
+	}
+	if genericTrust.InstallationID != goTrust.InstallationID || genericTrust.BackupID != goTrust.BackupID || genericTrust.SnapshotSHA256 != goTrust.SnapshotSHA256 {
+		return result, errors.New("recovery set contexts do not match")
+	}
+	if _, err := VerifyGenericSet(genericSet, genericTrust.Signer, genericTrust.InstallationID, genericTrust.BackupID, genericTrust.SnapshotSHA256); err != nil {
+		return result, err
+	}
+	if _, err := VerifyGoSet(goSet, goTrust.Signer, goTrust.InstallationID, goTrust.BackupID, goTrust.SnapshotSHA256); err != nil {
+		return result, err
+	}
+	stage, err := newStage()
+	if err != nil || stage == nil {
+		if stage != nil {
+			_ = stage.Close()
+		}
+		return result, errors.New("encrypted SQLite Go recovery staging could not be created")
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			if err := stage.Close(); err != nil {
+				result = PreparedSQLiteRecovery{}
+				retErr = errors.Join(retErr, errors.New("encrypted SQLite Go recovery staging could not be removed"))
+			}
+		}
+	}()
+	end, err := stage.Seek(0, io.SeekEnd)
+	if err != nil || end != 0 {
+		return result, errors.New("encrypted SQLite Go recovery staging must be empty")
+	}
+	if _, err := stage.Seek(0, io.SeekStart); err != nil {
+		return result, errors.New("encrypted SQLite Go recovery staging cannot be rewound")
+	}
+	if _, err := DecryptSnapshot(ctx, ciphertext, stage, maxCiphertext, maxSnapshotBytes, genericTrust.SnapshotSHA256, identity); err != nil {
+		return result, err
+	}
+	if _, err := stage.Seek(0, io.SeekStart); err != nil {
+		return result, errors.New("encrypted SQLite Go recovery staging cannot be rewound")
+	}
+	prepared, err := prepareSQLiteRecovery(ctx, stage, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, &goSet, &goTrust, parent, name)
+	if err != nil {
+		return result, err
+	}
+	closed = true
+	if err := stage.Close(); err != nil {
+		return result, errors.New("encrypted SQLite Go recovery staging could not be removed")
+	}
+	dir := filepath.Dir(prepared.DatabasePath)
+	cfg := config.Config{DataDir: dir, DatabaseDriver: config.SQLite, DatabaseDSN: prepared.DatabasePath, DatabaseMaxOpenConns: 1}
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		return result, errors.New("SQLite Go recovery catalog could not be opened")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		return result, errors.New("SQLite Go recovery inventory could not begin")
+	}
+	genericInventory, inventoryErr := InventoryGeneric(ctx, tx, maxObjects, maxReferences)
+	var goInventory []GenericObject
+	if inventoryErr == nil {
+		goInventory, inventoryErr = InventoryGo(ctx, tx, maxObjects, maxReferences)
+	}
+	rollbackErr := tx.Rollback()
+	closeErr := db.Close()
+	if inventoryErr != nil || rollbackErr != nil || closeErr != nil {
+		return result, errors.New("SQLite Go recovery inventory could not be read")
+	}
+	genericTrust.Inventory = genericInventory
+	goTrust.Inventory = goInventory
+	store, err := storage.NewFileSystem(filepath.Join(dir, "object-store"))
+	if err != nil {
+		return result, errors.New("SQLite Go recovery storage could not be created")
+	}
+	if err := RestoreGenericSet(ctx, genericSet, genericTrust, genericSources, identity, newStage, store); err != nil {
+		return result, err
+	}
+	if err := RestoreGoSet(ctx, goSet, goTrust, goSources, identity, newStage, store); err != nil {
+		return result, err
+	}
+	return prepared, nil
+}

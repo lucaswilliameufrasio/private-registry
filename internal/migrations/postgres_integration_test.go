@@ -6,9 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
+	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/google/uuid"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/testinfra"
@@ -75,7 +79,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 			migrationErrors = append(migrationErrors, result.err)
 			continue
 		}
-		if result.report.CurrentVersion != 16 || result.report.TargetVersion != 16 || result.report.InstallationID == "" {
+		if result.report.CurrentVersion != 17 || result.report.TargetVersion != 17 || result.report.InstallationID == "" {
 			migrationErrors = append(migrationErrors, errors.New("unexpected concurrent PostgreSQL migration report"))
 			continue
 		}
@@ -84,7 +88,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		} else if result.report.InstallationID != installationID {
 			migrationErrors = append(migrationErrors, errors.New("concurrent migrations created different installation identities"))
 		}
-		if len(result.report.AppliedVersions) == 16 {
+		if len(result.report.AppliedVersions) == 17 {
 			first = result.report
 			appliedCount++
 		} else if len(result.report.AppliedVersions) != 0 {
@@ -94,7 +98,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 	if err := errors.Join(migrationErrors...); err != nil {
 		t.Fatal(err)
 	}
-	if appliedCount != 1 || first.CurrentVersion != 16 || first.TargetVersion != 16 || first.InstallationID == "" {
+	if appliedCount != 1 || first.CurrentVersion != 17 || first.TargetVersion != 17 || first.InstallationID == "" {
 		t.Fatalf("PostgreSQL advisory lock did not serialize migration callers: first=%+v applied=%d", first, appliedCount)
 	}
 	if err := VerifyCurrent(ctx, firstDB, config.Postgres, first.InstallationID); err != nil {
@@ -109,7 +113,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		"SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 16 {
+	if attempts != 17 {
 		t.Fatalf("unexpected successful PostgreSQL migration attempts: %d", attempts)
 	}
 	var checksumCount int
@@ -117,7 +121,69 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		"SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 16 {
+	if checksumCount != 17 {
 		t.Fatalf("unexpected PostgreSQL migration checksum count: %d", checksumCount)
+	}
+}
+
+func TestPostgresUpgradePreservesExistingGenericRepository(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	t.Cleanup(cancel)
+	fixture, err := testinfra.StartPostgres(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := fixture.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	cfg := config.Config{DatabaseDriver: config.Postgres, DatabaseDSN: fixture.DSN(), DatabaseMaxOpenConns: 4}
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeDatabase(t, db))
+	path := "sql/sqlite/000001_installation.sql"
+	first, err := fs.ReadFile(embeddedMigrations, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := migrationFS(t, path, string(first)).(fstest.MapFS)
+	delete(old, "sql/sqlite/000017_go_modules.sql")
+	delete(old, "sql/postgres/000017_go_modules.sql")
+	report, err := migrateWithFS(ctx, db, cfg, old)
+	if err != nil || report.CurrentVersion != 16 {
+		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
+	}
+	userID, workspaceID, repositoryID, versionID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES ($1, 'Synthetic', $2, $3)`, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspaces (workspace_id, slug, display_name, created_by, created_at) VALUES ($1, 'upgrade', 'Upgrade', $2, $3)`, workspaceID, userID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at) VALUES ($1, $2, 'assets', 'Assets', $3, $4, $5)`, repositoryID, workspaceID, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_generic_artifact_versions (artifact_version_id, workspace_id, repository_id, collection_name, version_label, status, created_by, created_at, published_at) VALUES ($1, $2, $3, 'fixture', 'v1', 'published', $4, $5, $6)`, versionID, workspaceID, repositoryID, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	fileID, digest := uuid.NewString(), strings.Repeat("a", 64)
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_generic_artifact_files (artifact_file_id, artifact_version_id, workspace_id, repository_id, path, content_type, size_bytes, sha256, created_by, created_at) VALUES ($1, $2, $3, $4, 'fixture.bin', 'application/octet-stream', 12, $5, $6, $7)`, fileID, versionID, workspaceID, repositoryID, digest, userID, now); err != nil {
+		t.Fatal(err)
+	}
+	report, err = Migrate(ctx, db, cfg)
+	if err != nil || report.CurrentVersion != 17 || len(report.AppliedVersions) != 1 || report.AppliedVersions[0] != 17 {
+		t.Fatalf("upgrade to v17: report=%+v err=%v", report, err)
+	}
+	var format, retained, status, publishedAt string
+	if err := db.QueryRowContext(ctx, `SELECT r.format, v.artifact_version_id, v.status, v.published_at FROM registry_repositories r JOIN registry_generic_artifact_versions v ON v.repository_id = r.repository_id WHERE r.repository_id = $1`, repositoryID).Scan(&format, &retained, &status, &publishedAt); err != nil || format != "generic" || retained != versionID || status != "published" || publishedAt != now {
+		t.Fatalf("upgrade changed existing repository: format=%q version=%q status=%q err=%v", format, retained, status, err)
+	}
+	var retainedDigest string
+	if err := db.QueryRowContext(ctx, `SELECT sha256 FROM registry_generic_artifact_files WHERE artifact_file_id = $1 AND artifact_version_id = $2`, fileID, versionID).Scan(&retainedDigest); err != nil || retainedDigest != digest {
+		t.Fatalf("upgrade changed existing file reference: err=%v", err)
 	}
 }

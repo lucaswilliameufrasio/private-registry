@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
+	"private-registry/internal/gomod"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
 	"private-registry/internal/workspaces"
@@ -38,6 +39,7 @@ type AuthHTTPConfig struct {
 	AssetOrigin            string
 	TrustedProxies         []netip.Prefix
 	PublicAssetCORSOrigins []string
+	GoModules              *gomod.Service
 }
 
 type authHTTP struct {
@@ -45,6 +47,8 @@ type authHTTP struct {
 	workspaces             *workspaces.Service
 	repositories           *repositories.Service
 	artifacts              *artifacts.Service
+	goModules              *gomod.Service
+	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
 	assetOrigin            string
@@ -87,8 +91,9 @@ type workspaceMembershipRequest struct {
 }
 
 type repositoryCreateRequest struct {
-	Slug        string `json:"slug"`
-	DisplayName string `json:"display_name"`
+	Slug        string          `json:"slug"`
+	DisplayName string          `json:"display_name"`
+	Format      json.RawMessage `json:"format"`
 }
 
 type repositoryUpdateRequest struct {
@@ -123,6 +128,7 @@ type repositoryItemResponse struct {
 	Slug         string `json:"slug"`
 	DisplayName  string `json:"display_name"`
 	Visibility   string `json:"visibility"`
+	Format       string `json:"format"`
 }
 
 type repositoryListResponse struct {
@@ -237,6 +243,8 @@ func NewHandler(
 		workspaces:             workspaceService,
 		repositories:           repositoryService,
 		artifacts:              artifactService,
+		goModules:              cfg.GoModules,
+		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
 		assetOrigin:            assetOrigin,
@@ -288,6 +296,11 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Get("/api/v1/token/workspaces/{workspaceID}/repositories/{repositoryID}/artifacts/{artifactVersionID}", h.personalTokenManifest)
 	router.Get("/api/v1/token/workspaces/{workspaceID}/repositories/{repositoryID}/files/{fileID}", h.personalTokenFile)
 	router.Head("/api/v1/token/workspaces/{workspaceID}/repositories/{repositoryID}/files/{fileID}", h.personalTokenFile)
+	if h.goModules != nil {
+		router.Get("/go/{workspaceID}/{repositoryID}/*", h.goModuleProxy)
+		router.Head("/go/{workspaceID}/{repositoryID}/*", h.goModuleProxy)
+		h.registerGoManagementRoutes(router)
+	}
 }
 
 func (h *authHTTP) login(response http.ResponseWriter, request *http.Request) {
@@ -678,6 +691,7 @@ func (h *authHTTP) listRepositories(response http.ResponseWriter, request *http.
 			Slug:         repository.Slug,
 			DisplayName:  repository.DisplayName,
 			Visibility:   string(repository.Visibility),
+			Format:       string(repository.Format),
 		})
 	}
 	if hasMore && len(items) > 0 {
@@ -702,8 +716,17 @@ func (h *authHTTP) createRepository(response http.ResponseWriter, request *http.
 	if !requireRecentMFA(response, session) {
 		return
 	}
-	repository, err := h.repositories.Create(request.Context(), session.UserID,
-		chi.URLParam(request, "workspaceID"), payload.Slug, payload.DisplayName)
+	format := repositories.FormatGeneric
+	if len(payload.Format) > 0 {
+		var value string
+		if bytes.Equal(bytes.TrimSpace(payload.Format), []byte("null")) || json.Unmarshal(payload.Format, &value) != nil {
+			writeRepositoryError(response, repositories.ErrInvalidFormat)
+			return
+		}
+		format = repositories.Format(value)
+	}
+	repository, err := h.repositories.CreateWithFormat(request.Context(), session.UserID,
+		chi.URLParam(request, "workspaceID"), payload.Slug, payload.DisplayName, format)
 	if err != nil {
 		writeRepositoryError(response, err)
 		return
@@ -714,6 +737,7 @@ func (h *authHTTP) createRepository(response http.ResponseWriter, request *http.
 		Slug:         repository.Slug,
 		DisplayName:  repository.DisplayName,
 		Visibility:   string(repository.Visibility),
+		Format:       string(repository.Format),
 	})
 }
 
@@ -1026,6 +1050,10 @@ func requestUsesHTTPS(request *http.Request, trustedProxies []netip.Prefix) bool
 }
 
 func decodeJSONBody[T any](response http.ResponseWriter, request *http.Request, destination *T) int {
+	return decodeJSONBodyLimit(response, request, destination, maxAuthRequestBytes)
+}
+
+func decodeJSONBodyLimit[T any](response http.ResponseWriter, request *http.Request, destination *T, maxBytes int64) int {
 	mediaType, parameters, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return http.StatusUnsupportedMediaType
@@ -1033,7 +1061,7 @@ func decodeJSONBody[T any](response http.ResponseWriter, request *http.Request, 
 	if charset, exists := parameters["charset"]; exists && !strings.EqualFold(charset, "utf-8") {
 		return http.StatusUnsupportedMediaType
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(response, request.Body, maxAuthRequestBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(response, request.Body, maxBytes))
 	if err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
@@ -1209,6 +1237,7 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 	case errors.Is(err, repositories.ErrForbidden):
 		writeAPIError(response, http.StatusForbidden, "forbidden")
 	case errors.Is(err, repositories.ErrInvalidWorkspaceID),
+		errors.Is(err, repositories.ErrInvalidFormat),
 		errors.Is(err, repositories.ErrInvalidQuota),
 		errors.Is(err, repositories.ErrInvalidPersonalTokenRequest),
 		errors.Is(err, repositories.ErrInvalidJobCursor),
@@ -1225,6 +1254,10 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, repositories.ErrSlugConflict):
 		writeAPIError(response, http.StatusConflict, "repository_slug_conflict")
+	case errors.Is(err, repositories.ErrFormatMismatch):
+		writeAPIError(response, http.StatusConflict, "repository_format_mismatch")
+	case errors.Is(err, repositories.ErrReviewRequired):
+		writeAPIError(response, http.StatusConflict, "human_review_required")
 	case errors.Is(err, repositories.ErrQuotaRevision):
 		writeAPIError(response, http.StatusConflict, "logical_quota_revision_conflict")
 	case errors.Is(err, repositories.ErrDeadJobConflict):
@@ -1255,6 +1288,10 @@ func writeArtifactError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusForbidden, "forbidden")
 	case errors.Is(err, repositories.ErrUserUnavailable):
 		writeAPIError(response, http.StatusUnauthorized, "authentication_failed")
+	case errors.Is(err, repositories.ErrFormatMismatch):
+		writeAPIError(response, http.StatusConflict, "repository_format_mismatch")
+	case errors.Is(err, repositories.ErrReviewRequired):
+		writeAPIError(response, http.StatusConflict, "human_review_required")
 	case errors.Is(err, artifacts.ErrInvalidCollectionName),
 		errors.Is(err, artifacts.ErrInvalidVersionLabel),
 		errors.Is(err, artifacts.ErrInvalidArtifactPath),

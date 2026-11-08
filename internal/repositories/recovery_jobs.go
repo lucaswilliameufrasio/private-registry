@@ -52,7 +52,7 @@ func (s *Service) ListRecoveryJobs(ctx context.Context, actorUserID, after strin
 			if err := rows.Scan(&job.ID, &job.Kind, &job.PreviousStatus, &job.Attempts, &job.MaxAttempts, &job.Revision, &updated); err != nil {
 				return errors.New("recovery job record could not be read")
 			}
-			if job.Kind != "expire-generic-uploads" {
+			if job.Kind != "expire-generic-uploads" && job.Kind != "expire-go-uploads" {
 				job.Kind = "other"
 			}
 			job.UpdatedAt = time.UnixMilli(updated).UTC()
@@ -73,7 +73,7 @@ func (s *Service) ListRecoveryJobs(ctx context.Context, actorUserID, after strin
 	return items, hasMore, nil
 }
 
-// ReleaseRecoveryJob requeues only the idempotent upload-expiration job after
+// ReleaseRecoveryJob requeues only idempotent upload-expiration jobs after
 // explicit operator confirmation. Other kinds require their own recovery policy.
 func (s *Service) ReleaseRecoveryJob(ctx context.Context, actorUserID, jobID string, expectedRevision int64) error {
 	actorID, err := parseUUID(actorUserID, ErrUnauthenticated)
@@ -89,7 +89,7 @@ func (s *Service) ReleaseRecoveryJob(ctx context.Context, actorUserID, jobID str
 			return err
 		}
 		now := time.Now().UTC().UnixMilli()
-		query := `UPDATE registry_jobs SET recovery_previous_status = NULL, attempts = 0, available_at_ms = ` + bind(s.driver, 1) + `, updated_at_ms = ` + bind(s.driver, 2) + `, revision = revision + 1 WHERE job_id = ` + bind(s.driver, 3) + ` AND kind = 'expire-generic-uploads' AND status = 'pending' AND recovery_previous_status IS NOT NULL AND revision = ` + bind(s.driver, 4)
+		query := `UPDATE registry_jobs SET recovery_previous_status = NULL, attempts = 0, available_at_ms = ` + bind(s.driver, 1) + `, updated_at_ms = ` + bind(s.driver, 2) + `, revision = revision + 1 WHERE job_id = ` + bind(s.driver, 3) + ` AND kind IN ('expire-generic-uploads', 'expire-go-uploads') AND status = 'pending' AND recovery_previous_status IS NOT NULL AND revision = ` + bind(s.driver, 4)
 		result, err := tx.ExecContext(ctx, query, now, now, jobID, expectedRevision)
 		if err != nil {
 			return errors.New("recovery job could not be released")

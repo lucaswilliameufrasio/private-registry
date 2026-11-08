@@ -29,15 +29,15 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 16 {
+	if len(first.AppliedVersions) != 17 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
 	for index, version := range first.AppliedVersions {
 		if version != int64(index+1) {
-			t.Fatalf("migration %d at position %d; want sequential versions 1–16", version, index)
+			t.Fatalf("migration %d at position %d; want sequential versions 1–17", version, index)
 		}
 	}
-	if first.CurrentVersion != 16 || first.TargetVersion != 16 {
+	if first.CurrentVersion != 17 || first.TargetVersion != 17 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -60,14 +60,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 16 {
+	if succeeded != 17 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 16 {
+	if checksumCount != 17 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -237,6 +237,59 @@ func TestMigrateSerializesConcurrentSQLiteCallers(t *testing.T) {
 	}
 }
 
+func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
+	cfg := sqliteConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeDatabase(t, db))
+	path := "sql/sqlite/000001_installation.sql"
+	first, err := fs.ReadFile(embeddedMigrations, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := migrationFS(t, path, string(first)).(fstest.MapFS)
+	delete(old, "sql/sqlite/000017_go_modules.sql")
+	delete(old, "sql/postgres/000017_go_modules.sql")
+	report, err := migrateWithFS(ctx, db, cfg, old)
+	if err != nil || report.CurrentVersion != 16 {
+		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
+	}
+	userID, workspaceID, repositoryID, versionID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES (?, 'Synthetic', ?, ?)`, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspaces (workspace_id, slug, display_name, created_by, created_at) VALUES (?, 'upgrade', 'Upgrade', ?, ?)`, workspaceID, userID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at) VALUES (?, ?, 'assets', 'Assets', ?, ?, ?)`, repositoryID, workspaceID, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_generic_artifact_versions (artifact_version_id, workspace_id, repository_id, collection_name, version_label, status, created_by, created_at, published_at) VALUES (?, ?, ?, 'fixture', 'v1', 'published', ?, ?, ?)`, versionID, workspaceID, repositoryID, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	fileID, digest := uuid.NewString(), strings.Repeat("a", 64)
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_generic_artifact_files (artifact_file_id, artifact_version_id, workspace_id, repository_id, path, content_type, size_bytes, sha256, created_by, created_at) VALUES (?, ?, ?, ?, 'fixture.bin', 'application/octet-stream', 12, ?, ?, ?)`, fileID, versionID, workspaceID, repositoryID, digest, userID, now); err != nil {
+		t.Fatal(err)
+	}
+	report, err = Migrate(ctx, db, cfg)
+	if err != nil || report.CurrentVersion != 17 || len(report.AppliedVersions) != 1 || report.AppliedVersions[0] != 17 {
+		t.Fatalf("upgrade to v17: report=%+v err=%v", report, err)
+	}
+	var format, retained, status, publishedAt string
+	if err := db.QueryRowContext(ctx, `SELECT r.format, v.artifact_version_id, v.status, v.published_at FROM registry_repositories r JOIN registry_generic_artifact_versions v ON v.repository_id = r.repository_id WHERE r.repository_id = ?`, repositoryID).Scan(&format, &retained, &status, &publishedAt); err != nil || format != "generic" || retained != versionID || status != "published" || publishedAt != now {
+		t.Fatalf("upgrade changed existing repository: format=%q version=%q status=%q err=%v", format, retained, status, err)
+	}
+	var retainedDigest string
+	if err := db.QueryRowContext(ctx, `SELECT sha256 FROM registry_generic_artifact_files WHERE artifact_file_id = ? AND artifact_version_id = ?`, fileID, versionID).Scan(&retainedDigest); err != nil || retainedDigest != digest {
+		t.Fatalf("upgrade changed existing file reference: err=%v", err)
+	}
+}
+
 func sqliteConfig(t *testing.T) config.Config {
 	t.Helper()
 	dataDir := filepath.Join(t.TempDir(), "registry-data")
@@ -268,6 +321,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000014_job_dead_letter.sql",
 		"sql/sqlite/000015_personal_read_tokens.sql",
 		"sql/sqlite/000016_recovery_job_hold.sql",
+		"sql/sqlite/000017_go_modules.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
@@ -284,6 +338,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/postgres/000014_job_dead_letter.sql",
 		"sql/postgres/000015_personal_read_tokens.sql",
 		"sql/postgres/000016_recovery_job_hold.sql",
+		"sql/postgres/000017_go_modules.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {

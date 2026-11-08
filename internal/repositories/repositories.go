@@ -26,6 +26,13 @@ const (
 
 type VisibilityPolicy string
 
+type Format string
+
+const (
+	FormatGeneric Format = "generic"
+	FormatGo      Format = "go"
+)
+
 const (
 	PolicyPrivateOnly        VisibilityPolicy = "private_only"
 	PolicyPrivateAndUnlisted VisibilityPolicy = "private_and_unlisted"
@@ -39,6 +46,8 @@ var (
 	ErrInvalidRepositoryID     = errors.New("repository identity is invalid")
 	ErrInvalidSlug             = errors.New("repository slug is invalid")
 	ErrInvalidName             = errors.New("repository display name is invalid")
+	ErrInvalidFormat           = errors.New("repository format is invalid or unsupported")
+	ErrFormatMismatch          = errors.New("repository format does not support this operation")
 	ErrInvalidPageSize         = errors.New("repository page size is invalid")
 	ErrInvalidVisibility       = errors.New("repository visibility is invalid")
 	ErrInvalidVisibilityPolicy = errors.New("repository visibility policy is invalid")
@@ -58,6 +67,7 @@ type Repository struct {
 	WorkspaceID string
 	Slug        string
 	DisplayName string
+	Format      Format
 	Visibility  Visibility
 	Status      string
 	CreatedBy   string
@@ -86,6 +96,17 @@ func (s *Service) Create(
 	slug string,
 	displayName string,
 ) (repository Repository, retErr error) {
+	return s.CreateWithFormat(ctx, actorUserID, workspaceID, slug, displayName, FormatGeneric)
+}
+
+func (s *Service) CreateWithFormat(
+	ctx context.Context,
+	actorUserID string,
+	workspaceID string,
+	slug string,
+	displayName string,
+	format Format,
+) (repository Repository, retErr error) {
 	if ctx == nil {
 		return Repository{}, errors.New("repository creation context is required")
 	}
@@ -104,6 +125,9 @@ func (s *Service) Create(
 	displayName, err = normalizeDisplayName(displayName)
 	if err != nil {
 		return Repository{}, err
+	}
+	if format != FormatGeneric && format != FormatGo {
+		return Repository{}, ErrInvalidFormat
 	}
 
 	err = s.withWriteTransaction(ctx, func(tx *sql.Tx) error {
@@ -135,10 +159,10 @@ func (s *Service) Create(
 		now := time.Now().UTC()
 		createdAt := now.Format(time.RFC3339Nano)
 		query = `INSERT INTO registry_repositories
-			(repository_id, workspace_id, slug, display_name, visibility, status, created_by, created_at, updated_at)
-			VALUES (` + bind(s.driver, 1) + `, ` + bind(s.driver, 2) + `, ` + bind(s.driver, 3) + `, ` + bind(s.driver, 4) + `, 'private', 'active', ` + bind(s.driver, 5) + `, ` + bind(s.driver, 6) + `, ` + bind(s.driver, 7) + `)`
+			(repository_id, workspace_id, slug, display_name, visibility, status, created_by, created_at, updated_at, format)
+			VALUES (` + bind(s.driver, 1) + `, ` + bind(s.driver, 2) + `, ` + bind(s.driver, 3) + `, ` + bind(s.driver, 4) + `, 'private', 'active', ` + bind(s.driver, 5) + `, ` + bind(s.driver, 6) + `, ` + bind(s.driver, 7) + `, ` + bind(s.driver, 8) + `)`
 		if _, err := tx.ExecContext(ctx, query,
-			repositoryID.String(), workspaceID, slug, displayName, actorID, createdAt, createdAt); err != nil {
+			repositoryID.String(), workspaceID, slug, displayName, actorID, createdAt, createdAt, string(format)); err != nil {
 			return errors.New("repository could not be created")
 		}
 		if err := recordAudit(ctx, tx, s.driver, actorID,
@@ -150,6 +174,7 @@ func (s *Service) Create(
 			WorkspaceID: workspaceID,
 			Slug:        slug,
 			DisplayName: displayName,
+			Format:      format,
 			Visibility:  VisibilityPrivate,
 			Status:      "active",
 			CreatedBy:   actorID,
@@ -270,7 +295,7 @@ func (s *Service) ListForWorkspace(
 		return nil, false, ErrForbidden
 	}
 
-	query := `SELECT repository_id, workspace_id, slug, display_name, visibility, status, created_by, created_at
+	query := `SELECT repository_id, workspace_id, slug, display_name, visibility, status, created_by, created_at, format
 		FROM registry_repositories
 		WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status = 'active'`
 	args := []any{workspaceID}
@@ -299,6 +324,7 @@ func (s *Service) ListForWorkspace(
 			&repository.Status,
 			&repository.CreatedBy,
 			&createdAt,
+			&repository.Format,
 		); err != nil {
 			return nil, false, errors.New("repository record is invalid")
 		}
@@ -308,7 +334,7 @@ func (s *Service) ListForWorkspace(
 		if _, err := parseUUID(repository.WorkspaceID, ErrInvalidWorkspaceID); err != nil {
 			return nil, false, errors.New("repository workspace identity is invalid")
 		}
-		if !validVisibility(repository.Visibility) || repository.Status != "active" {
+		if !validVisibility(repository.Visibility) || repository.Status != "active" || (repository.Format != FormatGeneric && repository.Format != FormatGo) {
 			return nil, false, errors.New("repository state is invalid")
 		}
 		parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)
@@ -364,6 +390,13 @@ func (s *Service) SetVisibility(
 		}
 		if actorRole != workspaces.RoleOwner {
 			return ErrForbidden
+		}
+		if visibility != VisibilityPrivate {
+			if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, FormatGeneric); errors.Is(err, ErrFormatMismatch) {
+				return ErrVisibilityNotAllowed
+			} else if err != nil {
+				return err
+			}
 		}
 
 		currentVisibility, err := readRepositoryVisibility(ctx, tx, s.driver, workspaceID, repositoryID)

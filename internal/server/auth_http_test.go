@@ -556,7 +556,7 @@ func TestAuthHTTPMembershipManagementRequiresRecentMFAAndProtectsOwner(t *testin
 	if err := json.Unmarshal(createRepository.Body.Bytes(), &createdRepository); err != nil {
 		t.Fatal(err)
 	}
-	if createdRepository.Visibility != string(repositories.VisibilityPrivate) || createdRepository.RepositoryID == "" {
+	if createdRepository.Visibility != string(repositories.VisibilityPrivate) || createdRepository.RepositoryID == "" || createdRepository.Format != string(repositories.FormatGeneric) {
 		t.Fatalf("new repository was not private by default: %+v", createdRepository)
 	}
 	repositoryPath := repositoriesPath + "/" + createdRepository.RepositoryID
@@ -617,6 +617,30 @@ func TestAuthHTTPMembershipManagementRequiresRecentMFAAndProtectsOwner(t *testin
 	if len(listedRepositories.Repositories) != 1 ||
 		listedRepositories.Repositories[0].Visibility != string(repositories.VisibilityListed) {
 		t.Fatalf("policy restriction silently converted an existing repository: %+v", listedRepositories)
+	}
+	createGo := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, repositoriesPath,
+		`{"slug":"go-modules","display_name":"Go Modules","format":"go"}`, authTestOrigin,
+		"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	var goRepository repositoryItemResponse
+	if createGo.Code != http.StatusCreated || json.Unmarshal(createGo.Body.Bytes(), &goRepository) != nil || goRepository.Format != "go" {
+		t.Fatalf("Go repository creation status=%d body=%s", createGo.Code, createGo.Body.String())
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, ownerID, createdWorkspace.WorkspaceID, goRepository.RepositoryID, ownerID, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	wrongFormatPath := repositoriesPath + "/" + goRepository.RepositoryID + "/artifacts/uploads"
+	wrongFormatBody := `{"collection":"fixture","version":"v1","path":"file.bin","content_type":"application/octet-stream","size":1,"sha256":"` + strings.Repeat("a", 64) + `"}`
+	wrongFormat := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, wrongFormatPath, wrongFormatBody, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+	if wrongFormat.Code != http.StatusConflict || !strings.Contains(wrongFormat.Body.String(), `"repository_format_mismatch"`) {
+		t.Fatalf("generic upload into Go repository status=%d body=%s", wrongFormat.Code, wrongFormat.Body.String())
+	}
+	for _, format := range []string{`null`, `"unsupported"`, `""`} {
+		bad := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, repositoriesPath,
+			`{"slug":"bad-format","display_name":"Bad","format":`+format+`}`, authTestOrigin,
+			"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)
+		if bad.Code != http.StatusBadRequest {
+			t.Fatalf("invalid repository format %s status=%d", format, bad.Code)
+		}
 	}
 	setPrivate := authHTTPRequestWithCookies(fixture.handler, http.MethodPatch, visibilityPath,
 		`{"visibility":"private"}`, authTestOrigin, "registry.example", mfaCookies,

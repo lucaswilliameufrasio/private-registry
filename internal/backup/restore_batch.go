@@ -35,6 +35,10 @@ func RestoreGenericSet(ctx context.Context, setEnvelope GenericSetEnvelope, trus
 	if err != nil {
 		return err
 	}
+	return restoreVerifiedSet(ctx, set, trusted, sources, identity, newStage, destination)
+}
+
+func restoreVerifiedSet(ctx context.Context, set GenericSet, trusted GenericSetRecovery, sources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error), destination storage.Driver) error {
 	if len(sources) != len(set.Objects) {
 		return errors.New("generic recovery sources do not match the signed set")
 	}

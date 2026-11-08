@@ -75,31 +75,38 @@ func VerifyGenericSetInventory(envelope GenericSetEnvelope, key ed25519.PublicKe
 	if err != nil {
 		return GenericSet{}, err
 	}
+	if err := matchSetInventory(set, inventory); err != nil {
+		return GenericSet{}, err
+	}
+	return set, nil
+}
+
+func matchSetInventory(set GenericSet, inventory []GenericObject) error {
 	if len(inventory) != len(set.Objects) || len(inventory) > maxGenericSetObjects {
-		return GenericSet{}, errors.New("generic backup set does not match inventory")
+		return errors.New("backup set does not match inventory")
 	}
 	expected := make(map[storage.ObjectKey]int64, len(inventory))
 	for _, object := range inventory {
 		canonical, err := storage.NewObjectKey(object.Key.WorkspaceID, object.Key.SHA256)
 		if err != nil || canonical != object.Key || object.Size < 0 || object.Size > 1<<30 {
-			return GenericSet{}, errors.New("generic backup inventory contains an invalid object")
+			return errors.New("backup inventory contains an invalid object")
 		}
 		if _, exists := expected[object.Key]; exists {
-			return GenericSet{}, errors.New("generic backup inventory contains a duplicate object")
+			return errors.New("backup inventory contains a duplicate object")
 		}
 		expected[object.Key] = object.Size
 	}
 	for _, object := range set.Objects {
 		objectKey := storage.ObjectKey{WorkspaceID: object.WorkspaceID, SHA256: object.PlainSHA256}
 		if size, exists := expected[objectKey]; !exists || size != object.PlainBytes {
-			return GenericSet{}, errors.New("generic backup set does not match inventory")
+			return errors.New("backup set does not match inventory")
 		}
 		delete(expected, objectKey)
 	}
 	if len(expected) != 0 {
-		return GenericSet{}, errors.New("generic backup set does not match inventory")
+		return errors.New("backup set does not match inventory")
 	}
-	return set, nil
+	return nil
 }
 
 func validGenericSet(set GenericSet) bool {

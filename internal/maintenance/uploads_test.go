@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"private-registry/internal/artifacts"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 	"private-registry/internal/migrations"
 	"private-registry/internal/repositories"
@@ -91,6 +93,62 @@ func exerciseUploadExpiration(t *testing.T, db *sql.DB, driver config.DatabaseDr
 	queue, err := jobs.New(db, driver)
 	if err != nil {
 		t.Fatal(err)
+	}
+	goRepository := uuid.NewString()
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, visibility, status, created_by, created_at, updated_at, format) VALUES (?, ?, 'go-modules', 'Go', 'private', 'active', ?, ?, ?, 'go')`), goRepository, workspaceID, userID, timestamp, timestamp); err != nil {
+		t.Fatal(err)
+	}
+	goIDs := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
+	for index, entry := range []struct {
+		status   string
+		claim    any
+		verified int
+		expires  time.Time
+	}{
+		{"receiving", nil, 0, now.Add(-time.Minute)},
+		{"uploading", uuid.NewString(), 0, now.Add(-time.Minute)},
+		{"uploaded", nil, 1, now.Add(-time.Minute)},
+		{"receiving", nil, 0, now.Add(time.Hour)},
+	} {
+		query := `INSERT INTO registry_go_upload_sessions (upload_session_id, workspace_id, repository_id, module_path, version, mod_bytes, zip_sha256, zip_size, source_time, status, upload_claim_id, object_verified, created_by, created_at_ms, expires_at_ms) VALUES (?, ?, ?, 'example.com/private/module', ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+		if _, err := db.ExecContext(ctx, bind(query), goIDs[index], workspaceID, goRepository, fmt.Sprintf("v1.0.%d", index), []byte("module example.com/private/module\n"), strings.Repeat("a", 64), timestamp, entry.status, entry.claim, entry.verified, userID, now.Add(-2*time.Hour).UnixMilli(), entry.expires.UnixMilli()); err != nil {
+			t.Fatal("seed Go expiration fixture:", err)
+		}
+	}
+	goStaging := filepath.Join(root, "go-staging")
+	if err := os.Mkdir(goStaging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	goService, err := gomod.NewService(db, driver, repositoryService, store, gomod.Options{StagingDirectory: goStaging, MaxZipBytes: 1024, MaxFiles: 10, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	goWorker, err := NewGoUploadExpiration(queue, goService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goWorker.clock = func() time.Time { return now }
+	if err := goWorker.RunOnce(ctx); err != nil {
+		t.Fatal("Go maintenance run:", err)
+	}
+	for index, expected := range []string{"expired", "expired", "uploaded", "receiving"} {
+		var status string
+		var claim sql.NullString
+		if err := db.QueryRowContext(ctx, bind(`SELECT status, upload_claim_id FROM registry_go_upload_sessions WHERE upload_session_id = ?`), goIDs[index]).Scan(&status, &claim); err != nil || status != expected || claim.Valid {
+			t.Fatalf("Go session %d status=%q claim=%t err=%v", index, status, claim.Valid, err)
+		}
+	}
+	goRestarted, err := NewGoUploadExpiration(queue, goService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goRestarted.clock = func() time.Time { return now.Add(runInterval) }
+	if err := goRestarted.RunOnce(ctx); err != nil {
+		t.Fatal("restart Go maintenance:", err)
+	}
+	var goJobs, goAttempts int
+	if err := db.QueryRowContext(ctx, bind(`SELECT count(*), max(attempts) FROM registry_jobs WHERE idempotency_key = ?`), goExpirationKey).Scan(&goJobs, &goAttempts); err != nil || goJobs != 1 || goAttempts != 0 {
+		t.Fatalf("Go recurring job count=%d attempts=%d err=%v", goJobs, goAttempts, err)
 	}
 	worker, err := NewUploadExpiration(queue, service)
 	if err != nil {

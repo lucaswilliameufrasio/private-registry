@@ -9,22 +9,27 @@ import (
 	"time"
 
 	"private-registry/internal/artifacts"
+	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 )
 
 const (
-	expirationKey  = "maintenance:expire-generic-uploads:v1"
-	expirationKind = "expire-generic-uploads"
-	batchSize      = 128
-	runInterval    = time.Minute
-	operationLimit = 10 * time.Second
-	leaseDuration  = 30 * time.Second
+	expirationKey    = "maintenance:expire-generic-uploads:v1"
+	expirationKind   = "expire-generic-uploads"
+	goExpirationKey  = "maintenance:expire-go-uploads:v1"
+	goExpirationKind = "expire-go-uploads"
+	batchSize        = 128
+	runInterval      = time.Minute
+	operationLimit   = 10 * time.Second
+	leaseDuration    = 30 * time.Second
 )
 
 type UploadExpiration struct {
 	queue     *jobs.Queue
 	artifacts uploadExpirer
 	clock     func() time.Time
+	key       string
+	kind      string
 }
 
 type uploadExpirer interface {
@@ -35,7 +40,14 @@ func NewUploadExpiration(queue *jobs.Queue, service *artifacts.Service) (*Upload
 	if queue == nil || service == nil {
 		return nil, errors.New("upload expiration dependencies are required")
 	}
-	return &UploadExpiration{queue: queue, artifacts: service, clock: time.Now}, nil
+	return &UploadExpiration{queue: queue, artifacts: service, clock: time.Now, key: expirationKey, kind: expirationKind}, nil
+}
+
+func NewGoUploadExpiration(queue *jobs.Queue, service *gomod.Service) (*UploadExpiration, error) {
+	if queue == nil || service == nil {
+		return nil, errors.New("Go upload expiration dependencies are required")
+	}
+	return &UploadExpiration{queue: queue, artifacts: service, clock: time.Now, key: goExpirationKey, kind: goExpirationKind}, nil
 }
 
 // RunOnce schedules and executes at most one bounded batch. A persistent job
@@ -48,11 +60,11 @@ func (w *UploadExpiration) RunOnce(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, operationLimit)
 	defer cancel()
 	now := w.clock().UTC()
-	id, err := w.queue.Enqueue(ctx, expirationKey, expirationKind, "{}", 8, time.Unix(1, 0).UTC(), now)
+	id, err := w.queue.Enqueue(ctx, w.key, w.kind, "{}", 8, time.Unix(1, 0).UTC(), now)
 	if err != nil {
 		return err
 	}
-	job, err := w.queue.Claim(ctx, expirationKind, now, leaseDuration)
+	job, err := w.queue.Claim(ctx, w.kind, now, leaseDuration)
 	if errors.Is(err, jobs.ErrNoJob) {
 		status, statusErr := w.queue.Status(ctx, id)
 		if statusErr != nil {
@@ -98,7 +110,7 @@ func (w *UploadExpiration) Run(ctx context.Context, logger *slog.Logger) {
 		}
 		delay := 10 * time.Second
 		if err := w.RunOnce(ctx); err != nil && ctx.Err() == nil {
-			logger.Error("upload expiration maintenance failed", "error", err)
+			logger.Error("upload expiration maintenance failed", "kind", w.kind, "error", err)
 			delay = time.Minute
 		}
 		timer := time.NewTimer(delay)

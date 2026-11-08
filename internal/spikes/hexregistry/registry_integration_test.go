@@ -337,5 +337,8 @@ func runMixExpectedFailure(t *testing.T, ctx context.Context, directory, hexHome
 	if mixHome := os.Getenv("MIX_HOME"); mixHome != "" {
 		command.Env = append(command.Env, "MIX_HOME="+mixHome)
 	}
+	if mixArchives := os.Getenv("MIX_ARCHIVES"); mixArchives != "" {
+		command.Env = append(command.Env, "MIX_ARCHIVES="+mixArchives)
+	}
 	return command.CombinedOutput()
 }
