@@ -41,6 +41,8 @@ func exerciseCargoReceiptUpgrade(t *testing.T, ctx context.Context, db *sql.DB, 
 	delete(old, "sql/postgres/000024_cargo_publications.sql")
 	delete(old, "sql/sqlite/000025_npm_repository_format.sql")
 	delete(old, "sql/postgres/000025_npm_repository_format.sql")
+	delete(old, "sql/sqlite/000026_npm_catalog.sql")
+	delete(old, "sql/postgres/000026_npm_catalog.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 21 {
 		t.Fatalf("prepare v21 fixture: %+v err=%v", report, err)
 	}
@@ -70,8 +72,8 @@ func exerciseCargoReceiptUpgrade(t *testing.T, ctx context.Context, db *sql.DB, 
 		}
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 25 || len(report.AppliedVersions) != 4 || report.AppliedVersions[0] != 22 || report.AppliedVersions[1] != 23 || report.AppliedVersions[2] != 24 || report.AppliedVersions[3] != 25 {
-		t.Fatalf("upgrade to v25: %+v err=%v", report, err)
+	if err != nil || report.CurrentVersion != 26 || len(report.AppliedVersions) != 5 || report.AppliedVersions[0] != 22 || report.AppliedVersions[1] != 23 || report.AppliedVersions[2] != 24 || report.AppliedVersions[3] != 25 || report.AppliedVersions[4] != 26 {
+		t.Fatalf("upgrade to v26: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 		t.Fatal(err)

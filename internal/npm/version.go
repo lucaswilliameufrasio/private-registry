@@ -1,11 +1,23 @@
 package npm
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
 	"golang.org/x/mod/semver"
 )
+
+// VersionIdentity is a conservative experimental collision key. It removes
+// only SemVer build metadata; it does not validate npm's full normalization or
+// authorize publication, and must not be used as a claim of client parity.
+func VersionIdentity(version string) (string, error) {
+	if !validPublishVersion(version) {
+		return "", errors.New("npm version is invalid")
+	}
+	identity, _, _ := strings.Cut(version, "+")
+	return identity, nil
+}
 
 // validPublishVersion accepts a conservative full SemVer subset within the
 // numeric range supported by the npm client; it is not a reservation policy.

@@ -15,6 +15,29 @@ func TestValidPublishVersion(t *testing.T) {
 	}
 }
 
+func TestVersionIdentityStripsOnlyBuildMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"1.0.0", "1.0.0"},
+		{"1.0.0+first", "1.0.0"},
+		{"1.0.0+second", "1.0.0"},
+		{"1.0.0-rc.1+build", "1.0.0-rc.1"},
+		{"1.0.0-rc.2", "1.0.0-rc.2"},
+	} {
+		identity, err := VersionIdentity(tc.version)
+		if err != nil || identity != tc.want {
+			t.Fatalf("npm version identity %q = %q, %v", tc.version, identity, err)
+		}
+	}
+	for _, version := range []string{"", "1.0", "v1.0.0", "1.0.0+", "01.0.0", "9007199254740992.0.0"} {
+		if _, err := VersionIdentity(version); err == nil {
+			t.Fatalf("invalid npm version accepted: %q", version)
+		}
+	}
+}
+
 func TestCompatibleArchiveVersion(t *testing.T) {
 	for _, tc := range []struct {
 		published string

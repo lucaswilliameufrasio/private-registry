@@ -2,7 +2,9 @@ package gomod
 
 import (
 	"context"
+	"crypto/sha512"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -102,5 +104,33 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 		if err := tx.Rollback(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = 17 WHERE workspace_id = `+bind(1), workspace); err != nil {
+		t.Fatal(err)
+	}
+	npmRepo, pkg := uuid.NewString(), uuid.NewString()
+	query := `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + bind(1) + `, ` + bind(2) + `, 'npm', 'npm', ` + bind(3) + `, 'now', 'now', 'npm')`
+	if _, err := db.ExecContext(ctx, query, npmRepo, workspace, user); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_npm_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, 'fixture', ` + bind(4) + `, 'now')`
+	if _, err := db.ExecContext(ctx, query, pkg, workspace, npmRepo, user); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha512.Sum512([]byte("synthetic"))
+	query = `INSERT INTO registry_npm_versions (npm_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, integrity, created_by, created_at) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, ` + bind(4) + `, '1.0.0', '1.0.0', '{}', ` + bind(5) + `, 7, ` + bind(6) + `, ` + bind(7) + `, 'now')`
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), workspace, npmRepo, pkg, strings.Repeat("b", 64), "sha512-"+base64.StdEncoding.EncodeToString(digest[:]), user); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 4); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("npm version did not count towards Go quota: %v", err)
+	}
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 3); err != nil {
+		t.Fatalf("remaining Go quota rejected: %v", err)
 	}
 }

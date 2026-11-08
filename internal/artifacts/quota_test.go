@@ -3,7 +3,9 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"crypto/sha512"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,6 +26,84 @@ func TestSQLiteGenericQuotaReservations(t *testing.T) {
 func TestSQLiteGenericQuotaCountsCargoReservation(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	exerciseGenericQuotaCountsCargo(t, fixture.service, fixture.db, config.SQLite, fixture.userIDs["publisher"], fixture.workspaceID, fixture.repositoryID)
+}
+
+func TestSQLiteGenericQuotaCountsNPMVersions(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	exerciseGenericQuotaCountsNPM(t, fixture.service, fixture.db, config.SQLite, fixture.userIDs["publisher"], fixture.workspaceID, fixture.repositoryID)
+}
+
+func exerciseGenericQuotaCountsNPM(t *testing.T, service *Service, db *sql.DB, driver config.DatabaseDriver, actor, workspace, repository string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	p := func(n int) string {
+		if driver == config.Postgres {
+			return fmt.Sprintf("$%d", n)
+		}
+		return "?"
+	}
+	var owner, created string
+	if err := db.QueryRowContext(ctx, `SELECT created_by, created_at FROM registry_repositories WHERE repository_id = `+p(1), repository).Scan(&owner, &created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = 10 WHERE workspace_id = `+p(1), workspace); err != nil {
+		t.Fatal(err)
+	}
+	npmRepo, pkg := uuid.NewString(), uuid.NewString()
+	query := `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + p(1) + `, ` + p(2) + `, 'npm-quota', 'npm', ` + p(3) + `, ` + p(4) + `, ` + p(5) + `, 'npm')`
+	if _, err := db.ExecContext(ctx, query, npmRepo, workspace, owner, created, created); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_npm_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, 'fixture', ` + p(4) + `, ` + p(5) + `)`
+	if _, err := db.ExecContext(ctx, query, pkg, workspace, npmRepo, owner, created); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha512.Sum512([]byte("fixture"))
+	integrity := "sha512-" + base64.StdEncoding.EncodeToString(digest[:])
+	query = `INSERT INTO registry_npm_versions (npm_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, integrity, created_by, created_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, ` + p(4) + `, '1.0.0', '1.0.0', '{}', ` + p(5) + `, 7, ` + p(6) + `, ` + p(7) + `, ` + p(8) + `)`
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), workspace, npmRepo, pkg, strings.Repeat("a", 64), integrity, owner, created); err != nil {
+		t.Fatal(err)
+	}
+	cargoRepo := uuid.NewString()
+	query = `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + p(1) + `, ` + p(2) + `, 'cargo-npm-quota', 'Cargo', ` + p(3) + `, ` + p(4) + `, ` + p(5) + `, 'cargo')`
+	if _, err := db.ExecContext(ctx, query, cargoRepo, workspace, owner, created, created); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_repository_grants (grant_id, repository_id, workspace_id, user_id, role, granted_by, granted_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, ` + p(4) + `, 'publisher', ` + p(5) + `, ` + p(6) + `)`
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), cargoRepo, workspace, actor, owner, created); err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.repositories.IssueCargoWriteToken(ctx, actor, workspace, cargoRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoService, err := cargo.NewReservationService(db, service.repositories, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := cargo.PublishFrame{Metadata: []byte(`{"name":"fixture","vers":"1.0.0","deps":[],"features":{}}`), Size: 4, SHA256: strings.Repeat("b", 64)}
+	if _, err := cargoService.Reserve(ctx, token.Bearer, workspace, cargoRepo, frame); !errors.Is(err, cargo.ErrReservationQuota) {
+		t.Fatalf("npm version did not count towards Cargo workspace quota: %v", err)
+	}
+	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("npm-cross", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
+		t.Fatalf("npm version did not count towards generic workspace quota: %v", err)
+	}
+	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("npm-cross", "v2", "file", []byte("one"))); err != nil {
+		t.Fatalf("remaining workspace quota was not usable: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = 13 WHERE workspace_id = `+p(1), workspace); err != nil {
+		t.Fatal(err)
+	}
+	frame.Size = 3
+	if _, err := cargoService.Reserve(ctx, token.Bearer, workspace, cargoRepo, frame); err != nil {
+		t.Fatalf("remaining Cargo workspace quota was not usable: %v", err)
+	}
+	frame.Metadata = []byte(`{"name":"other","vers":"1.0.0","deps":[],"features":{}}`)
+	frame.Size = 1
+	if _, err := cargoService.Reserve(ctx, token.Bearer, workspace, cargoRepo, frame); !errors.Is(err, cargo.ErrReservationQuota) {
+		t.Fatalf("Cargo reservation exceeded combined npm and generic quota: %v", err)
+	}
 }
 
 func exerciseGenericQuotaCountsCargo(t *testing.T, service *Service, db *sql.DB, driver config.DatabaseDriver, actor, workspace, repository string) {

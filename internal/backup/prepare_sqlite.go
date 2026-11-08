@@ -148,9 +148,16 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if inventoryErr == nil {
 		cargoInventory, inventoryErr = InventoryCargo(ctx, inventoryTx, maxObjects, maxReferences)
 	}
+	var hasNPMVersions bool
+	if inventoryErr == nil {
+		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_npm_versions)`).Scan(&hasNPMVersions)
+	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {
 		return result, errors.New("isolated SQLite recovery inventory could not be verified")
+	}
+	if hasNPMVersions {
+		return result, errors.New("partial recovery cannot prepare a catalog containing npm versions")
 	}
 	if cargoEnvelope == nil && len(cargoInventory) > 0 {
 		return result, errors.New("partial recovery cannot prepare a catalog containing Cargo versions")
