@@ -37,6 +37,8 @@ func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
 	old := migrationFS(t, "sql/sqlite/000001_installation.sql", string(first)).(fstest.MapFS)
 	delete(old, "sql/sqlite/000018_cargo_repository_format.sql")
 	delete(old, "sql/postgres/000018_cargo_repository_format.sql")
+	delete(old, "sql/sqlite/000019_cargo_catalog.sql")
+	delete(old, "sql/postgres/000019_cargo_catalog.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 17 {
 		t.Fatalf("prepare v17 fixture: %+v err=%v", report, err)
 	}

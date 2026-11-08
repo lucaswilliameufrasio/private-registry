@@ -132,9 +132,16 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if inventoryErr == nil {
 		goInventory, inventoryErr = InventoryGo(ctx, inventoryTx, maxObjects, maxReferences)
 	}
+	var hasCargoVersions bool
+	if inventoryErr == nil {
+		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_cargo_versions)`).Scan(&hasCargoVersions)
+	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {
 		return result, errors.New("isolated SQLite recovery inventory could not be verified")
+	}
+	if hasCargoVersions {
+		return result, errors.New("partial recovery cannot prepare a catalog containing Cargo versions")
 	}
 	if _, err := VerifyGenericSetInventory(setEnvelope, trusted.Signer, trusted.InstallationID, trusted.BackupID, digest, inventory); err != nil {
 		return result, err
