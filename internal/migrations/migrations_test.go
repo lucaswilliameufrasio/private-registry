@@ -29,15 +29,15 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 22 {
+	if len(first.AppliedVersions) != 23 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
 	for index, version := range first.AppliedVersions {
 		if version != int64(index+1) {
-			t.Fatalf("migration %d at position %d; want sequential versions 1–22", version, index)
+			t.Fatalf("migration %d at position %d; want sequential versions 1–23", version, index)
 		}
 	}
-	if first.CurrentVersion != 22 || first.TargetVersion != 22 {
+	if first.CurrentVersion != 23 || first.TargetVersion != 23 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -60,14 +60,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 22 {
+	if succeeded != 23 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 22 {
+	if checksumCount != 23 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -264,6 +264,8 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 	delete(old, "sql/postgres/000021_cargo_reservations.sql")
 	delete(old, "sql/sqlite/000022_cargo_receipts.sql")
 	delete(old, "sql/postgres/000022_cargo_receipts.sql")
+	delete(old, "sql/sqlite/000023_cargo_review.sql")
+	delete(old, "sql/postgres/000023_cargo_review.sql")
 	report, err := migrateWithFS(ctx, db, cfg, old)
 	if err != nil || report.CurrentVersion != 16 {
 		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
@@ -287,8 +289,8 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err = Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 22 || len(report.AppliedVersions) != 6 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 {
-		t.Fatalf("upgrade to v22: report=%+v err=%v", report, err)
+	if err != nil || report.CurrentVersion != 23 || len(report.AppliedVersions) != 7 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 {
+		t.Fatalf("upgrade to v23: report=%+v err=%v", report, err)
 	}
 	var format, retained, status, publishedAt string
 	if err := db.QueryRowContext(ctx, `SELECT r.format, v.artifact_version_id, v.status, v.published_at FROM registry_repositories r JOIN registry_generic_artifact_versions v ON v.repository_id = r.repository_id WHERE r.repository_id = ?`, repositoryID).Scan(&format, &retained, &status, &publishedAt); err != nil || format != "generic" || retained != versionID || status != "published" || publishedAt != now {
@@ -337,6 +339,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000020_cargo_write_tokens.sql",
 		"sql/sqlite/000021_cargo_reservations.sql",
 		"sql/sqlite/000022_cargo_receipts.sql",
+		"sql/sqlite/000023_cargo_review.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
@@ -359,6 +362,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/postgres/000020_cargo_write_tokens.sql",
 		"sql/postgres/000021_cargo_reservations.sql",
 		"sql/postgres/000022_cargo_receipts.sql",
+		"sql/postgres/000023_cargo_review.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {

@@ -208,6 +208,167 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 	if err := db.QueryRowContext(ctx, `SELECT status, object_verified, review_hold FROM registry_cargo_reservations WHERE reservation_id = `+bind(1), reservation.ID).Scan(&status, &verified, &hold); err != nil || status != "uploaded" || verified != 1 || hold != 1 {
 		t.Fatalf("verified receipt missing or not held for review: %v", err)
 	}
+	reviewer := uuid.NewString()
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES (`+bind(1)+`, 'Reviewer', 'now', 'now')`, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspace_memberships (workspace_id, user_id, role, created_by, created_at, updated_at) VALUES (`+bind(1)+`, `+bind(2)+`, 'member', `+bind(3)+`, 'now', 'now')`, workspace, reviewer, user); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("review without explicit grant: %v", err)
+	}
+	if _, _, err := reservations.ListReviewCandidates(ctx, reviewer, workspace, repository, "", 10); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("review candidates visible without reviewer grant: %v", err)
+	}
+	if reader, _, err := receipts.OpenReviewArchive(ctx, reviewer, workspace, repository, reservation.ID); !errors.Is(err, repositories.ErrForbidden) {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("review archive accessible without reviewer grant: %v", err)
+	}
+	if _, err := repos.GrantCargoReviewer(ctx, user, workspace, repository, user); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, user, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, cargo.ErrReviewUnavailable) {
+		t.Fatalf("self approval accepted: %v", err)
+	}
+	if _, err := repos.GrantCargoReviewer(ctx, user, workspace, repository, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	candidates, more, err := reservations.ListReviewCandidates(ctx, reviewer, workspace, repository, "", 10)
+	if err != nil || more || len(candidates) != 1 || candidates[0].ID != reservation.ID || candidates[0].Name != "receipt_fixture" || candidates[0].PublisherID != user {
+		t.Fatalf("authorized review candidates incorrect: count=%d more=%t err=%v", len(candidates), more, err)
+	}
+	reviewArchive, reviewSize, err := receipts.OpenReviewArchive(ctx, reviewer, workspace, repository, reservation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBytes, readErr := io.ReadAll(reviewArchive)
+	closeErr := reviewArchive.Close()
+	if readErr != nil || closeErr != nil || reviewSize != int64(len(archive)) || !bytes.Equal(reviewBytes, archive) {
+		t.Fatal("authorized reviewer did not receive the verified archive")
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_cargo_review_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'cargo.review.approved' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", ""); err == nil {
+			t.Fatal("review approval succeeded without audit")
+		}
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_review_decisions WHERE reservation_id = ?`, reservation.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed review audit left a decision: count=%d err=%v", count, err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_cargo_review_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decision, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", "")
+	if err != nil || decision == "" {
+		t.Fatalf("review approval failed: %v", err)
+	}
+	type reviewResult struct {
+		id  string
+		err error
+	}
+	results := make(chan reviewResult, 2)
+	for range 2 {
+		go func() {
+			id, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", "")
+			results <- reviewResult{id: id, err: err}
+		}()
+	}
+	for range 2 {
+		result := <-results
+		if result.err != nil || result.id != decision {
+			t.Fatalf("concurrent approval retry did not reconcile: %v", result.err)
+		}
+	}
+	var decisionCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_review_decisions WHERE reservation_id = `+bind(1), reservation.ID).Scan(&decisionCount); err != nil || decisionCount != 1 {
+		t.Fatalf("concurrent retries created duplicate decisions: count=%d err=%v", decisionCount, err)
+	}
+	checkApproval := func() error {
+		return repos.WithCargoWriteTokenTransaction(ctx, token.Bearer, workspace, repository, func(tx *sql.Tx, publisher string) error {
+			return reservations.RequireCurrentApproval(ctx, tx, workspace, repository, reservation.ID, publisher)
+		})
+	}
+	if err := checkApproval(); err != nil {
+		t.Fatalf("current approval rejected: %v", err)
+	}
+	if err := repos.RevokeCargoReviewer(ctx, user, workspace, repository, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantCargoReviewer(ctx, user, workspace, repository, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("reviewer regrant revived approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); err != nil {
+		t.Fatalf("new approval rejected: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_users SET status = 'suspended' WHERE user_id = `+bind(1), reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_users SET status = 'active' WHERE user_id = `+bind(1), reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantCargoReviewer(ctx, user, workspace, repository, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("reviewer reactivation revived approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = repos.CargoReviewPolicy(ctx, user, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.SetCargoReviewPolicy(ctx, user, workspace, repository, policy.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("policy change did not invalidate approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "rejected", "synthetic rejection"); err != nil {
+		t.Fatal(err)
+	}
+	candidates, more, err = reservations.ListReviewCandidates(ctx, reviewer, workspace, repository, "", 10)
+	if err != nil || more || len(candidates) != 0 {
+		t.Fatalf("rejected receipt remained a candidate: count=%d more=%t err=%v", len(candidates), more, err)
+	}
+	if reader, _, err := receipts.OpenReviewArchive(ctx, reviewer, workspace, repository, reservation.ID); !errors.Is(err, cargo.ErrReviewUnavailable) {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("rejected review archive remained accessible: %v", err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("rejection did not supersede approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, cargo.ErrReviewUnavailable) {
+		t.Fatalf("terminal rejection was overridden: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_review_decisions SET decision = 'rejected' WHERE decision_id = `+bind(1), decision); err == nil {
+		t.Fatal("review decision was mutable")
+	}
+	policy, err = repos.CargoReviewPolicy(ctx, user, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.SetCargoReviewPolicy(ctx, user, workspace, repository, policy.Revision, false); err != nil {
+		t.Fatal(err)
+	}
 	var published int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_versions WHERE repository_id = `+bind(1), repository).Scan(&published); err != nil || published != 0 {
 		t.Fatalf("receipt became published: %v", err)
@@ -224,7 +385,7 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 		t.Fatal(err)
 	}
 	readback, readErr := io.ReadAll(object)
-	closeErr := object.Close()
+	closeErr = object.Close()
 	if readErr != nil || closeErr != nil || !bytes.Equal(readback, archive) {
 		t.Fatal("verified object readback differs")
 	}
@@ -349,6 +510,86 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 	}
 	if err := db.QueryRowContext(ctx, `SELECT status, object_verified FROM registry_cargo_reservations WHERE reservation_id = `+bind(1), reservation.ID).Scan(&status, &verified); err != nil || status != "uploaded" || verified != 1 {
 		t.Fatalf("verified receipt was expired: %v", err)
+	}
+	policy, err = repos.CargoReviewPolicy(ctx, user, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.SetCargoReviewPolicy(ctx, user, workspace, repository, policy.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	lastArchive := syntheticCrate(t, "1.0.5")
+	lastDigest := sha256.Sum256(lastArchive)
+	lastFrame := cargo.PublishFrame{Metadata: []byte(`{"name":"receipt_fixture","vers":"1.0.5","deps":[],"features":{}}`), Size: int64(len(lastArchive)), SHA256: hex.EncodeToString(lastDigest[:])}
+	lastReservation, err := reservations.Reserve(ctx, token.Bearer, workspace, repository, lastFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receipts.Receive(ctx, token.Bearer, workspace, repository, lastReservation.ID, lastFrame, bytes.NewReader(lastArchive)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	raceArchive := syntheticCrate(t, "1.0.6")
+	raceDigest := sha256.Sum256(raceArchive)
+	raceFrame := cargo.PublishFrame{Metadata: []byte(`{"name":"receipt_fixture","vers":"1.0.6","deps":[],"features":{}}`), Size: int64(len(raceArchive)), SHA256: hex.EncodeToString(raceDigest[:])}
+	raceReservation, err := reservations.Reserve(ctx, token.Bearer, workspace, repository, raceFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receipts.Receive(ctx, token.Bearer, workspace, repository, raceReservation.ID, raceFrame, bytes.NewReader(raceArchive)); err != nil {
+		t.Fatal(err)
+	}
+	raceResults := make(chan reviewResult, 2)
+	go func() {
+		id, err := reservations.DecideReview(ctx, reviewer, workspace, repository, raceReservation.ID, "approved", "")
+		raceResults <- reviewResult{id: id, err: err}
+	}()
+	go func() {
+		id, err := reservations.DecideReview(ctx, reviewer, workspace, repository, raceReservation.ID, "rejected", "synthetic concurrent rejection")
+		raceResults <- reviewResult{id: id, err: err}
+	}()
+	for range 2 {
+		result := <-raceResults
+		if result.err != nil && !errors.Is(result.err, cargo.ErrReviewUnavailable) {
+			t.Fatalf("unexpected concurrent review result: %v", result.err)
+		}
+	}
+	var lastDecision string
+	if err := db.QueryRowContext(ctx, `SELECT decision FROM registry_cargo_review_decisions WHERE reservation_id = `+bind(1)+` ORDER BY decision_sequence DESC LIMIT 1`, raceReservation.ID).Scan(&lastDecision); err != nil || lastDecision != "rejected" {
+		t.Fatalf("concurrent rejection was not terminal: decision=%q err=%v", lastDecision, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET recovery_invalidated = 1 WHERE reservation_id = `+bind(1), raceReservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	err = repos.WithCargoWriteTokenTransaction(ctx, token.Bearer, workspace, repository, func(tx *sql.Tx, publisher string) error {
+		return reservations.RequireCurrentApproval(ctx, tx, workspace, repository, raceReservation.ID, publisher)
+	})
+	if !errors.Is(err, cargo.ErrReviewUnavailable) {
+		t.Fatalf("recovery-invalidated receipt remained reviewable: %v", err)
+	}
+	if err := repos.RevokeRepositoryRole(ctx, user, workspace, repository, user, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "approved", ""); !errors.Is(err, cargo.ErrReviewUnavailable) {
+		t.Fatalf("approval retry accepted revoked publisher grant: %v", err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, user, workspace, repository, user, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	newToken, err := repos.IssueCargoWriteToken(ctx, user, workspace, repository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = repos.WithCargoWriteTokenTransaction(ctx, newToken.Bearer, workspace, repository, func(tx *sql.Tx, publisher string) error {
+		return reservations.RequireCurrentApproval(ctx, tx, workspace, repository, lastReservation.ID, publisher)
+	})
+	if !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("publisher regrant revived approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "approved", ""); !errors.Is(err, cargo.ErrReviewUnavailable) {
+		t.Fatalf("review accepted receipt bound to old publisher grant: %v", err)
 	}
 }
 

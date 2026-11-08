@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
+	"private-registry/internal/cargo"
 	"private-registry/internal/gomod"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
@@ -40,6 +41,8 @@ type AuthHTTPConfig struct {
 	TrustedProxies         []netip.Prefix
 	PublicAssetCORSOrigins []string
 	GoModules              *gomod.Service
+	CargoReservations      *cargo.ReservationService
+	CargoReceipts          *cargo.ReceiptService
 }
 
 type authHTTP struct {
@@ -48,6 +51,8 @@ type authHTTP struct {
 	repositories           *repositories.Service
 	artifacts              *artifacts.Service
 	goModules              *gomod.Service
+	cargoReservations      *cargo.ReservationService
+	cargoReceipts          *cargo.ReceiptService
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -244,6 +249,8 @@ func NewHandler(
 		repositories:           repositoryService,
 		artifacts:              artifactService,
 		goModules:              cfg.GoModules,
+		cargoReservations:      cfg.CargoReservations,
+		cargoReceipts:          cfg.CargoReceipts,
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -303,6 +310,9 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 		router.Get("/go/{workspaceID}/{repositoryID}/*", h.goModuleProxy)
 		router.Head("/go/{workspaceID}/{repositoryID}/*", h.goModuleProxy)
 		h.registerGoManagementRoutes(router)
+	}
+	if h.cargoReservations != nil && h.cargoReceipts != nil {
+		h.registerCargoReviewRoutes(router)
 	}
 }
 

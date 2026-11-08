@@ -29,6 +29,7 @@ import (
 	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
 	"private-registry/internal/bootstrap"
+	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/jobs"
@@ -791,6 +792,27 @@ func TestPublicAssetCORSRejectsUnsafeOrigins(t *testing.T) {
 
 func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *testing.T) {
 	fixture := newAuthHTTPFixtureWithConfig(t, AuthHTTPConfig{CanonicalOrigin: authTestOrigin, AssetOrigin: authTestAssetOrigin, PublicAssetCORSOrigins: []string{"https://consumer.example"}})
+	root := t.TempDir()
+	staging := filepath.Join(root, "cargo-staging")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := storage.NewFileSystem(filepath.Join(root, "cargo-objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservations, err := cargo.NewReservationService(fixture.db, fixture.repositoryService, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, err := cargo.NewReceiptService(fixture.db, fixture.repositoryService, config.SQLite, objects, cargo.ReceiptOptions{StagingDirectory: staging, Limits: cargo.ArchiveLimits{MaxCompressedBytes: 1 << 20, MaxUncompressedBytes: 1 << 20, MaxFiles: 100, MaxManifestBytes: 4096}, MaxConcurrent: 1, CurrentIndex: "sparse+https://registry.example/index/", DefaultIndex: "https://github.com/rust-lang/crates.io-index"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.handler, err = NewHandler(NewHealth(fixture.db), fixture.service, fixture.workspaceService, fixture.repositoryService, fixture.artifactService, AuthHTTPConfig{CanonicalOrigin: authTestOrigin, AssetOrigin: authTestAssetOrigin, PublicAssetCORSOrigins: []string{"https://consumer.example"}, CargoReservations: reservations, CargoReceipts: receipts})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	var ownerID string
 	if err := fixture.db.QueryRowContext(ctx, "SELECT user_id FROM registry_instance_admins").Scan(&ownerID); err != nil {
@@ -820,6 +842,7 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		t.Fatal(err)
 	}
 	cargoIssuePath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/cargo-write-tokens", workspace.ID, cargoRepository)
+	cargoReviewBase := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/cargo", workspace.ID, cargoRepository)
 
 	login := authHTTPRequest(fixture.handler, http.MethodPost, "/api/v1/auth/login",
 		fmt.Sprintf(`{"login_name":%q,"password":%q}`, authTestLogin, authTestPassword),
@@ -835,6 +858,9 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	}
 	if preMFA := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value); preMFA.Code == http.StatusCreated {
 		t.Fatal("Cargo write token was issued before MFA")
+	}
+	if preMFA := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, cargoReviewBase+"/reviewers/"+ownerID, "", authTestOrigin, "registry.example", enrollmentCookies, enrollmentCookies[csrfCookieName].Value); preMFA.Code == http.StatusOK {
+		t.Fatal("Cargo reviewer granted before MFA")
 	}
 	beginEnrollment := authHTTPRequestWithCookies(fixture.handler, http.MethodPost,
 		"/api/v1/auth/mfa/enrollment", "", authTestOrigin, "registry.example",
@@ -1094,6 +1120,31 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		t.Fatalf("conditional public request after privatization = %d", privateAgain.Code)
 	}
 	tokenIssuePath := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/personal-read-tokens", workspace.ID, repository.ID)
+	policyPath := cargoReviewBase + "/review-policy"
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, policyPath, `{"required":true,"expected_revision":0}`, authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo review policy changed without CSRF: %d", denied.Code)
+	}
+	if updated := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, policyPath, `{"required":true,"expected_revision":0}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); updated.Code != http.StatusOK {
+		t.Fatalf("Cargo review policy update failed: %d", updated.Code)
+	}
+	if stale := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, policyPath, `{"required":false,"expected_revision":0}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); stale.Code != http.StatusConflict {
+		t.Fatalf("stale Cargo review policy accepted: %d", stale.Code)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, cargoReviewBase+"/reviewers/"+ownerID, "", authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo reviewer grant without CSRF: %d", denied.Code)
+	}
+	if granted := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, cargoReviewBase+"/reviewers/"+ownerID, "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); granted.Code != http.StatusOK {
+		t.Fatalf("Cargo reviewer grant failed: %d", granted.Code)
+	}
+	if list := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, cargoReviewBase+"/reviews", "", authTestOrigin, "registry.example", mfaCookies, ""); list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"reviews":[]`) || !strings.Contains(list.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("Cargo review list failed: %d", list.Code)
+	}
+	if revoked := authHTTPRequestWithCookies(fixture.handler, http.MethodDelete, cargoReviewBase+"/reviewers/"+ownerID, "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); revoked.Code != http.StatusNoContent {
+		t.Fatalf("Cargo reviewer revoke failed: %d", revoked.Code)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, cargoReviewBase+"/reviews", "", authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo review list visible after grant revocation: %d", denied.Code)
+	}
 	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("Cargo credential issuance without CSRF: %d", denied.Code)
 	}
@@ -1101,6 +1152,92 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	var cargoCredential issuedPersonalTokenResponse
 	if cargoIssue.Code != http.StatusCreated || json.Unmarshal(cargoIssue.Body.Bytes(), &cargoCredential) != nil || cargoCredential.Bearer == "" || cargoCredential.Token.TokenID == "" || cargoIssue.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cargo credential issuance failed: status=%d", cargoIssue.Code)
+	}
+	reviewCtx, reviewCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer reviewCancel()
+	publisher := uuid.NewString()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES (?, 'Synthetic publisher', 'now', 'now')`, publisher); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.workspaceService.SetMembershipRole(ctx, ownerID, workspace.ID, publisher, workspaces.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, ownerID, workspace.ID, cargoRepository, publisher, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	publisherToken, err := fixture.repositoryService.IssueCargoWriteToken(ctx, publisher, workspace.ID, cargoRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := fixture.repositoryService.CargoReviewPolicy(ctx, ownerID, workspace.ID, cargoRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repositoryService.SetCargoReviewPolicy(ctx, ownerID, workspace.ID, cargoRepository, policy.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	syntheticArchive := []byte("synthetic review archive")
+	stored, err := objects.Put(reviewCtx, workspace.ID, bytes.NewReader(syntheticArchive), int64(len(syntheticArchive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := cargo.PublishFrame{Metadata: []byte(`{"name":"review_fixture","vers":"1.0.0","deps":[],"features":{}}`), Size: int64(len(syntheticArchive)), SHA256: stored.Key.SHA256}
+	var originalQuota sql.NullInt64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT logical_quota_bytes FROM registry_workspaces WHERE workspace_id = ?`, workspace.ID).Scan(&originalQuota); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = NULL WHERE workspace_id = ?`, workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := reservations.Reserve(reviewCtx, publisherToken.Bearer, workspace.ID, cargoRepository, frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = ? WHERE workspace_id = ?`, originalQuota, workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploading', upload_claim_id = ? WHERE reservation_id = ?`, uuid.NewString(), reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, index_entry = '{}' WHERE reservation_id = ?`, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	reviewPath := cargoReviewBase + "/reviews/" + reservation.ID
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, reviewPath+"/approve", "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo review approved without reviewer grant: %d", denied.Code)
+	}
+	if _, err := fixture.repositoryService.GrantCargoReviewer(ctx, ownerID, workspace.ID, cargoRepository, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	reviewDownload := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "https://registry.example"+reviewPath+"/archive", nil)
+		request.Host = "registry.example"
+		request.TLS = &tls.ConnectionState{}
+		request.RemoteAddr = "192.0.2.10:54321"
+		for _, cookie := range mfaCookies {
+			request.AddCookie(cookie)
+		}
+		recorder := httptest.NewRecorder()
+		fixture.handler.ServeHTTP(testDeadlineResponse{ResponseRecorder: recorder}, request)
+		return recorder
+	}
+	if download := reviewDownload(); download.Code != http.StatusOK || !bytes.Equal(download.Body.Bytes(), syntheticArchive) || !strings.Contains(download.Header().Get("Cache-Control"), "no-store") || download.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("Cargo review archive download failed: %d", download.Code)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, reviewPath+"/approve", "", authTestOrigin, "registry.example", mfaCookies, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo review approved without CSRF: %d", denied.Code)
+	}
+	if approved := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, reviewPath+"/approve", "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); approved.Code != http.StatusNoContent {
+		t.Fatalf("Cargo review approval failed: %d", approved.Code)
+	}
+	if rejected := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, reviewPath+"/reject", `{"reason":"synthetic rejection"}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); rejected.Code != http.StatusNoContent {
+		t.Fatalf("Cargo review rejection failed: %d", rejected.Code)
+	}
+	if denied := reviewDownload(); denied.Code != http.StatusNotFound {
+		t.Fatalf("rejected Cargo review archive still accessible: %d", denied.Code)
+	}
+	if list := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, cargoReviewBase+"/reviews", "", authTestOrigin, "registry.example", mfaCookies, ""); list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"reviews":[]`) {
+		t.Fatalf("rejected Cargo receipt remains listed: %d", list.Code)
 	}
 	cargoList := authHTTPRequestWithCookies(fixture.handler, http.MethodGet, "/api/v1/cargo-write-tokens", "", authTestOrigin, "registry.example", mfaCookies, "")
 	var cargoTokens personalTokenListResponse
@@ -1132,6 +1269,12 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 	}
 	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, cargoIssuePath, `{}`, authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); denied.Code != http.StatusForbidden {
 		t.Fatalf("Cargo credential issuance with stale MFA: %d", denied.Code)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPut, cargoReviewBase+"/reviewers/"+ownerID, "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo reviewer grant with stale MFA: %d", denied.Code)
+	}
+	if denied := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, reviewPath+"/approve", "", authTestOrigin, "registry.example", mfaCookies, mfaCookies[csrfCookieName].Value); denied.Code != http.StatusForbidden {
+		t.Fatalf("Cargo review approval with stale MFA: %d", denied.Code)
 	}
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_auth_sessions SET mfa_verified_at = ? WHERE user_id = ? AND level = 'mfa' AND revoked_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), ownerID); err != nil {
 		t.Fatal(err)
@@ -1267,6 +1410,12 @@ func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *test
 		t.Fatalf("publication retry after grant revocation status=%d body=%s; want 403", retry.Code, retry.Body.String())
 	}
 }
+
+type testDeadlineResponse struct{ *httptest.ResponseRecorder }
+
+func (testDeadlineResponse) SetWriteDeadline(time.Time) error { return nil }
+
+func (testDeadlineResponse) SetReadDeadline(time.Time) error { return nil }
 
 func TestAuthHTTPRejectsMalformedOrAmbiguousJSON(t *testing.T) {
 	fixture := newAuthHTTPFixture(t)
@@ -1446,7 +1595,7 @@ func authHTTPRequestWithCookies(
 		request.Header.Set(csrfHeaderName, csrfHeader)
 	}
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	handler.ServeHTTP(testDeadlineResponse{ResponseRecorder: response}, request)
 	return response
 }
 
