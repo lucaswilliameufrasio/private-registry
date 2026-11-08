@@ -166,7 +166,7 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	}
 	var hasPubVersions bool
 	if inventoryErr == nil {
-		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_pub_versions)`).Scan(&hasPubVersions)
+		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_pub_versions UNION ALL SELECT 1 FROM registry_pub_reservations WHERE object_verified = 1)`).Scan(&hasPubVersions)
 	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {

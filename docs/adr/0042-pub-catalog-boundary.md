@@ -26,3 +26,9 @@ O upgrade e rollback injetado da v35, o ciclo de vida do token e as verificaçõ
 A migration v36 adiciona reservas limitadas por identidade Pub e credencial de publicação, com expiração lazy, cancelamento auditado e quota compartilhada com os formatos já implementados. Retentativa idêntica reconcilia a mesma reserva; metadados diferentes para a mesma identidade não são aceitos. A reserva não recebe nem verifica conteúdo, não cria publicação e não habilita rotas. A cópia de recovery isolado expira e invalida reservas ativas, sem alterar a origem.
 
 Os testes focados de migration, quota, concorrência e recovery passaram três vezes com race em SQLite e PostgreSQL, incluindo a quota Pub → Go. O `make verify` integral passou após a inclusão dessa regressão. Upload, revisão, publicação, leitura e recovery completo continuam obrigatórios.
+
+## Recebimento experimental
+
+A v37 acrescenta inspeção limitada de arquivo e manifesto, staging privado, leitura de volta do objeto e recibo auditado após nova autorização. Um recibo não é publicação e não habilita rotas. Uploads interrompidos podem deixar uma reivindicação não verificada até expiração; recoveries parciais recusam recibos Pub verificados, preservando o marcador de recuperação incompleta.
+
+As provas focadas do schema v37 passaram três vezes com race em SQLite e PostgreSQL, incluindo upgrade e rollback injetado com preservação das reservas, autorização antes da leitura, concorrência, quota em `uploading` e `uploaded`, auditoria e recovery parcial; Floci foi usado como fixture de armazenamento. O `make verify` integral passou no checkout conciliado, incluindo integrações repetidas e race. Floci não comprova atomicidade de S3 real.

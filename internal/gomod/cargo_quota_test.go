@@ -207,15 +207,32 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pubService.Reserve(ctx, pubToken.Bearer, workspace, pubRepo, pub.ReservationRequest{Name: "reserved", Version: "1.0.0", TarballSHA256: strings.Repeat("f", 64), TarballSize: 1, MetadataSHA256: strings.Repeat("d", 64)}); err != nil {
-		t.Fatal(err)
-	}
-	tx, err = db.BeginTx(ctx, nil)
+	pubReservation, err := pubService.Reserve(ctx, pubToken.Bearer, workspace, pubRepo, pub.ReservationRequest{Name: "reserved", Version: "1.0.0", TarballSHA256: strings.Repeat("f", 64), TarballSize: 1, MetadataSHA256: strings.Repeat("d", 64)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
-	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); !errors.Is(err, ErrQuotaExceeded) {
-		t.Fatalf("Pub version and reservation did not count towards Go quota: %v", err)
+	for _, state := range []string{"reserved", "uploading", "uploaded"} {
+		if state == "uploading" {
+			query = `UPDATE registry_pub_reservations SET status = 'uploading', upload_claim_id = ` + bind(1) + ` WHERE reservation_id = ` + bind(2)
+			if _, err := db.ExecContext(ctx, query, uuid.NewString(), pubReservation.ID); err != nil {
+				t.Fatal(err)
+			}
+		} else if state == "uploaded" {
+			query = `UPDATE registry_pub_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, manifest = 'fixture' WHERE reservation_id = ` + bind(1)
+			if _, err := db.ExecContext(ctx, query, pubReservation.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		tx, err = db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); !errors.Is(err, ErrQuotaExceeded) {
+			_ = tx.Rollback()
+			t.Fatalf("Pub %s did not count towards Go quota: %v", state, err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

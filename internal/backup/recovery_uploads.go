@@ -71,7 +71,7 @@ func InvalidateRestoredUploads(ctx context.Context, tx *sql.Tx, driver config.Da
 		return 0, errors.New("recovered npm reservations could not be counted; rollback required")
 	}
 	count += npmCount
-	pubUpdated, err := tx.ExecContext(ctx, `UPDATE registry_pub_reservations SET recovery_invalidated = 1, status = 'expired' WHERE status = 'reserved' AND recovery_invalidated = 0`)
+	pubUpdated, err := tx.ExecContext(ctx, `UPDATE registry_pub_reservations SET recovery_invalidated = 1, status = CASE WHEN status IN ('reserved', 'uploading') THEN 'expired' ELSE status END, upload_claim_id = NULL WHERE status IN ('reserved', 'uploading', 'uploaded') AND recovery_invalidated = 0`)
 	if err != nil {
 		return 0, errors.New("recovered Pub reservations could not be invalidated; rollback required")
 	}

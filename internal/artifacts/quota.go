@@ -55,7 +55,7 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubUsage); err != nil || pubUsage < 0 {
 			return errors.New("workspace Pub quota usage could not be checked")
 		}
-		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status = 'reserved'`
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubReserved); err != nil || pubReserved < 0 {
 			return errors.New("workspace Pub quota reservations could not be checked")
 		}

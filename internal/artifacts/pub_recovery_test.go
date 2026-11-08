@@ -16,10 +16,22 @@ import (
 	"filippo.io/age"
 	"github.com/google/uuid"
 	"private-registry/internal/backup"
+	"private-registry/internal/config"
+	"private-registry/internal/pub"
+	"private-registry/internal/repositories"
 	"private-registry/internal/spikes/sqlitebackup"
 )
 
 func TestPartialRecoveryRejectsPubVersionsWithoutChangingSource(t *testing.T) {
+	for _, kind := range []string{"version", "receipt"} {
+		t.Run(kind, func(t *testing.T) {
+			exercisePartialRecoveryRejectsPub(t, kind)
+		})
+	}
+}
+
+func exercisePartialRecoveryRejectsPub(t *testing.T, kind string) {
+	t.Helper()
 	fixture := newArtifactFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -28,11 +40,37 @@ func TestPartialRecoveryRejectsPubVersionsWithoutChangingSource(t *testing.T) {
 	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'pub-recovery', 'pub', ?, 'now', 'now', 'pub')`, repository, fixture.workspaceID, owner); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_pub_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (?, ?, ?, 'fixture', ?, 'now')`, pkg, fixture.workspaceID, repository, owner); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_pub_versions (pub_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, created_by, created_at) VALUES (?, ?, ?, ?, '1.0.0', '1.0.0', 'name: fixture', ?, 9, ?, 'now')`, version, fixture.workspaceID, repository, pkg, strings.Repeat("a", 64), owner); err != nil {
-		t.Fatal(err)
+	if kind == "version" {
+		if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_pub_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (?, ?, ?, 'fixture', ?, 'now')`, pkg, fixture.workspaceID, repository, owner); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_pub_versions (pub_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, created_by, created_at) VALUES (?, ?, ?, ?, '1.0.0', '1.0.0', 'name: fixture', ?, 9, ?, 'now')`, version, fixture.workspaceID, repository, pkg, strings.Repeat("a", 64), owner); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		publisher := fixture.userIDs["publisher"]
+		if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, owner, fixture.workspaceID, repository, publisher, repositories.GrantPublisher); err != nil {
+			t.Fatal(err)
+		}
+		token, err := fixture.repositoryService.IssuePubWriteToken(ctx, publisher, fixture.workspaceID, repository, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		service, err := pub.NewReservationService(fixture.db, fixture.repositoryService, config.SQLite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reservation, err := service.Reserve(ctx, token.Bearer, fixture.workspaceID, repository, pub.ReservationRequest{Name: "fixture", Version: "1.0.0", TarballSHA256: strings.Repeat("a", 64), TarballSize: 9, MetadataSHA256: strings.Repeat("b", 64)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		version = reservation.ID
+		if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_pub_reservations SET status = 'uploading', upload_claim_id = ? WHERE reservation_id = ?`, uuid.NewString(), version); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_pub_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, manifest = 'name: fixture' WHERE reservation_id = ?`, version); err != nil {
+			t.Fatal(err)
+		}
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "snapshot.sqlite")
@@ -121,6 +159,9 @@ func TestPartialRecoveryRejectsPubVersionsWithoutChangingSource(t *testing.T) {
 	}
 	var count int
 	query := `SELECT count(*) FROM registry_pub_versions WHERE pub_version_id = ? AND tarball_sha256 = ?`
+	if kind == "receipt" {
+		query = `SELECT count(*) FROM registry_pub_reservations WHERE reservation_id = ? AND tarball_sha256 = ? AND status = 'uploaded' AND object_verified = 1`
+	}
 	if err := fixture.db.QueryRowContext(ctx, query, version, strings.Repeat("a", 64)).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("source Pub version changed: count=%d err=%v", count, err)
 	}

@@ -153,6 +153,23 @@ func exercisePubReservationQuotaAndLifecycle(t *testing.T, artifacts *Service, d
 	if _, err := npmService.Reserve(ctx, npmToken.Bearer, workspace, npmRepository, npmRequest); !errors.Is(err, npm.ErrReservationQuota) {
 		t.Fatalf("Pub reservation not counted by npm quota: %v", err)
 	}
+	query = `UPDATE registry_pub_reservations SET status = 'uploading', upload_claim_id = ` + p(1) + ` WHERE reservation_id = ` + p(2)
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.StartUpload(ctx, actor, workspace, genericRepository, requestFor("pub-uploading", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
+		t.Fatalf("uploading Pub reservation not counted by generic quota: %v", err)
+	}
+	if _, err := cargoService.Reserve(ctx, cargoToken.Bearer, workspace, cargoRepository, frame); !errors.Is(err, cargo.ErrReservationQuota) {
+		t.Fatalf("uploading Pub reservation not counted by Cargo quota: %v", err)
+	}
+	if _, err := npmService.Reserve(ctx, npmToken.Bearer, workspace, npmRepository, npmRequest); !errors.Is(err, npm.ErrReservationQuota) {
+		t.Fatalf("uploading Pub reservation not counted by npm quota: %v", err)
+	}
+	query = `UPDATE registry_pub_reservations SET status = 'reserved', upload_claim_id = NULL WHERE reservation_id = ` + p(1)
+	if _, err := db.ExecContext(ctx, query, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
 	other := request
 	other.Name = "second"
 	other.TarballSize = 4
@@ -240,6 +257,27 @@ func exercisePubReservationQuotaAndLifecycle(t *testing.T, artifacts *Service, d
 	first, second = <-results, <-results
 	if !((first.err == nil && errors.Is(second.err, pub.ErrReservationConflict)) || (second.err == nil && errors.Is(first.err, pub.ErrReservationConflict))) {
 		t.Fatalf("competing pub reservations did not select one winner: %v %v", first.err, second.err)
+	}
+	winner := first.reservation
+	if first.err != nil {
+		winner = second.reservation
+	}
+	query = `UPDATE registry_pub_reservations SET status = 'uploading', upload_claim_id = ` + p(1) + ` WHERE reservation_id = ` + p(2)
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), winner.ID); err != nil {
+		t.Fatal(err)
+	}
+	query = `UPDATE registry_pub_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, manifest = 'fixture' WHERE reservation_id = ` + p(1)
+	if _, err := db.ExecContext(ctx, query, winner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.StartUpload(ctx, actor, workspace, genericRepository, requestFor("pub-uploaded", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
+		t.Fatalf("uploaded Pub receipt not counted by generic quota: %v", err)
+	}
+	if _, err := cargoService.Reserve(ctx, cargoToken.Bearer, workspace, cargoRepository, frame); !errors.Is(err, cargo.ErrReservationQuota) {
+		t.Fatalf("uploaded Pub receipt not counted by Cargo quota: %v", err)
+	}
+	if _, err := npmService.Reserve(ctx, npmToken.Bearer, workspace, npmRepository, npmRequest); !errors.Is(err, npm.ErrReservationQuota) {
+		t.Fatalf("uploaded Pub receipt not counted by npm quota: %v", err)
 	}
 	if err := artifacts.repositories.RevokeRepositoryRole(ctx, owner, workspace, repository, actor, repositories.GrantPublisher); err != nil {
 		t.Fatal(err)

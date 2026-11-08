@@ -488,4 +488,5 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	exercisePubReservationQuotaAndLifecycle(t, service, db, config.Postgres, publisherID, pubWorkspace, pubGeneric)
+	exercisePubReceiptBoundaryV37(t, db, config.Postgres, repositoryService, objectStore, workspaceID, ownerID, publisherID)
 }

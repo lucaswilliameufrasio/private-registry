@@ -85,17 +85,17 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 			return repositories.ErrPubWriteTokenUnavailable
 		}
 		now := time.Now().UTC().Truncate(time.Millisecond)
-		query := `UPDATE registry_pub_reservations SET status = 'expired' WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND status = 'reserved' AND expires_at_ms <= ` + s.bind(3)
+		query := `UPDATE registry_pub_reservations SET status = 'expired', upload_claim_id = NULL WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND status IN ('reserved', 'uploading') AND expires_at_ms <= ` + s.bind(3)
 		if _, err := tx.ExecContext(ctx, query, repository, request.Name, now.UnixMilli()); err != nil {
 			return errors.New("expired pub reservation could not be reconciled")
 		}
-		query = `SELECT reservation_id, version, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated, status FROM registry_pub_reservations WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status = 'reserved'`
+		query = `SELECT reservation_id, version, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated, status FROM registry_pub_reservations WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
 		var id, version, digest, metadata, storedToken, storedActor, status string
 		var size, expires int64
 		var invalidated int
 		err := tx.QueryRowContext(ctx, query, repository, request.Name, identity).Scan(&id, &version, &digest, &size, &metadata, &storedToken, &storedActor, &expires, &invalidated, &status)
 		if err == nil {
-			if version != request.Version || digest != request.TarballSHA256 || size != request.TarballSize || metadata != request.MetadataSHA256 || storedToken != tokenID || storedActor != actor || invalidated != 0 || expires <= now.UnixMilli() {
+			if version != request.Version || digest != request.TarballSHA256 || size != request.TarballSize || metadata != request.MetadataSHA256 || storedToken != tokenID || storedActor != actor || invalidated != 0 || (status != "uploaded" && expires <= now.UnixMilli()) {
 				return ErrReservationConflict
 			}
 			result = Reservation{ID: id, ExpiresAt: time.UnixMilli(expires).UTC()}
@@ -172,7 +172,7 @@ func (s *ReservationService) checkQuota(ctx context.Context, tx *sql.Tx, workspa
 			{"registry_npm_versions", "tarball_size", ""},
 			{"registry_npm_reservations", "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)"},
 			{"registry_pub_versions", "tarball_size", ""},
-			{"registry_pub_reservations", "tarball_size", " AND status = 'reserved'"},
+			{"registry_pub_reservations", "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded')"},
 		} {
 			if limit.repository && source.table != "registry_pub_versions" && source.table != "registry_pub_reservations" {
 				continue
