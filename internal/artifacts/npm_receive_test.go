@@ -403,11 +403,21 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	if _, err := reservations.DecideReview(ctx, owner, workspace, publicationRepo, publicationReservation.ID, "approved", ""); err != nil {
 		t.Fatal(err)
 	}
+	initialTags := map[string]string{"initial": request.Version}
+	if _, err := reservations.PublishReceiptWithInitialTags(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID, initialTags); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("npm publication created tags without separate grant: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_versions WHERE repository_id = `+p(1), publicationRepo).Scan(&catalogCount); err != nil || catalogCount != 0 {
+		t.Fatalf("denied initial tags left published version: count=%d err=%v", catalogCount, err)
+	}
+	if _, err := repos.GrantNPMTagManager(ctx, owner, workspace, publicationRepo, publisher); err != nil {
+		t.Fatal(err)
+	}
 	if driver == config.SQLite {
 		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_npm_publication_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'npm.publication.created' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := reservations.PublishReceipt(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID); err == nil {
+		if _, err := reservations.PublishReceiptWithInitialTags(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID, initialTags); err == nil {
 			t.Fatal("npm publication succeeded without audit")
 		}
 		var count int
@@ -420,6 +430,9 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_versions WHERE repository_id = ?`, publicationRepo).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("failed npm publication audit left version: count=%d err=%v", count, err)
 		}
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_dist_tags WHERE repository_id = ?`, publicationRepo).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed npm publication audit left tag: count=%d err=%v", count, err)
+		}
 		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_npm_publication_audit_failure`); err != nil {
 			t.Fatal(err)
 		}
@@ -430,7 +443,7 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	}, 2)
 	for range 2 {
 		go func() {
-			id, err := reservations.PublishReceipt(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID)
+			id, err := reservations.PublishReceiptWithInitialTags(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID, initialTags)
 			publicationResults <- struct {
 				id  string
 				err error
@@ -440,6 +453,89 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	firstPublication, secondPublication := <-publicationResults, <-publicationResults
 	if firstPublication.err != nil || secondPublication.err != nil || firstPublication.id == "" || firstPublication.id != secondPublication.id {
 		t.Fatalf("concurrent npm publication retry failed: %v %v", firstPublication.err, secondPublication.err)
+	}
+	retryReservation, err := reservations.Reserve(ctx, publicationToken.Bearer, workspace, publicationRepo, request)
+	if err != nil || retryReservation.ID != publicationReservation.ID {
+		t.Fatalf("published npm retry did not recover original reservation: %v", err)
+	}
+	alternateToken, err := repos.IssueNPMWriteToken(ctx, publisher, workspace, publicationRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.Reserve(ctx, alternateToken.Bearer, workspace, publicationRepo, request); !errors.Is(err, npm.ErrReservationConflict) {
+		t.Fatalf("different credential reused npm publication: %v", err)
+	}
+	changedRequest := request
+	changedRequest.TarballSHA256 = strings.Repeat("f", 64)
+	if _, err := reservations.Reserve(ctx, publicationToken.Bearer, workspace, publicationRepo, changedRequest); !errors.Is(err, npm.ErrReservationConflict) {
+		t.Fatalf("different npm publication content reused receipt: %v", err)
+	}
+	if err := repos.RevokeNPMTagManager(ctx, owner, workspace, publicationRepo, publisher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.PublishReceiptWithInitialTags(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID, initialTags); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("revoked tag manager retried npm publication with tags: %v", err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, publicationRepo, owner, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	readToken, err := repos.IssuePersonalReadToken(ctx, owner, workspace, publicationRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRead := countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, publicationToken.Bearer, workspace, publicationRepo, request.Name, request.Version); err == nil || reader != nil {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("npm write credential opened published archive: %v", err)
+	}
+	if countedObjects.opens.Load() != beforeRead {
+		t.Fatal("unauthorized published npm read touched storage")
+	}
+	publishedReader, publishedSize, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, publicationRepo, request.Name, request.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedBytes, readErr := io.ReadAll(publishedReader)
+	closeErr = publishedReader.Close()
+	if readErr != nil || closeErr != nil || publishedSize != int64(len(content)) || !bytes.Equal(publishedBytes, content) {
+		t.Fatalf("published npm archive differs: read=%v close=%v", readErr, closeErr)
+	}
+	beforeRead = countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, repository, request.Name, request.Version); err == nil || reader != nil {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("npm read token opened a different repository: %v", err)
+	}
+	if countedObjects.opens.Load() != beforeRead {
+		t.Fatal("cross-repository npm read touched storage")
+	}
+	if err := repos.RevokeRepositoryRole(ctx, owner, workspace, publicationRepo, owner, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	beforeRead = countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, publicationRepo, request.Name, request.Version); err == nil || reader != nil {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("revoked reader opened npm archive: %v", err)
+	}
+	if countedObjects.opens.Load() != beforeRead {
+		t.Fatal("revoked published npm read touched storage")
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, publicationRepo, owner, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, publicationRepo, request.Name, request.Version); err == nil || reader != nil {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("reader regrant revived old npm read token: %v", err)
+	}
+	if countedObjects.opens.Load() != beforeRead {
+		t.Fatal("regranted npm read touched storage using old token")
 	}
 	var publicationAuditCount int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events WHERE action = 'npm.publication.created' AND target_id = `+p(1), firstPublication.id).Scan(&publicationAuditCount); err != nil || publicationAuditCount != 1 {
@@ -451,6 +547,132 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	if candidates, _, err := reservations.ListReviewCandidates(ctx, owner, workspace, publicationRepo, "", 10); err != nil || len(candidates) != 0 {
 		t.Fatalf("published npm receipt remained a review candidate: %v", err)
 	}
+	if _, err := reservations.SetDistTag(ctx, publisher, workspace, publicationRepo, request.Name, "latest", request.Version, 0); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("publisher moved npm tag without separate grant: %v", err)
+	}
+	if _, err := repos.GrantNPMTagManager(ctx, owner, workspace, publicationRepo, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", "2.0.0", 0); !errors.Is(err, npm.ErrTagUnavailable) {
+		t.Fatalf("npm tag pointed at missing version: %v", err)
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_npm_tag_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'npm.tag.updated' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", request.Version, 0); err == nil {
+			t.Fatal("npm tag change succeeded without audit")
+		}
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_dist_tags WHERE repository_id = ? AND tag = 'latest'`, publicationRepo).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed tag audit left state: count=%d err=%v", count, err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_npm_tag_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tagResults := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", request.Version, 0)
+			tagResults <- err
+		}()
+	}
+	firstTag, secondTag := <-tagResults, <-tagResults
+	if !((firstTag == nil && errors.Is(secondTag, npm.ErrTagConflict)) || (secondTag == nil && errors.Is(firstTag, npm.ErrTagConflict))) {
+		t.Fatalf("concurrent npm tag changes did not select one winner: %v %v", firstTag, secondTag)
+	}
+	if revision, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", request.Version, 1); err != nil || revision != 2 {
+		t.Fatalf("npm tag update failed: revision=%d err=%v", revision, err)
+	}
+	currentReadToken, err := repos.IssuePersonalReadToken(ctx, owner, workspace, publicationRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageData, err := reservations.ReadPublishedPackageWithToken(ctx, currentReadToken.Bearer, workspace, publicationRepo, request.Name)
+	if err != nil || packageData.Name != request.Name || len(packageData.Versions) != 1 || packageData.Versions[0].Version != request.Version || !bytes.Equal(packageData.Versions[0].Manifest, manifest) || packageData.Versions[0].Integrity != publication.Integrity || packageData.Tags["latest"] != request.Version {
+		t.Fatalf("published npm metadata differs: %+v err=%v", packageData, err)
+	}
+	if _, err := reservations.ReadPublishedPackageWithToken(ctx, readToken.Bearer, workspace, publicationRepo, request.Name); !errors.Is(err, repositories.ErrPersonalTokenUnavailable) {
+		t.Fatalf("old npm reader token accessed metadata after regrant: %v", err)
+	}
+	if _, err := reservations.ReadPublishedPackageWithToken(ctx, currentReadToken.Bearer, workspace, repository, request.Name); !errors.Is(err, repositories.ErrPersonalTokenUnavailable) {
+		t.Fatalf("npm metadata crossed repository boundary: %v", err)
+	}
+	var tagEvents int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_tag_events WHERE repository_id = `+p(1)+` AND tag = 'latest'`, publicationRepo).Scan(&tagEvents); err != nil || tagEvents != 2 {
+		t.Fatalf("npm tag history count=%d err=%v", tagEvents, err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM registry_npm_tag_events WHERE repository_id = `+p(1), publicationRepo); err == nil {
+		t.Fatal("npm tag history was deleted")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_npm_tag_events SET revision = 3 WHERE repository_id = `+p(1), publicationRepo); err == nil {
+		t.Fatal("npm tag history was mutable")
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_npm_tag_remove_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'npm.tag.removed' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reservations.RemoveDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", 2); err == nil {
+			t.Fatal("npm tag removal succeeded without audit")
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_npm_tag_remove_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if revision, err := reservations.RemoveDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", 2); err != nil || revision != 3 {
+		t.Fatalf("npm tag removal failed: revision=%d err=%v", revision, err)
+	}
+	state, err := reservations.GetDistTagState(ctx, owner, workspace, publicationRepo, request.Name, "latest")
+	if err != nil || state.Revision != 3 || state.Active || state.Version != "" {
+		t.Fatalf("npm tag tombstone differs: %+v err=%v", state, err)
+	}
+	if _, err := reservations.GetDistTagState(ctx, publisher, workspace, publicationRepo, request.Name, "latest"); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("ungranted publisher read npm tag management state: %v", err)
+	}
+	packageData, err = reservations.ReadPublishedPackageWithToken(ctx, currentReadToken.Bearer, workspace, publicationRepo, request.Name)
+	if err != nil || packageData.Tags["latest"] != "" || packageData.Tags["initial"] != request.Version {
+		t.Fatalf("removed npm tag remained visible: %+v err=%v", packageData.Tags, err)
+	}
+	if _, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", request.Version, 2); !errors.Is(err, npm.ErrTagConflict) {
+		t.Fatalf("stale npm tag update revived removed tag: %v", err)
+	}
+	if revision, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", request.Version, 3); err != nil || revision != 4 {
+		t.Fatalf("npm tag recreation failed: revision=%d err=%v", revision, err)
+	}
+	state, err = reservations.GetDistTagState(ctx, owner, workspace, publicationRepo, request.Name, "latest")
+	if err != nil || state.Revision != 4 || !state.Active || state.Version != request.Version {
+		t.Fatalf("recreated npm tag state differs: %+v err=%v", state, err)
+	}
+	if err := repos.RevokeNPMTagManager(ctx, owner, workspace, publicationRepo, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.SetDistTag(ctx, owner, workspace, publicationRepo, request.Name, "latest", request.Version, 4); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("revoked tag manager moved npm tag: %v", err)
+	}
+	tagUser := uuid.NewString()
+	query = `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES (` + p(1) + `, 'Synthetic tag manager', 'now', 'now')`
+	if _, err := db.ExecContext(ctx, query, tagUser); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_workspace_memberships (workspace_id, user_id, role, status, created_by, created_at, updated_at) VALUES (` + p(1) + `, ` + p(2) + `, 'member', 'active', ` + p(3) + `, 'now', 'now')`
+	if _, err := db.ExecContext(ctx, query, workspace, tagUser, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantNPMTagManager(ctx, owner, workspace, publicationRepo, tagUser); err != nil {
+		t.Fatal(err)
+	}
+	query = `UPDATE registry_workspace_memberships SET status = 'suspended', updated_at = 'synthetic-suspension' WHERE workspace_id = ` + p(1) + ` AND user_id = ` + p(2)
+	if _, err := db.ExecContext(ctx, query, workspace, tagUser); err != nil {
+		t.Fatal(err)
+	}
+	query = `UPDATE registry_workspace_memberships SET status = 'active', updated_at = 'synthetic-reactivation' WHERE workspace_id = ` + p(1) + ` AND user_id = ` + p(2)
+	if _, err := db.ExecContext(ctx, query, workspace, tagUser); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.SetDistTag(ctx, tagUser, workspace, publicationRepo, request.Name, "latest", request.Version, 4); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("reactivated membership revived npm tag grant: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET logical_quota_bytes = `+p(1)+` WHERE repository_id = `+p(2), request.TarballSize+1, publicationRepo); err != nil {
 		t.Fatal(err)
 	}
@@ -459,6 +681,9 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	remaining.TarballSize = 1
 	if _, err := reservations.Reserve(ctx, publicationToken.Bearer, workspace, publicationRepo, remaining); err != nil {
 		t.Fatalf("published npm receipt was double-counted: %v", err)
+	}
+	if _, err := reservations.ReadPublishedPackageWithToken(ctx, currentReadToken.Bearer, workspace, publicationRepo, remaining.Name); !errors.Is(err, npm.ErrPackageUnavailable) {
+		t.Fatalf("pending npm reservation appeared as published metadata: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM registry_npm_publications WHERE reservation_id = `+p(1), publicationReservation.ID); err == nil {
 		t.Fatal("npm publication linkage was deleted")

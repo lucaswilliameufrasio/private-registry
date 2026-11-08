@@ -89,21 +89,13 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		if _, err := tx.ExecContext(ctx, query, repository, request.Name, now.UnixMilli()); err != nil {
 			return errors.New("expired npm reservation could not be reconciled")
 		}
-		query = `SELECT EXISTS (SELECT 1 FROM registry_npm_versions v JOIN registry_npm_packages p ON p.package_id = v.package_id WHERE p.repository_id = ` + s.bind(1) + ` AND p.name = ` + s.bind(2) + ` AND v.version_identity = ` + s.bind(3) + `)`
-		var exists bool
-		if err := tx.QueryRowContext(ctx, query, repository, request.Name, identity).Scan(&exists); err != nil {
-			return errors.New("npm published identity could not be checked")
-		}
-		if exists {
-			return ErrReservationConflict
-		}
-		query = `SELECT reservation_id, version, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated FROM registry_npm_reservations WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
-		var id, version, digest, metadata, storedToken, storedActor string
+		query = `SELECT reservation_id, version, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated, status FROM registry_npm_reservations WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
+		var id, version, digest, metadata, storedToken, storedActor, status string
 		var size, expires int64
 		var invalidated int
-		err := tx.QueryRowContext(ctx, query, repository, request.Name, identity).Scan(&id, &version, &digest, &size, &metadata, &storedToken, &storedActor, &expires, &invalidated)
+		err := tx.QueryRowContext(ctx, query, repository, request.Name, identity).Scan(&id, &version, &digest, &size, &metadata, &storedToken, &storedActor, &expires, &invalidated, &status)
 		if err == nil {
-			if version != request.Version || digest != request.TarballSHA256 || size != request.TarballSize || metadata != request.MetadataSHA256 || storedToken != tokenID || storedActor != actor || invalidated != 0 || expires <= now.UnixMilli() {
+			if version != request.Version || digest != request.TarballSHA256 || size != request.TarballSize || metadata != request.MetadataSHA256 || storedToken != tokenID || storedActor != actor || invalidated != 0 || (status != "uploaded" && expires <= now.UnixMilli()) {
 				return ErrReservationConflict
 			}
 			result = Reservation{ID: id, ExpiresAt: time.UnixMilli(expires).UTC()}
@@ -111,6 +103,14 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return errors.New("npm reservation identity could not be checked")
+		}
+		query = `SELECT EXISTS (SELECT 1 FROM registry_npm_versions v JOIN registry_npm_packages p ON p.package_id = v.package_id WHERE p.repository_id = ` + s.bind(1) + ` AND p.name = ` + s.bind(2) + ` AND v.version_identity = ` + s.bind(3) + `)`
+		var exists bool
+		if err := tx.QueryRowContext(ctx, query, repository, request.Name, identity).Scan(&exists); err != nil {
+			return errors.New("npm published identity could not be checked")
+		}
+		if exists {
+			return ErrReservationConflict
 		}
 		if err := s.checkQuota(ctx, tx, workspace, repository, request.TarballSize); err != nil {
 			return err

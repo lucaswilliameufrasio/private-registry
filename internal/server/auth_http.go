@@ -21,6 +21,7 @@ import (
 	"private-registry/internal/auth"
 	"private-registry/internal/cargo"
 	"private-registry/internal/gomod"
+	"private-registry/internal/npm"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
 	"private-registry/internal/workspaces"
@@ -44,6 +45,10 @@ type AuthHTTPConfig struct {
 	CargoReservations      *cargo.ReservationService
 	CargoReceipts          *cargo.ReceiptService
 	CargoProtocol          *CargoProtocolConfig
+	NPMReservations        *npm.ReservationService
+	NPMReceipts            *npm.ReceiptService
+	NPMReadProtocol        bool
+	NPMWriteProtocol       *NPMWriteProtocolConfig
 }
 
 type authHTTP struct {
@@ -55,6 +60,11 @@ type authHTTP struct {
 	cargoReservations      *cargo.ReservationService
 	cargoReceipts          *cargo.ReceiptService
 	cargoProtocol          *cargoProtocol
+	npmReservations        *npm.ReservationService
+	npmReceipts            *npm.ReceiptService
+	npmReadProtocol        bool
+	npmWriteProtocol       *npmWriteProtocol
+	npmMetadataSlots       chan struct{}
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -249,6 +259,16 @@ func NewHandler(
 	if protocol != nil && (cfg.CargoReservations == nil || cfg.CargoReceipts == nil) {
 		return nil, errors.New("Cargo protocol requires reservation and receipt services")
 	}
+	if cfg.NPMReadProtocol && (cfg.NPMReservations == nil || cfg.NPMReceipts == nil) {
+		return nil, errors.New("npm read protocol requires reservation and receipt services")
+	}
+	npmWrite, err := newNPMWriteProtocol(cfg.NPMWriteProtocol)
+	if err != nil {
+		return nil, err
+	}
+	if npmWrite != nil && !cfg.NPMReadProtocol {
+		return nil, errors.New("npm write protocol requires npm read protocol services")
+	}
 
 	router := chi.NewRouter()
 	health.registerRoutes(router)
@@ -261,6 +281,11 @@ func NewHandler(
 		cargoReservations:      cfg.CargoReservations,
 		cargoReceipts:          cfg.CargoReceipts,
 		cargoProtocol:          protocol,
+		npmReservations:        cfg.NPMReservations,
+		npmReceipts:            cfg.NPMReceipts,
+		npmReadProtocol:        cfg.NPMReadProtocol,
+		npmWriteProtocol:       npmWrite,
+		npmMetadataSlots:       make(chan struct{}, 4),
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -326,6 +351,17 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	}
 	if h.cargoProtocol != nil {
 		h.registerCargoProtocolRoutes(router)
+	}
+	if h.npmReadProtocol {
+		h.registerNPMReadRoutes(router)
+		h.registerNPMReviewRoutes(router)
+		h.registerNPMTagRoutes(router)
+		router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/npm-write-tokens", h.issueNPMWriteToken)
+		router.Get("/api/v1/npm-write-tokens", h.listNPMWriteTokens)
+		router.Delete("/api/v1/npm-write-tokens/{tokenID}", h.revokeNPMWriteToken)
+	}
+	if h.npmWriteProtocol != nil {
+		router.Put("/npm/{workspaceID}/{repositoryID}/*", h.npmPublish)
 	}
 }
 
@@ -1294,7 +1330,7 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):
 		writeAPIError(response, http.StatusPreconditionFailed, "public_visibility_confirmation_required")
-	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable):
+	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable), errors.Is(err, repositories.ErrNPMWriteTokenUnavailable):
 		writeAPIError(response, http.StatusNotFound, "resource_unavailable")
 	case errors.Is(err, repositories.ErrMembershipUnavailable):
 		writeAPIError(response, http.StatusNotFound, "membership_unavailable")

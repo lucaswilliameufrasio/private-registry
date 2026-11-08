@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -14,8 +15,27 @@ import (
 // It does not expose an npm endpoint, move dist-tags, serve files or establish
 // complete backup. Native success must not be reported before commit.
 func (s *ReservationService) PublishReceipt(ctx context.Context, bearer, workspace, repository, reservationID string) (string, error) {
+	return s.PublishReceiptWithInitialTags(ctx, bearer, workspace, repository, reservationID, nil)
+}
+
+// PublishReceiptWithInitialTags atomically creates a version and applies the
+// explicit tag intent under a separate grant. A retry never moves a tag back
+// after a later publication; standalone tag edits remain revision-aware.
+func (s *ReservationService) PublishReceiptWithInitialTags(ctx context.Context, bearer, workspace, repository, reservationID string, tags map[string]string) (string, error) {
 	if s == nil || ctx == nil {
 		return "", ErrReservationUnavailable
+	}
+	if len(tags) > 1000 {
+		return "", ErrTagUnavailable
+	}
+	for tag, version := range tags {
+		if !validTag(tag) {
+			return "", ErrTagUnavailable
+		}
+		identity, err := VersionIdentity(version)
+		if err != nil || identity != version {
+			return "", ErrTagUnavailable
+		}
 	}
 	id, err := uuid.Parse(reservationID)
 	if err != nil || id.String() != reservationID {
@@ -32,10 +52,15 @@ func (s *ReservationService) PublishReceipt(ctx context.Context, bearer, workspa
 		} else if err != nil {
 			return errors.New("npm publication receipt could not be read")
 		}
+		for _, target := range tags {
+			if target != versionKey {
+				return ErrTagUnavailable
+			}
+		}
 		query = `SELECT npm_version_id FROM registry_npm_publications WHERE reservation_id = ` + s.bind(1) + ` AND workspace_id = ` + s.bind(2) + ` AND repository_id = ` + s.bind(3)
 		err := tx.QueryRowContext(ctx, query, reservationID, workspace, repository).Scan(&publishedID)
 		if err == nil {
-			return nil
+			return s.applyPublicationTags(ctx, tx, actor, workspace, repository, name, publishedID, tags, false)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return errors.New("npm publication history could not be read")
@@ -84,6 +109,9 @@ func (s *ReservationService) PublishReceipt(ctx context.Context, bearer, workspa
 		if _, err := tx.ExecContext(ctx, query, reservationID, publishedID, workspace, repository); err != nil {
 			return errors.New("npm publication linkage could not be recorded")
 		}
+		if err := s.applyPublicationTags(ctx, tx, actor, workspace, repository, name, publishedID, tags, true); err != nil {
+			return err
+		}
 		auditID, err := uuid.NewV7()
 		if err != nil {
 			return errors.New("npm publication audit identity could not be created")
@@ -98,4 +126,73 @@ func (s *ReservationService) PublishReceipt(ctx context.Context, bearer, workspa
 		return "", err
 	}
 	return publishedID, nil
+}
+
+func (s *ReservationService) applyPublicationTags(ctx context.Context, tx *sql.Tx, actor, workspace, repository, name, versionID string, tags map[string]string, allowMove bool) error {
+	if len(tags) == 0 {
+		return nil
+	}
+	grant, err := s.repositories.RequireNPMTagManager(ctx, tx, actor, workspace, repository)
+	if err != nil {
+		return err
+	}
+	query := `SELECT package_id FROM registry_npm_packages WHERE workspace_id = ` + s.bind(1) + ` AND repository_id = ` + s.bind(2) + ` AND name = ` + s.bind(3)
+	var packageID string
+	if err := tx.QueryRowContext(ctx, query, workspace, repository, name).Scan(&packageID); err != nil {
+		return errors.New("npm package identity could not be read")
+	}
+	for tag := range tags {
+		query = `SELECT npm_version_id, active, revision FROM registry_npm_dist_tags WHERE package_id = ` + s.bind(1) + ` AND tag = ` + s.bind(2)
+		var currentVersion string
+		var active int
+		var revision int64
+		err := tx.QueryRowContext(ctx, query, packageID, tag).Scan(&currentVersion, &active, &revision)
+		if err == nil {
+			if active == 1 && currentVersion == versionID {
+				continue
+			}
+			if !allowMove || revision < 1 || revision == math.MaxInt64 {
+				return ErrTagConflict
+			}
+			query = `UPDATE registry_npm_dist_tags SET npm_version_id = ` + s.bind(1) + `, active = 1, revision = ` + s.bind(2) + ` WHERE package_id = ` + s.bind(3) + ` AND tag = ` + s.bind(4) + ` AND revision = ` + s.bind(5)
+			result, err := tx.ExecContext(ctx, query, versionID, revision+1, packageID, tag, revision)
+			if err != nil {
+				return errors.New("npm publication tag could not be updated")
+			}
+			count, err := result.RowsAffected()
+			if err != nil || count != 1 {
+				return ErrTagConflict
+			}
+			revision++
+		} else if errors.Is(err, sql.ErrNoRows) {
+			if !allowMove {
+				return ErrTagConflict
+			}
+			revision = 1
+			query = `INSERT INTO registry_npm_dist_tags (package_id, workspace_id, repository_id, tag, npm_version_id, revision) VALUES (` + s.bind(1) + `, ` + s.bind(2) + `, ` + s.bind(3) + `, ` + s.bind(4) + `, ` + s.bind(5) + `, 1)`
+			if _, err := tx.ExecContext(ctx, query, packageID, workspace, repository, tag, versionID); err != nil {
+				return errors.New("npm initial tag could not be created")
+			}
+		} else {
+			return errors.New("npm tag state could not be read")
+		}
+		id, err := uuid.NewV7()
+		if err != nil {
+			return errors.New("npm tag event identity could not be created")
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		query = `INSERT INTO registry_npm_tag_events (event_id, package_id, workspace_id, repository_id, tag, npm_version_id, revision, action, actor_user_id, grant_id, occurred_at) VALUES (` + s.bind(1) + `, ` + s.bind(2) + `, ` + s.bind(3) + `, ` + s.bind(4) + `, ` + s.bind(5) + `, ` + s.bind(6) + `, ` + s.bind(7) + `, 'set', ` + s.bind(8) + `, ` + s.bind(9) + `, ` + s.bind(10) + `)`
+		if _, err := tx.ExecContext(ctx, query, id.String(), packageID, workspace, repository, tag, versionID, revision, actor, grant, now); err != nil {
+			return errors.New("npm initial tag event could not be recorded")
+		}
+		auditID, err := uuid.NewV7()
+		if err != nil {
+			return errors.New("npm tag audit identity could not be created")
+		}
+		query = `INSERT INTO registry_audit_events (event_id, actor_user_id, actor_type, action, target_type, target_id, outcome, occurred_at) VALUES (` + s.bind(1) + `, ` + s.bind(2) + `, 'user', 'npm.tag.updated', 'npm_package', ` + s.bind(3) + `, 'succeeded', ` + s.bind(4) + `)`
+		if _, err := tx.ExecContext(ctx, query, auditID.String(), actor, packageID, now); err != nil {
+			return errors.New("npm initial tag could not be audited")
+		}
+	}
+	return nil
 }

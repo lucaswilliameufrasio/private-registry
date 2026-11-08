@@ -279,7 +279,7 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalidated, err := backup.InvalidateRestoredCredentials(ctx, recoveryTx, config.Postgres, time.Now())
-	if err != nil || invalidated.Sessions != 1 || invalidated.PersonalTokens != 1 || invalidated.DownloadTickets != 1 {
+	if err != nil || invalidated.Sessions != 1 || invalidated.PersonalTokens != 3 || invalidated.DownloadTickets != 1 {
 		_ = recoveryTx.Rollback()
 		t.Fatalf("PostgreSQL recovery invalidation counts=%+v error=%v", invalidated, err)
 	}
