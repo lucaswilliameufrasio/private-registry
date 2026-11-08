@@ -78,12 +78,14 @@ func exerciseNPMCatalogUpgrade(t *testing.T, ctx context.Context, db *sql.DB, cf
 	delete(old, "sql/postgres/000033_pub_repository_format.sql")
 	delete(old, "sql/sqlite/000034_pub_catalog.sql")
 	delete(old, "sql/postgres/000034_pub_catalog.sql")
+	delete(old, "sql/sqlite/000035_pub_write_tokens.sql")
+	delete(old, "sql/postgres/000035_pub_write_tokens.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 25 {
 		t.Fatalf("prepare v25 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 34 || len(report.AppliedVersions) != 9 || report.AppliedVersions[0] != 26 || report.AppliedVersions[1] != 27 || report.AppliedVersions[2] != 28 || report.AppliedVersions[3] != 29 || report.AppliedVersions[4] != 30 || report.AppliedVersions[5] != 31 || report.AppliedVersions[6] != 32 || report.AppliedVersions[7] != 33 || report.AppliedVersions[8] != 34 {
+		if err != nil || report.CurrentVersion != 35 || len(report.AppliedVersions) != 10 || report.AppliedVersions[0] != 26 || report.AppliedVersions[1] != 27 || report.AppliedVersions[2] != 28 || report.AppliedVersions[3] != 29 || report.AppliedVersions[4] != 30 || report.AppliedVersions[5] != 31 || report.AppliedVersions[6] != 32 || report.AppliedVersions[7] != 33 || report.AppliedVersions[8] != 34 || report.AppliedVersions[9] != 35 {
 			t.Fatalf("v26–v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

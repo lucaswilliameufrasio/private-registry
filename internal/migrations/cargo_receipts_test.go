@@ -59,6 +59,8 @@ func exerciseCargoReceiptUpgrade(t *testing.T, ctx context.Context, db *sql.DB, 
 	delete(old, "sql/postgres/000033_pub_repository_format.sql")
 	delete(old, "sql/sqlite/000034_pub_catalog.sql")
 	delete(old, "sql/postgres/000034_pub_catalog.sql")
+	delete(old, "sql/sqlite/000035_pub_write_tokens.sql")
+	delete(old, "sql/postgres/000035_pub_write_tokens.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 21 {
 		t.Fatalf("prepare v21 fixture: %+v err=%v", report, err)
 	}
@@ -88,7 +90,7 @@ func exerciseCargoReceiptUpgrade(t *testing.T, ctx context.Context, db *sql.DB, 
 		}
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 34 || len(report.AppliedVersions) != 13 || report.AppliedVersions[0] != 22 || report.AppliedVersions[1] != 23 || report.AppliedVersions[2] != 24 || report.AppliedVersions[3] != 25 || report.AppliedVersions[4] != 26 || report.AppliedVersions[5] != 27 || report.AppliedVersions[6] != 28 || report.AppliedVersions[7] != 29 || report.AppliedVersions[8] != 30 || report.AppliedVersions[9] != 31 || report.AppliedVersions[10] != 32 || report.AppliedVersions[11] != 33 || report.AppliedVersions[12] != 34 {
+	if err != nil || report.CurrentVersion != 35 || len(report.AppliedVersions) != 14 || report.AppliedVersions[0] != 22 || report.AppliedVersions[1] != 23 || report.AppliedVersions[2] != 24 || report.AppliedVersions[3] != 25 || report.AppliedVersions[4] != 26 || report.AppliedVersions[5] != 27 || report.AppliedVersions[6] != 28 || report.AppliedVersions[7] != 29 || report.AppliedVersions[8] != 30 || report.AppliedVersions[9] != 31 || report.AppliedVersions[10] != 32 || report.AppliedVersions[11] != 33 || report.AppliedVersions[12] != 34 || report.AppliedVersions[13] != 35 {
 		t.Fatalf("upgrade to v30: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

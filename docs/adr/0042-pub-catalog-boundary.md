@@ -14,3 +14,9 @@ O consumo lógico de versões Pub participa da quota do workspace para reservas 
 O upgrade e rollback injetado da migration passaram três vezes com race em SQLite e PostgreSQL. Os testes de quota cruzada passaram três vezes com race em ambos os bancos. Testes de recovery SQLite recusaram versões Pub nos fluxos genérico, Go, Cargo e npm sem modificar a origem, também três vezes com race. O `make verify` integral desta fatia passou, incluindo integrações repetidas e race.
 
 Recebimento de conteúdo validado, credenciais, reserva, revisão, publicação, serving, recovery completo, clientes Dart reais, autorização contínua e demais aceites da v1 permanecem obrigatórios. Esta decisão não os declara concluídos.
+
+## Credencial de publicação experimental
+
+A migration v35 e o serviço interno permitem emitir, listar e revogar uma credencial Pub limitada a um repositório e ao grant de publicação original. O token armazena apenas verificador, expira, exige conta e membership ativos e não revive quando o grant é revogado e concedido novamente. Quando um grant de leitura existe na emissão, sua identidade também fica vinculada para uso posterior; a credencial de publicação, por si só, não concede leitura. Não há rota de emissão, upload ou publicação habilitada nesta fatia; futuros endpoints devem exigir MFA recente e CSRF.
+
+O upgrade e rollback injetado da v35, o ciclo de vida do token e as verificações de isolamento passaram três vezes com race em SQLite e PostgreSQL. O recovery SQLite isolado invalidou o token restaurado e preservou o original, também em três execuções com race. O `make verify` integral passou, incluindo integrações repetidas e race, após corrigir uma colisão de portas na fixture DNS. A invalidação de tokens não torna o recovery completo nem substitui a restauração de todos os formatos.

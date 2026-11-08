@@ -29,15 +29,15 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 34 {
+	if len(first.AppliedVersions) != 35 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
 	for index, version := range first.AppliedVersions {
 		if version != int64(index+1) {
-			t.Fatalf("migration %d at position %d; want sequential versions 1–34", version, index)
+			t.Fatalf("migration %d at position %d; want sequential versions 1–35", version, index)
 		}
 	}
-	if first.CurrentVersion != 34 || first.TargetVersion != 34 {
+	if first.CurrentVersion != 35 || first.TargetVersion != 35 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -60,14 +60,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 34 {
+	if succeeded != 35 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 34 {
+	if checksumCount != 35 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -288,6 +288,8 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 	delete(old, "sql/postgres/000033_pub_repository_format.sql")
 	delete(old, "sql/sqlite/000034_pub_catalog.sql")
 	delete(old, "sql/postgres/000034_pub_catalog.sql")
+	delete(old, "sql/sqlite/000035_pub_write_tokens.sql")
+	delete(old, "sql/postgres/000035_pub_write_tokens.sql")
 	report, err := migrateWithFS(ctx, db, cfg, old)
 	if err != nil || report.CurrentVersion != 16 {
 		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
@@ -311,7 +313,7 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err = Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 34 || len(report.AppliedVersions) != 18 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 || report.AppliedVersions[7] != 24 || report.AppliedVersions[8] != 25 || report.AppliedVersions[9] != 26 || report.AppliedVersions[10] != 27 || report.AppliedVersions[11] != 28 || report.AppliedVersions[12] != 29 || report.AppliedVersions[13] != 30 || report.AppliedVersions[14] != 31 || report.AppliedVersions[15] != 32 || report.AppliedVersions[16] != 33 || report.AppliedVersions[17] != 34 {
+	if err != nil || report.CurrentVersion != 35 || len(report.AppliedVersions) != 19 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 || report.AppliedVersions[7] != 24 || report.AppliedVersions[8] != 25 || report.AppliedVersions[9] != 26 || report.AppliedVersions[10] != 27 || report.AppliedVersions[11] != 28 || report.AppliedVersions[12] != 29 || report.AppliedVersions[13] != 30 || report.AppliedVersions[14] != 31 || report.AppliedVersions[15] != 32 || report.AppliedVersions[16] != 33 || report.AppliedVersions[17] != 34 || report.AppliedVersions[18] != 35 {
 		t.Fatalf("upgrade to v30: report=%+v err=%v", report, err)
 	}
 	var format, retained, status, publishedAt string
@@ -373,6 +375,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000032_npm_dist_tags.sql",
 		"sql/sqlite/000033_pub_repository_format.sql",
 		"sql/sqlite/000034_pub_catalog.sql",
+		"sql/sqlite/000035_pub_write_tokens.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
@@ -407,6 +410,7 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/postgres/000032_npm_dist_tags.sql",
 		"sql/postgres/000033_pub_repository_format.sql",
 		"sql/postgres/000034_pub_catalog.sql",
+		"sql/postgres/000035_pub_write_tokens.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {
