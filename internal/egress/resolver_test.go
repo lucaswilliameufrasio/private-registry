@@ -3,12 +3,14 @@ package egress
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -28,13 +30,12 @@ func TestOutboundDNSRequiresExplicitServer(t *testing.T) {
 }
 
 func TestOutboundDNSUsesExplicitServerForTCPFallback(t *testing.T) {
-	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	udp, tcp, err := listenDNSPair(func() (net.PacketConn, error) {
+		return net.ListenPacket("udp", "127.0.0.1:0")
+	}, func(address string) (net.Listener, error) {
+		return net.Listen("tcp", address)
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	tcp, err := net.Listen("tcp", udp.LocalAddr().String())
-	if err != nil {
-		_ = udp.Close()
 		t.Fatal(err)
 	}
 	var workers sync.WaitGroup
@@ -108,6 +109,61 @@ func TestOutboundDNSUsesExplicitServerForTCPFallback(t *testing.T) {
 	addresses, err := lookup.LookupNetIP(ctx, "ip", "fixture.example")
 	if err != nil || len(addresses) != 1 || addresses[0] != netip.MustParseAddr("127.0.0.1") || udpCount.Load() == 0 || tcpCount.Load() == 0 {
 		t.Fatalf("DNS TCP fallback failed: %v", err)
+	}
+}
+
+// listenDNSPair holds UDP and TCP on the same port. An available UDP port does
+// not imply its TCP counterpart is free; retry only that bounded collision.
+func listenDNSPair(listenUDP func() (net.PacketConn, error), listenTCP func(string) (net.Listener, error)) (net.PacketConn, net.Listener, error) {
+	for attempt := 0; attempt < 32; attempt++ {
+		udp, err := listenUDP()
+		if err != nil {
+			return nil, nil, err
+		}
+		tcp, err := listenTCP(udp.LocalAddr().String())
+		if err == nil {
+			return udp, tcp, nil
+		}
+		if closeErr := udp.Close(); closeErr != nil {
+			return nil, nil, errors.Join(err, closeErr)
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return nil, nil, err
+		}
+	}
+	return nil, nil, errors.New("unable to reserve a shared UDP/TCP fixture port")
+}
+
+func TestDNSPairRetriesOccupiedTCPPort(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	first, err := net.ListenPacket("udp", occupied.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	udp, tcp, err := listenDNSPair(func() (net.PacketConn, error) {
+		attempts++
+		if attempts == 1 {
+			return first, nil
+		}
+		return net.ListenPacket("udp", "127.0.0.1:0")
+	}, func(address string) (net.Listener, error) {
+		return net.Listen("tcp", address)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	defer tcp.Close()
+	if attempts < 2 || udp.LocalAddr().String() != tcp.Addr().String() {
+		t.Fatal("DNS fixture did not retry and reserve a matching port")
+	}
+	if err := first.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("colliding UDP socket remained open: %v", err)
 	}
 }
 
