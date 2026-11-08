@@ -27,6 +27,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"private-registry/internal/npm"
 )
 
 const (
@@ -71,9 +73,205 @@ type npmRegistryFixture struct {
 	metadataRequests   int
 	tarballRequests    int
 	publishRequests    int
+	publishConflicts   int
 	distTagRequests    int
 	unauthorizedPaths  []string
 	unexpectedRequests []string
+	requireReview      bool
+	observedVersions   []string
+	observedArchives   []string
+}
+
+func TestNPMBuildMetadataCharacterization(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	registry := startNPMRegistry(t)
+	userConfig := writeNPMUserConfig(t, root, registry.URL, registry.Token)
+	environment := npmEnvironment(root, userConfig, filepath.Dir(nodePath))
+	project := writeNPMFixturePackage(t, root, npmLeafName, "module.exports = 1;\n", nil)
+	manifestPath := filepath.Join(project, "package.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest["version"] = "1.0.0+build.1"
+	data, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, npmPath, "publish", "--registry", registry.URL, "--tag", "latest", "--ignore-scripts", "--json", project)
+	command.Dir = root
+	command.Env = environment
+	_, publishErr := command.CombinedOutput()
+	registry.mu.Lock()
+	versions := append([]string(nil), registry.observedVersions...)
+	archives := append([]string(nil), registry.observedArchives...)
+	registry.mu.Unlock()
+	if publishErr != nil || len(versions) != 1 || versions[0] != "1.0.0" || len(archives) != 1 || archives[0] != "1.0.0+build.1" {
+		t.Fatalf("npm build metadata normalization changed: err=%v envelope=%v archive=%v", publishErr, versions, archives)
+	}
+	consumer := filepath.Join(root, "build-metadata-consumer")
+	if err := os.Mkdir(consumer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	consumerManifest := `{"name":"synthetic-consumer","version":"1.0.0","private":true,"dependencies":{"@fixture/registry_fixture_leaf":"1.0.0"}}`
+	if err := os.WriteFile(filepath.Join(consumer, "package.json"), []byte(consumerManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshEnvironment := npmEnvironment(filepath.Join(root, "fresh-npm-state"), userConfig, filepath.Dir(nodePath))
+	runNPM(t, npmPath, consumer, freshEnvironment, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--registry", registry.URL)
+	output := runCommand(t, nodePath, consumer, freshEnvironment, "-e", `process.stdout.write(String(require("@fixture/registry_fixture_leaf")))`)
+	if output != "1" {
+		t.Fatalf("npm did not consume the normalized package: %q", output)
+	}
+}
+
+func TestNPMBuildMetadataVersionsCollideInFixture(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	registry := startNPMRegistry(t)
+	userConfig := writeNPMUserConfig(t, root, registry.URL, registry.Token)
+	environment := npmEnvironment(root, userConfig, filepath.Dir(nodePath))
+	project := writeNPMFixturePackage(t, root, npmLeafName, "module.exports = 1;\n", nil)
+	manifestPath := filepath.Join(project, "package.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	setVersion := func(version string) {
+		t.Helper()
+		manifest["version"] = version
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setVersion("1.0.0+first")
+	runNPM(t, npmPath, root, environment, "publish", "--registry", registry.URL, "--tag", "latest", "--ignore-scripts", "--json", project)
+	setVersion("1.0.0+second")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, npmPath, "publish", "--registry", registry.URL, "--tag", "latest", "--ignore-scripts", "--json", project)
+	command.Dir = root
+	command.Env = environment
+	output, err := command.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte("You cannot publish over the previously published versions: 1.0.0.")) {
+		t.Fatal("npm did not reject the previously published normalized version")
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	packageData := registry.packages[npmLeafName]
+	if packageData == nil || len(packageData.versions) != 1 || packageData.versions["1.0.0"] == nil || registry.publishRequests != 1 || registry.publishConflicts != 0 || len(registry.observedVersions) != 1 {
+		t.Fatal("fixture received an unexpected second publish request or version")
+	}
+}
+
+func TestNPMDoesNotReportPendingReviewAsPublished(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node.js is required for the npm registry integration contract:", err)
+	}
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		t.Fatal("npm is required for the npm registry integration contract:", err)
+	}
+	root := t.TempDir()
+	registry := startNPMRegistry(t)
+	registry.mu.Lock()
+	registry.requireReview = true
+	registry.mu.Unlock()
+	userConfig := writeNPMUserConfig(t, root, registry.URL, registry.Token)
+	environment := npmEnvironment(root, userConfig, filepath.Dir(nodePath))
+	project := writeNPMFixturePackage(t, root, npmLeafName, "module.exports = 1;\n", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, npmPath, "publish", "--registry", registry.URL, "--tag", "latest", "--ignore-scripts", "--json", project)
+	command.Dir = root
+	command.Env = environment
+	output, err := command.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte("human review")) {
+		t.Fatalf("npm reported success or an unrelated error while review was required: %v", err)
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.packages) != 0 || registry.publishRequests != 0 {
+		t.Fatal("review-gated synthetic package appeared as published")
+	}
+}
+
+func TestNPMRejectsTamperedTarball(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node.js is required for the npm registry integration contract:", err)
+	}
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		t.Fatal("npm is required for the npm registry integration contract:", err)
+	}
+	root := t.TempDir()
+	registry := startNPMRegistry(t)
+	userConfig := writeNPMUserConfig(t, root, registry.URL, registry.Token)
+	environment := npmEnvironment(root, userConfig, filepath.Dir(nodePath))
+	project := writeNPMFixturePackage(t, root, npmLeafName, "module.exports = 1;\n", nil)
+	runNPM(t, npmPath, root, environment, "publish", "--registry", registry.URL, "--tag", "latest", "--ignore-scripts", "--json", project)
+	registry.mu.Lock()
+	packageData := registry.packages[npmLeafName]
+	if packageData == nil || packageData.versions[npmTestVersion] == nil || len(packageData.versions[npmTestVersion].tarball) == 0 {
+		registry.mu.Unlock()
+		t.Fatal("synthetic npm tarball was not published")
+	}
+	tarball := packageData.versions[npmTestVersion].tarball
+	tarball[len(tarball)/2] ^= 1
+	registry.mu.Unlock()
+	consumer := filepath.Join(root, "tampered-consumer")
+	if err := os.Mkdir(consumer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"name":"synthetic-consumer","version":"1.0.0","private":true,"dependencies":{"@fixture/registry_fixture_leaf":"1.0.0"}}`
+	if err := os.WriteFile(filepath.Join(consumer, "package.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshEnvironment := npmEnvironment(filepath.Join(root, "fresh-npm-state"), userConfig, filepath.Dir(nodePath))
+	freshEnvironment = append(freshEnvironment, "npm_config_fetch_retries=0")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, npmPath, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--registry", registry.URL)
+	command.Dir = consumer
+	command.Env = freshEnvironment
+	output, err := command.CombinedOutput()
+	if err == nil || !bytes.Contains(bytes.ToLower(output), []byte("integrity")) {
+		t.Fatalf("npm did not reject tampered tarball due to integrity: %v", err)
+	}
 }
 
 func TestNPMClientPublishesInstallsAndMovesScopedDistTag(t *testing.T) {
@@ -102,6 +300,25 @@ func TestNPMClientPublishesInstallsAndMovesScopedDistTag(t *testing.T) {
 
 	leafProject := writeNPMFixturePackage(t, root, npmLeafName, `module.exports = function () { return "private-leaf-value"; };
 `, nil)
+	leafManifestPath := filepath.Join(leafProject, "package.json")
+	leafManifest, err := os.ReadFile(leafManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leafFields map[string]json.RawMessage
+	if err := json.Unmarshal(leafManifest, &leafFields); err != nil {
+		t.Fatal(err)
+	}
+	leafFields["exports"] = json.RawMessage(`{"node":"./index.js","default":"./missing.js"}`)
+	leafFields["browser"] = json.RawMessage(`"./index.js"`)
+	leafFields["typesVersions"] = json.RawMessage(`{">=5.0":{"*": ["types/*"]},"*":{"*": ["legacy/*"]}}`)
+	leafManifest, err = json.Marshal(leafFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leafManifestPath, leafManifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	parentProject := writeNPMFixturePackage(t, root, npmParentName, `const leaf = require("@fixture/registry_fixture_leaf");
 module.exports = function () { return "parent/" + leaf(); };
 `, map[string]string{npmLeafName: "1.0.0"})
@@ -236,6 +453,9 @@ func (registry *npmRegistryFixture) servePublish(writer http.ResponseWriter, req
 	for version, manifest = range document.Versions {
 		break
 	}
+	registry.mu.Lock()
+	registry.observedVersions = append(registry.observedVersions, version)
+	registry.mu.Unlock()
 	if manifest["name"] != document.Name || manifest["version"] != version {
 		registry.writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "manifest identity mismatch"})
 		return
@@ -247,6 +467,24 @@ func (registry *npmRegistryFixture) servePublish(writer http.ResponseWriter, req
 	tarball, err := base64.StdEncoding.DecodeString(attachment.Data)
 	if err != nil || len(tarball) == 0 || len(tarball) != attachment.Length {
 		registry.writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid package attachment"})
+		return
+	}
+	if archiveVersion, err := fixtureArchiveVersion(tarball); err == nil {
+		registry.mu.Lock()
+		registry.observedArchives = append(registry.observedArchives, archiveVersion)
+		registry.mu.Unlock()
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+	defer cancel()
+	var staged bytes.Buffer
+	parsed, err := npm.ReadPublishDocument(ctx, bytes.NewReader(body), &staged, requestName, maxRequestSize, maxRequestSize)
+	digest := sha512.Sum512(tarball)
+	if err != nil || parsed.Name != document.Name || parsed.Version != version || parsed.Size != int64(len(tarball)) || !bytes.Equal(staged.Bytes(), tarball) || parsed.Integrity != "sha512-"+base64.StdEncoding.EncodeToString(digest[:]) {
+		registry.writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "experimental npm envelope rejected"})
+		return
+	}
+	if err := npm.ValidateStagedPublication(ctx, parsed, bytes.NewReader(staged.Bytes()), npm.ArchiveLimits{MaxCompressedBytes: maxRequestSize, MaxUncompressedBytes: 32 << 20, MaxEntries: 1000, MaxManifestBytes: 1 << 20}); err != nil {
+		registry.writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "experimental npm archive rejected"})
 		return
 	}
 	if err := validateNPMArchive(document.Name, tarball); err != nil {
@@ -264,12 +502,17 @@ func (registry *npmRegistryFixture) servePublish(writer http.ResponseWriter, req
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.requireReview {
+		registry.writeJSON(writer, http.StatusConflict, map[string]string{"error": "human review required; use the registry publication workflow"})
+		return
+	}
 	packageData := registry.packages[document.Name]
 	if packageData == nil {
 		packageData = &npmPackage{versions: make(map[string]*npmPublishedVersion), distTags: make(map[string]string)}
 		registry.packages[document.Name] = packageData
 	}
 	if _, exists := packageData.versions[version]; exists {
+		registry.publishConflicts++
 		registry.writeJSON(writer, http.StatusConflict, map[string]string{"error": "package version already published"})
 		return
 	}
@@ -282,6 +525,31 @@ func (registry *npmRegistryFixture) servePublish(writer http.ResponseWriter, req
 	}
 	registry.publishRequests++
 	registry.writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "id": document.Name, "rev": "1-fixture"})
+}
+
+func fixtureArchiveVersion(data []byte) (string, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	tarReader := tar.NewReader(io.LimitReader(reader, maxRequestSize))
+	for {
+		header, err := tarReader.Next()
+		if err != nil {
+			return "", err
+		}
+		if header.Name != "package/package.json" {
+			continue
+		}
+		var manifest struct {
+			Version string `json:"version"`
+		}
+		if err := json.NewDecoder(io.LimitReader(tarReader, 1<<20)).Decode(&manifest); err != nil {
+			return "", err
+		}
+		return manifest.Version, nil
+	}
 }
 
 func (registry *npmRegistryFixture) servePackument(writer http.ResponseWriter, request *http.Request) {

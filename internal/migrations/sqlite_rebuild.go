@@ -16,7 +16,10 @@ import (
 // checks the pragmas and foreign keys before allowing that transaction to
 // commit. The migration lock and the requirement to stop the server remain in
 // force. Closing this private pool destroys the pragma-bearing connection.
-func runSQLiteRepositoryRebuild(ctx context.Context, cfg config.Config, engineFS fs.FS) (retErr error) {
+func runSQLiteRepositoryRebuild(ctx context.Context, cfg config.Config, engineFS fs.FS, expectedVersion int64) (retErr error) {
+	if expectedVersion != 18 && expectedVersion != 25 {
+		return errors.New("dedicated SQLite migration version is unsupported")
+	}
 	db, err := database.Open(ctx, cfg)
 	if err != nil {
 		return errors.New("dedicated SQLite migration connection could not be opened")
@@ -43,14 +46,14 @@ func runSQLiteRepositoryRebuild(ctx context.Context, cfg config.Config, engineFS
 		return errors.New("dedicated SQLite migration state could not be checked")
 	}
 	next, err := nextPendingVersion(statuses)
-	if err != nil || next != 18 {
+	if err != nil || next != expectedVersion {
 		return errors.New("dedicated SQLite migration is not the expected next version")
 	}
 	result, err := provider.UpByOne(ctx)
 	if err != nil {
 		return err
 	}
-	if result == nil || result.Source == nil || result.Source.Version != 18 {
+	if result == nil || result.Source == nil || result.Source.Version != expectedVersion {
 		return errors.New("dedicated SQLite migration applied an unexpected version")
 	}
 	return nil

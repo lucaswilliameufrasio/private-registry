@@ -635,7 +635,7 @@ func TestAuthHTTPMembershipManagementRequiresRecentMFAAndProtectsOwner(t *testin
 	if wrongFormat.Code != http.StatusConflict || !strings.Contains(wrongFormat.Body.String(), `"repository_format_mismatch"`) {
 		t.Fatalf("generic upload into Go repository status=%d body=%s", wrongFormat.Code, wrongFormat.Body.String())
 	}
-	for _, format := range []string{`null`, `"unsupported"`, `""`} {
+	for _, format := range []string{`null`, `"unsupported"`, `""`, `"npm"`} {
 		bad := authHTTPRequestWithCookies(fixture.handler, http.MethodPost, repositoriesPath,
 			`{"slug":"bad-format","display_name":"Bad","format":`+format+`}`, authTestOrigin,
 			"registry.example", mfaCookies, mfaCookies[csrfCookieName].Value)

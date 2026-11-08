@@ -47,6 +47,8 @@ func TestSQLiteRepositoryRebuildExperiment(t *testing.T) {
 			delete(old, "sql/postgres/000023_cargo_review.sql")
 			delete(old, "sql/sqlite/000024_cargo_publications.sql")
 			delete(old, "sql/postgres/000024_cargo_publications.sql")
+			delete(old, "sql/sqlite/000025_npm_repository_format.sql")
+			delete(old, "sql/postgres/000025_npm_repository_format.sql")
 			if _, err := migrateWithFS(ctx, db, cfg, old); err != nil {
 				t.Fatal(err)
 			}
@@ -97,8 +99,8 @@ func TestSQLiteRepositoryRebuildExperiment(t *testing.T) {
 					}
 				} else {
 					report, err = Migrate(ctx, db, cfg)
-					if err != nil || report.CurrentVersion != 24 || len(report.AppliedVersions) != 7 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 {
-						t.Fatalf("v17 to v24 upgrade failed: %+v err=%v", report, err)
+					if err != nil || report.CurrentVersion != 25 || len(report.AppliedVersions) != 8 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 {
+						t.Fatalf("v17 to v25 upgrade failed: %+v err=%v", report, err)
 					}
 					if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 						t.Fatalf("upgraded migration history failed verification: %v", err)

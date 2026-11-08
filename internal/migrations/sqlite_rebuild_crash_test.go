@@ -22,6 +22,15 @@ import (
 // This checks SQLite rollback after a subprocess dies inside a synthetic
 // rebuild transaction. It does not simulate every interruption of Migrate.
 func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
+	for _, version := range []int{18, 25} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			exerciseSQLiteRebuildProcessCrash(t, version)
+		})
+	}
+}
+
+func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cfg := sqliteConfig(t)
@@ -35,22 +44,17 @@ func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := migrationFS(t, "sql/sqlite/000001_installation.sql", string(first)).(fstest.MapFS)
-	delete(old, "sql/sqlite/000018_cargo_repository_format.sql")
-	delete(old, "sql/postgres/000018_cargo_repository_format.sql")
-	delete(old, "sql/sqlite/000019_cargo_catalog.sql")
-	delete(old, "sql/postgres/000019_cargo_catalog.sql")
-	delete(old, "sql/sqlite/000020_cargo_write_tokens.sql")
-	delete(old, "sql/postgres/000020_cargo_write_tokens.sql")
-	delete(old, "sql/sqlite/000021_cargo_reservations.sql")
-	delete(old, "sql/postgres/000021_cargo_reservations.sql")
-	delete(old, "sql/sqlite/000022_cargo_receipts.sql")
-	delete(old, "sql/postgres/000022_cargo_receipts.sql")
-	delete(old, "sql/sqlite/000023_cargo_review.sql")
-	delete(old, "sql/postgres/000023_cargo_review.sql")
-	delete(old, "sql/sqlite/000024_cargo_publications.sql")
-	delete(old, "sql/postgres/000024_cargo_publications.sql")
-	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 17 {
-		t.Fatalf("prepare v17 fixture: %+v err=%v", report, err)
+	if version == 18 {
+		for _, engine := range []string{"sqlite", "postgres"} {
+			for _, name := range []string{"000018_cargo_repository_format.sql", "000019_cargo_catalog.sql", "000020_cargo_write_tokens.sql", "000021_cargo_reservations.sql", "000022_cargo_receipts.sql", "000023_cargo_review.sql", "000024_cargo_publications.sql"} {
+				delete(old, "sql/"+engine+"/"+name)
+			}
+		}
+	}
+	delete(old, "sql/sqlite/000025_npm_repository_format.sql")
+	delete(old, "sql/postgres/000025_npm_repository_format.sql")
+	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != int64(version-1) {
+		t.Fatalf("prepare pre-rebuild fixture: %+v err=%v", report, err)
 	}
 	user, workspace, repository := uuid.NewString(), uuid.NewString(), uuid.NewString()
 	for _, item := range []struct {
@@ -66,6 +70,17 @@ func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var cargoPackage string
+	if version == 25 {
+		cargoRepo := uuid.NewString()
+		cargoPackage = uuid.NewString()
+		if _, err := db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'cargo', 'Cargo', ?, 'now', 'now', 'cargo')`, cargoRepo, workspace, user); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO registry_cargo_packages (package_id, workspace_id, repository_id, name, name_identity, created_by, created_at) VALUES (?, ?, ?, 'fixture', 'fixture', ?, 'now')`, cargoPackage, workspace, cargoRepo, user); err != nil {
+			t.Fatal(err)
+		}
+	}
 	marker := uuid.NewString()
 	if err := os.WriteFile(filepath.Join(cfg.DataDir, ".synthetic-rebuild-fixture"), []byte(marker), 0o600); err != nil {
 		t.Fatal(err)
@@ -75,7 +90,7 @@ func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	child := exec.CommandContext(ctx, executable, "-test.run=^TestSQLiteRebuildCrashHelper$")
-	child.Env = []string{"REGISTRY_SYNTHETIC_CRASH_DB=" + cfg.DatabaseDSN, "REGISTRY_SYNTHETIC_CRASH_MARKER=" + marker, "TMPDIR=" + os.TempDir()}
+	child.Env = []string{"REGISTRY_SYNTHETIC_CRASH_DB=" + cfg.DatabaseDSN, "REGISTRY_SYNTHETIC_CRASH_MARKER=" + marker, fmt.Sprintf("REGISTRY_SYNTHETIC_CRASH_VERSION=%d", version), "TMPDIR=" + os.TempDir()}
 	stdout, err := child.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -109,9 +124,9 @@ func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
 	}{
 		{`SELECT count(*) FROM registry_repositories WHERE repository_id = ? AND format = 'go'`, []any{repository}, &repositories},
 		{`SELECT count(*) FROM registry_go_private_prefixes WHERE repository_id = ?`, []any{repository}, &prefixes},
-		{`SELECT count(*) FROM sqlite_schema WHERE name = 'registry_repositories_before_format18'`, nil, &stale},
+		{`SELECT count(*) FROM sqlite_schema WHERE name = ?`, []any{fmt.Sprintf("registry_repositories_before_format%d", version)}, &stale},
 		{`SELECT count(*) FROM pragma_foreign_key_check`, nil, &violations},
-		{`SELECT count(*) FROM goose_db_version WHERE version_id = 18 AND is_applied = 1`, nil, &applied},
+		{`SELECT count(*) FROM goose_db_version WHERE version_id = ? AND is_applied = 1`, []any{version}, &applied},
 	} {
 		if err := db.QueryRowContext(ctx, item.query, item.args...).Scan(item.value); err != nil {
 			t.Fatal(err)
@@ -120,6 +135,29 @@ func TestSQLiteRebuildProcessCrashRollsBack(t *testing.T) {
 	if repositories != 1 || prefixes != 1 || stale != 0 || violations != 0 || applied != 0 {
 		t.Fatalf("synthetic crash changed source: repository=%d prefixes=%d stale=%d violations=%d applied=%d", repositories, prefixes, stale, violations, applied)
 	}
+	if version == 25 {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_packages WHERE package_id = ?`, cargoPackage).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("synthetic crash changed Cargo reference: count=%d err=%v", count, err)
+		}
+	}
+	report, err := Migrate(ctx, db, cfg)
+	if err != nil || report.CurrentVersion != 25 {
+		t.Fatalf("migration did not resume after synthetic crash: %+v err=%v", report, err)
+	}
+	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
+		t.Fatalf("resumed migration history is invalid: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_go_private_prefixes WHERE repository_id = ?`, repository).Scan(&prefixes); err != nil || prefixes != 1 {
+		t.Fatalf("resumed migration lost Go reference: count=%d err=%v", prefixes, err)
+	}
+	if version == 25 {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_packages WHERE package_id = ?`, cargoPackage).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("resumed migration lost Cargo reference: count=%d err=%v", count, err)
+		}
+	}
+	assertPoolForeignKeys(t, ctx, db)
 }
 
 func TestSQLiteRebuildCrashHelper(t *testing.T) {
@@ -158,7 +196,16 @@ func TestSQLiteRebuildCrashHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE registry_repositories RENAME TO registry_repositories_before_format18`); err != nil {
+	var rename string
+	switch os.Getenv("REGISTRY_SYNTHETIC_CRASH_VERSION") {
+	case "18":
+		rename = `ALTER TABLE registry_repositories RENAME TO registry_repositories_before_format18`
+	case "25":
+		rename = `ALTER TABLE registry_repositories RENAME TO registry_repositories_before_format25`
+	default:
+		t.Fatal("synthetic crash migration version is invalid")
+	}
+	if _, err := tx.ExecContext(ctx, rename); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fmt.Fprintln(os.Stdout, "transaction-open"); err != nil {
