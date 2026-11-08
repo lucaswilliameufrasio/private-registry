@@ -39,6 +39,8 @@ func exerciseNPMReceiptMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 	old := migrationFS(t, "sql/sqlite/000001_installation.sql", string(first)).(fstest.MapFS)
 	delete(old, "sql/sqlite/000029_npm_receipts.sql")
 	delete(old, "sql/postgres/000029_npm_receipts.sql")
+	delete(old, "sql/sqlite/000030_npm_review.sql")
+	delete(old, "sql/postgres/000030_npm_review.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 28 {
 		t.Fatalf("prepare v28 fixture: %+v err=%v", report, err)
 	}
@@ -78,8 +80,8 @@ func exerciseNPMReceiptMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 		}
 	} else {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 29 || len(report.AppliedVersions) != 1 || report.AppliedVersions[0] != 29 {
-			t.Fatalf("v29 upgrade failed: %+v err=%v", report, err)
+		if err != nil || report.CurrentVersion != 30 || len(report.AppliedVersions) != 2 || report.AppliedVersions[0] != 29 || report.AppliedVersions[1] != 30 {
+			t.Fatalf("v29–v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 			t.Fatal(err)

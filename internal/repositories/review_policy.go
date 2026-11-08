@@ -25,6 +25,11 @@ func (s *Service) CargoReviewPolicy(ctx context.Context, actorUserID, workspaceI
 	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatCargo)
 }
 
+// NPMReviewPolicy remains internal until npm publication is available.
+func (s *Service) NPMReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string) (ReviewPolicy, error) {
+	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatNPM)
+}
+
 func (s *Service) reviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, format Format) (ReviewPolicy, error) {
 	actorID, err := parseUUID(actorUserID, ErrUnauthenticated)
 	if err != nil {
@@ -81,6 +86,12 @@ func (s *Service) SetGoReviewPolicy(ctx context.Context, actorUserID, workspaceI
 // required. Disabling the policy never clears an existing review hold.
 func (s *Service) SetCargoReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool) (ReviewPolicy, error) {
 	return s.setReviewPolicy(ctx, actorUserID, workspaceID, repositoryID, expectedRevision, required, FormatCargo)
+}
+
+// SetNPMReviewPolicy holds pending npm receipts when review becomes required;
+// disabling the policy never clears an existing hold.
+func (s *Service) SetNPMReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool) (ReviewPolicy, error) {
+	return s.setReviewPolicy(ctx, actorUserID, workspaceID, repositoryID, expectedRevision, required, FormatNPM)
 }
 
 func (s *Service) setReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool, format Format) (ReviewPolicy, error) {
@@ -142,8 +153,12 @@ func (s *Service) setReviewPolicy(ctx context.Context, actorUserID, workspaceID,
 		if required {
 			if format == FormatGo {
 				query = `UPDATE registry_go_upload_sessions SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('receiving', 'uploading', 'uploaded')`
-			} else {
+			} else if format == FormatCargo {
 				query = `UPDATE registry_cargo_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_cargo_publications p WHERE p.reservation_id = registry_cargo_reservations.reservation_id)`
+			} else if format == FormatNPM {
+				query = `UPDATE registry_npm_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
+			} else {
+				return errors.New("repository review format is unsupported")
 			}
 			if _, err := tx.ExecContext(ctx, query, workspaceID, repositoryID); err != nil {
 				return errors.New("pending uploads could not be held for review")

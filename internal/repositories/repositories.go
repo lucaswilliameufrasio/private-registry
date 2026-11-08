@@ -32,6 +32,7 @@ const (
 	FormatGeneric Format = "generic"
 	FormatGo      Format = "go"
 	FormatCargo   Format = "cargo"
+	FormatNPM     Format = "npm"
 )
 
 const (

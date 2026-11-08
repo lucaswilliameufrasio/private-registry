@@ -68,13 +68,15 @@ func exerciseNPMCatalogUpgrade(t *testing.T, ctx context.Context, db *sql.DB, cf
 	delete(old, "sql/postgres/000028_npm_reservations.sql")
 	delete(old, "sql/sqlite/000029_npm_receipts.sql")
 	delete(old, "sql/postgres/000029_npm_receipts.sql")
+	delete(old, "sql/sqlite/000030_npm_review.sql")
+	delete(old, "sql/postgres/000030_npm_review.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 25 {
 		t.Fatalf("prepare v25 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 29 || len(report.AppliedVersions) != 4 || report.AppliedVersions[0] != 26 || report.AppliedVersions[1] != 27 || report.AppliedVersions[2] != 28 || report.AppliedVersions[3] != 29 {
-			t.Fatalf("v26–v29 upgrade failed: %+v err=%v", report, err)
+		if err != nil || report.CurrentVersion != 30 || len(report.AppliedVersions) != 5 || report.AppliedVersions[0] != 26 || report.AppliedVersions[1] != 27 || report.AppliedVersions[2] != 28 || report.AppliedVersions[3] != 29 || report.AppliedVersions[4] != 30 {
+			t.Fatalf("v26–v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 			t.Fatal(err)

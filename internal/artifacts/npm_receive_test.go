@@ -134,7 +134,8 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 		t.Fatal(err)
 	}
 	limits := npm.ArchiveLimits{MaxCompressedBytes: 1 << 20, MaxUncompressedBytes: 1 << 20, MaxEntries: 20, MaxManifestBytes: 4096}
-	receiver, err := npm.NewReceiptService(db, repos, driver, objects, npm.ReceiptOptions{StagingDirectory: stage, Limits: limits, MaxConcurrent: 1})
+	countedObjects := &countingStorage{Driver: objects}
+	receiver, err := npm.NewReceiptService(db, repos, driver, countedObjects, npm.ReceiptOptions{StagingDirectory: stage, Limits: limits, MaxConcurrent: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +211,120 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	if err := db.QueryRowContext(ctx, `SELECT status, object_verified, review_hold, manifest, integrity FROM registry_npm_reservations WHERE reservation_id = `+p(1), reservation.ID).Scan(&status, &verified, &hold, &storedManifest, &storedIntegrity); err != nil || status != "uploaded" || verified != 1 || hold != 1 || storedManifest != string(manifest) || storedIntegrity != publication.Integrity {
 		t.Fatalf("npm receipt not recorded correctly: status=%q verified=%d hold=%d err=%v", status, verified, hold, err)
 	}
+	if _, err := repos.GrantNPMReviewer(ctx, owner, workspace, repository, publisher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, publisher, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, npm.ErrReviewUnavailable) {
+		t.Fatalf("npm publisher approved own receipt: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("review without explicit grant accepted: %v", err)
+	}
+	beforeOpen := countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID); !errors.Is(err, repositories.ErrForbidden) || reader != nil {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("review archive opened without reviewer grant: %v", err)
+	}
+	if countedObjects.opens.Load() != beforeOpen {
+		t.Fatal("unauthorized review touched storage")
+	}
+	if _, err := repos.GrantNPMReviewer(ctx, owner, workspace, repository, owner); err != nil {
+		t.Fatal(err)
+	}
+	candidates, more, err := reservations.ListReviewCandidates(ctx, owner, workspace, repository, "", 10)
+	if err != nil || more || len(candidates) != 1 || candidates[0].ID != reservation.ID {
+		t.Fatalf("npm review candidate listing failed: %v", err)
+	}
+	reader, size, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || size != int64(len(content)) || !bytes.Equal(archived, content) {
+		t.Fatalf("review archive differs: read=%v close=%v", readErr, closeErr)
+	}
+	checkApproval := func() error {
+		return repos.WithNPMWriteTokenTransaction(ctx, token.Bearer, workspace, repository, func(tx *sql.Tx, actor string) error {
+			return reservations.RequireCurrentApproval(ctx, tx, workspace, repository, reservation.ID, actor)
+		})
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("unreviewed npm receipt was approved: %v", err)
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_npm_review_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'npm.review.approved' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); err == nil {
+			t.Fatal("npm review succeeded without audit")
+		}
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_review_decisions WHERE reservation_id = ?`, reservation.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed audit left npm review decision: count=%d err=%v", count, err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_npm_review_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decision, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryDecision, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", "")
+	if err != nil || retryDecision != decision {
+		t.Fatalf("identical npm approval retry failed: %v", err)
+	}
+	if err := checkApproval(); err != nil {
+		t.Fatalf("valid npm approval rejected: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_npm_review_decisions SET decision = 'rejected' WHERE decision_id = `+p(1), decision); err == nil {
+		t.Fatal("npm review decision was mutable")
+	}
+	if err := repos.RevokeNPMReviewer(ctx, owner, workspace, repository, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("revoked reviewer approval remained usable: %v", err)
+	}
+	if _, err := repos.GrantNPMReviewer(ctx, owner, workspace, repository, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("reviewer regrant revived prior npm approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.SetNPMReviewPolicy(ctx, owner, workspace, repository, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("policy change revived stale npm approval: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); err != nil {
+		t.Fatalf("new npm approval for current policy was rejected: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "rejected", " "); !errors.Is(err, npm.ErrReviewUnavailable) {
+		t.Fatalf("empty npm rejection reason accepted: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "rejected", "synthetic review rejection"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("rejected npm receipt remained approved: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, npm.ErrReviewUnavailable) {
+		t.Fatalf("rejected npm receipt was reapproved: %v", err)
+	}
+	if candidates, _, err := reservations.ListReviewCandidates(ctx, owner, workspace, repository, "", 10); err != nil || len(candidates) != 0 {
+		t.Fatalf("rejected npm receipt remained a review candidate: %v", err)
+	}
 	if entries, err := os.ReadDir(stage); err != nil || len(entries) != 0 {
 		t.Fatalf("npm receipt staging not cleaned: %v", err)
 	}
@@ -244,10 +359,10 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := &revokeNPMReader{reader: bytes.NewReader(content), revoke: func() error {
+	revokingReader := &revokeNPMReader{reader: bytes.NewReader(content), revoke: func() error {
 		return repos.RevokeRepositoryRole(ctx, owner, workspace, secondRepository, publisher, repositories.GrantPublisher)
 	}}
-	if err := receiver.Receive(ctx, secondToken.Bearer, workspace, secondRepository, secondReservation.ID, publication, reader); err == nil {
+	if err := receiver.Receive(ctx, secondToken.Bearer, workspace, secondRepository, secondReservation.ID, publication, revokingReader); err == nil {
 		t.Fatal("npm receipt succeeded after publisher grant revocation")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT status, object_verified FROM registry_npm_reservations WHERE reservation_id = `+p(1), secondReservation.ID).Scan(&status, &verified); err != nil || status != "reserved" || verified != 0 {

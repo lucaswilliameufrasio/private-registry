@@ -15,7 +15,7 @@ var ErrReviewRequired = errors.New("publication requires human review")
 func RequireFormat(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, driver config.DatabaseDriver, workspaceID, repositoryID string, expected Format) error {
-	if ctx == nil || queryer == nil || (driver != config.SQLite && driver != config.Postgres) || (expected != FormatGeneric && expected != FormatGo && expected != FormatCargo) {
+	if ctx == nil || queryer == nil || (driver != config.SQLite && driver != config.Postgres) || (expected != FormatGeneric && expected != FormatGo && expected != FormatCargo && expected != FormatNPM) {
 		return errors.New("repository format check is unavailable")
 	}
 	query := `SELECT format FROM registry_repositories WHERE workspace_id = ` + bind(driver, 1) + ` AND repository_id = ` + bind(driver, 2) + ` AND status = 'active'`
