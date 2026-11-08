@@ -93,7 +93,40 @@ func exercisePersonalReadTokens(t *testing.T, ctx context.Context, db *sql.DB, d
 	if err := service.RevokePersonalReadToken(ctx, other, issued.ID); !errors.Is(err, ErrPersonalTokenUnavailable) {
 		t.Fatalf("other user revoked token: %v", err)
 	}
-	if err := service.RevokeRepositoryRole(ctx, owner, workspace.ID, repository.ID, user, GrantReader); err != nil {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	readResult := make(chan error, 1)
+	go func() {
+		readResult <- service.WithPersonalReadTokenTransaction(ctx, issued.Bearer, workspace.ID, repository.ID, func(_ *sql.Tx, actor string) error {
+			if actor != user {
+				return errors.New("unexpected token owner")
+			}
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("token transaction did not start")
+	}
+	revokeResult := make(chan error, 1)
+	go func() {
+		revokeResult <- service.RevokeRepositoryRole(ctx, owner, workspace.ID, repository.ID, user, GrantReader)
+	}()
+	select {
+	case err := <-revokeResult:
+		close(release)
+		<-readResult
+		t.Fatalf("grant revoked while token transaction held the lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-readResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-revokeResult; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.VerifyPersonalReadToken(ctx, issued.Bearer, workspace.ID, repository.ID); !errors.Is(err, ErrPersonalTokenUnavailable) {

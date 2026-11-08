@@ -18,6 +18,17 @@ import (
 // bounded private staging, hard resource limits and isolated source access.
 // Configuration, internal keys and all other formats remain outside this flow.
 func PrepareEncryptedSQLiteGoRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, parent, name string, genericSources, goSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (result PreparedSQLiteRecovery, retErr error) {
+	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, nil, nil, parent, name, genericSources, goSources, nil, identity, newStage)
+}
+
+// PrepareEncryptedSQLiteCargoRecovery restores generic, Go and Cargo objects
+// into a new isolated directory. The incomplete marker is never removed.
+// It does not restore configuration or other formats, nor authorize promotion.
+func PrepareEncryptedSQLiteCargoRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet CargoSetEnvelope, cargoTrust GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (PreparedSQLiteRecovery, error) {
+	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, &cargoSet, &cargoTrust, parent, name, genericSources, goSources, cargoSources, identity, newStage)
+}
+
+func prepareEncryptedSQLiteFormatsRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet *CargoSetEnvelope, cargoTrust *GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (result PreparedSQLiteRecovery, retErr error) {
 	if ctx == nil || ciphertext == nil || identity == nil || newStage == nil {
 		return result, errors.New("encrypted SQLite Go recovery parameters are invalid")
 	}
@@ -59,7 +70,7 @@ func PrepareEncryptedSQLiteGoRecovery(ctx context.Context, ciphertext io.Reader,
 	if _, err := stage.Seek(0, io.SeekStart); err != nil {
 		return result, errors.New("encrypted SQLite Go recovery staging cannot be rewound")
 	}
-	prepared, err := prepareSQLiteRecovery(ctx, stage, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, &goSet, &goTrust, parent, name)
+	prepared, err := prepareSQLiteRecovery(ctx, stage, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, &goSet, &goTrust, cargoSet, cargoTrust, parent, name)
 	if err != nil {
 		return result, err
 	}
@@ -83,6 +94,10 @@ func PrepareEncryptedSQLiteGoRecovery(ctx context.Context, ciphertext io.Reader,
 	if inventoryErr == nil {
 		goInventory, inventoryErr = InventoryGo(ctx, tx, maxObjects, maxReferences)
 	}
+	var cargoInventory []GenericObject
+	if inventoryErr == nil && cargoSet != nil {
+		cargoInventory, inventoryErr = InventoryCargo(ctx, tx, maxObjects, maxReferences)
+	}
 	rollbackErr := tx.Rollback()
 	closeErr := db.Close()
 	if inventoryErr != nil || rollbackErr != nil || closeErr != nil {
@@ -99,6 +114,12 @@ func PrepareEncryptedSQLiteGoRecovery(ctx context.Context, ciphertext io.Reader,
 	}
 	if err := RestoreGoSet(ctx, goSet, goTrust, goSources, identity, newStage, store); err != nil {
 		return result, err
+	}
+	if cargoSet != nil {
+		cargoTrust.Inventory = cargoInventory
+		if err := RestoreCargoSet(ctx, *cargoSet, *cargoTrust, cargoSources, identity, newStage, store); err != nil {
+			return result, err
+		}
 	}
 	return prepared, nil
 }

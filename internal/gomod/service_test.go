@@ -1245,6 +1245,26 @@ func assertSQLiteGoRecovery(t *testing.T, ctx context.Context, db *sql.DB, root,
 	if err != nil || prepared.GoObjects != 4 || prepared.GenericObjects != 1 || prepared.InvalidatedUploads != 1 {
 		t.Fatalf("prepare Go recovery=%+v err=%v", prepared, err)
 	}
+	// Exercise the combined path with actual Go and generic objects, even when
+	// this particular snapshot has no Cargo objects.
+	emptyCargoTrust := trusted
+	emptyCargoTrust.Inventory = []backup.GenericObject{}
+	emptyCargo, err := backup.CaptureCargoSet(ctx, emptyCargoTrust, source, remote, identity.Recipient(), private, 1<<20, newStage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combinedReader, _, err := remote.Open(ctx, snapshotObject.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined, combinedErr := backup.PrepareEncryptedSQLiteCargoRecovery(ctx, combinedReader, 65<<20, 64<<20, 10, 10, set, genericTrust, captured.Set, trusted, emptyCargo.Set, emptyCargoTrust, parent, "combined-prepared", genericSources, goSources, nil, identity, newStage)
+	combinedCloseErr := combinedReader.Close()
+	if combinedErr != nil || combinedCloseErr != nil || combined.GenericObjects != 1 || combined.GoObjects != 4 || combined.CargoObjects != 0 {
+		t.Fatalf("combined recovery=%+v err=%v close=%v", combined, combinedErr, combinedCloseErr)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "combined-prepared", "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("combined recovery marker missing:", err)
+	}
 	dir := filepath.Dir(prepared.DatabasePath)
 	if _, err := os.Stat(filepath.Join(dir, "RECOVERY_INCOMPLETE")); err != nil {
 		t.Fatal("Go recovery marker missing:", err)
@@ -1325,6 +1345,104 @@ func assertSQLiteGoRecovery(t *testing.T, ctx context.Context, db *sql.DB, root,
 	sourceCloseErr := sourceStream.Close()
 	if sourceReadErr != nil || sourceCloseErr != nil || !bytes.Equal(sourceBytes, expectedZip) {
 		t.Fatalf("source object changed read=%v close=%v", sourceReadErr, sourceCloseErr)
+	}
+	// Build a second synthetic snapshot containing all three object classes.
+	cargoBytes := []byte("synthetic Cargo recovery object")
+	cargoObject, err := source.Put(ctx, workspaceID, bytes.NewReader(cargoBytes), int64(len(cargoBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedDir := filepath.Join(root, "mixed-catalog")
+	if err := os.Mkdir(mixedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mixedPath := filepath.Join(mixedDir, "mixed-snapshot.sqlite")
+	if _, err := sqlitebackup.Snapshot(ctx, db, mixedPath, sqlitebackup.Options{PagesPerStep: 16}); err != nil {
+		t.Fatal(err)
+	}
+	mixedDB, err := database.Open(ctx, config.Config{DataDir: mixedDir, DatabaseDriver: config.SQLite, DatabaseDSN: mixedPath, DatabaseMaxOpenConns: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mixedDB.Close()
+	cargoRepo, cargoPackage := uuid.NewString(), uuid.NewString()
+	if _, err := mixedDB.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'mixed-cargo-recovery', 'Cargo', ?, 'now', 'now', 'cargo')`, cargoRepo, workspaceID, readerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mixedDB.ExecContext(ctx, `INSERT INTO registry_cargo_packages (package_id, workspace_id, repository_id, name, name_identity, created_by, created_at) VALUES (?, ?, ?, 'mixed_fixture', 'mixed_fixture', ?, 'now')`, cargoPackage, workspaceID, cargoRepo, readerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mixedDB.ExecContext(ctx, `INSERT INTO registry_cargo_versions (cargo_version_id, workspace_id, repository_id, package_id, version, version_identity, index_entry, archive_sha256, archive_size, created_by, created_at) VALUES (?, ?, ?, ?, '1.0.0', '1.0.0', '{}', ?, ?, ?, 'now')`, uuid.NewString(), workspaceID, cargoRepo, cargoPackage, cargoObject.Key.SHA256, cargoObject.Size, readerID); err != nil {
+		t.Fatal(err)
+	}
+	mixedFinalPath := filepath.Join(root, "mixed-final-snapshot.sqlite")
+	if _, err := sqlitebackup.Snapshot(ctx, mixedDB, mixedFinalPath, sqlitebackup.Options{PagesPerStep: 16}); err != nil {
+		t.Fatal(err)
+	}
+	mixedSnapshot, err := os.ReadFile(mixedFinalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedDigest := sha256.Sum256(mixedSnapshot)
+	mixedTrust := backup.GenericSetRecovery{Signer: public, InstallationID: installationID, BackupID: uuid.NewString(), SnapshotSHA256: hex.EncodeToString(mixedDigest[:])}
+	mixedGenericTrust, mixedGoTrust, mixedCargoTrust := mixedTrust, mixedTrust, mixedTrust
+	mixedGenericTrust.Inventory = genericInventory
+	mixedGoTrust.Inventory = goInventory
+	mixedCargoTrust.Inventory = []backup.GenericObject{{Key: cargoObject.Key, Size: cargoObject.Size}}
+	mixedGeneric, err := backup.CaptureGenericSet(ctx, mixedGenericTrust, source, remote, identity.Recipient(), private, 1<<20, newStage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedGo, err := backup.CaptureGoSet(ctx, mixedGoTrust, source, remote, identity.Recipient(), private, 1<<20, newStage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedCargo, err := backup.CaptureCargoSet(ctx, mixedCargoTrust, source, remote, identity.Recipient(), private, 1<<20, newStage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedSources := func(receipts []backup.ObjectReceiptEnvelope) []backup.RecoveryObjectSource {
+		t.Helper()
+		sources := make([]backup.RecoveryObjectSource, 0, len(receipts))
+		for _, envelope := range receipts {
+			receipt, err := backup.VerifyObjectReceipt(envelope, public, installationID, mixedTrust.BackupID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := storage.ObjectKey{WorkspaceID: receipt.WorkspaceID, SHA256: receipt.CipherSHA256}
+			sources = append(sources, backup.RecoveryObjectSource{Receipt: envelope, Open: func(ctx context.Context) (io.ReadCloser, error) {
+				reader, _, err := remote.Open(ctx, key)
+				return reader, err
+			}})
+		}
+		return sources
+	}
+	var mixedEncrypted bytes.Buffer
+	if _, err := backup.EncryptSnapshot(ctx, bytes.NewReader(mixedSnapshot), &mixedEncrypted, 64<<20, 65<<20, identity.Recipient()); err != nil {
+		t.Fatal(err)
+	}
+	missingMixed, missingMixedErr := backup.PrepareEncryptedSQLiteCargoRecovery(ctx, bytes.NewReader(mixedEncrypted.Bytes()), 65<<20, 64<<20, 10, 10, mixedGeneric.Set, mixedGenericTrust, mixedGo.Set, mixedGoTrust, mixedCargo.Set, mixedCargoTrust, parent, "mixed-missing-cargo", mixedSources(mixedGeneric.Receipts), mixedSources(mixedGo.Receipts), nil, identity, newStage)
+	if missingMixedErr == nil || missingMixed.DatabasePath != "" {
+		t.Fatal("mixed recovery accepted a missing Cargo object")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "mixed-missing-cargo", "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("failed mixed recovery marker missing:", err)
+	}
+	mixedPrepared, err := backup.PrepareEncryptedSQLiteCargoRecovery(ctx, bytes.NewReader(mixedEncrypted.Bytes()), 65<<20, 64<<20, 10, 10, mixedGeneric.Set, mixedGenericTrust, mixedGo.Set, mixedGoTrust, mixedCargo.Set, mixedCargoTrust, parent, "mixed-prepared", mixedSources(mixedGeneric.Receipts), mixedSources(mixedGo.Receipts), mixedSources(mixedCargo.Receipts), identity, newStage)
+	if err != nil || mixedPrepared.GenericObjects != 1 || mixedPrepared.GoObjects != 4 || mixedPrepared.CargoObjects != 1 {
+		t.Fatalf("mixed recovery=%+v err=%v", mixedPrepared, err)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "mixed-prepared", "RECOVERY_INCOMPLETE")); err != nil {
+		t.Fatal("mixed recovery marker missing:", err)
+	}
+	mixedStore, err := storage.NewFileSystem(filepath.Join(parent, "mixed-prepared", "object-store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range append(append(append([]backup.GenericObject{}, genericInventory...), goInventory...), mixedCargoTrust.Inventory...) {
+		if err := backup.CopyGenericObject(ctx, mixedStore, object, io.Discard); err != nil {
+			t.Fatalf("mixed recovery object missing: %v", err)
+		}
 	}
 	entries, err := os.ReadDir(stageDir)
 	if err != nil || len(entries) != 0 {

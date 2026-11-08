@@ -43,6 +43,7 @@ type AuthHTTPConfig struct {
 	GoModules              *gomod.Service
 	CargoReservations      *cargo.ReservationService
 	CargoReceipts          *cargo.ReceiptService
+	CargoProtocol          *CargoProtocolConfig
 }
 
 type authHTTP struct {
@@ -53,6 +54,7 @@ type authHTTP struct {
 	goModules              *gomod.Service
 	cargoReservations      *cargo.ReservationService
 	cargoReceipts          *cargo.ReceiptService
+	cargoProtocol          *cargoProtocol
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -240,6 +242,13 @@ func NewHandler(
 			return nil, errors.New("trusted proxy configuration is invalid")
 		}
 	}
+	protocol, err := newCargoProtocol(cfg.CargoProtocol)
+	if err != nil {
+		return nil, err
+	}
+	if protocol != nil && (cfg.CargoReservations == nil || cfg.CargoReceipts == nil) {
+		return nil, errors.New("Cargo protocol requires reservation and receipt services")
+	}
 
 	router := chi.NewRouter()
 	health.registerRoutes(router)
@@ -251,6 +260,7 @@ func NewHandler(
 		goModules:              cfg.GoModules,
 		cargoReservations:      cfg.CargoReservations,
 		cargoReceipts:          cfg.CargoReceipts,
+		cargoProtocol:          protocol,
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -313,6 +323,9 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	}
 	if h.cargoReservations != nil && h.cargoReceipts != nil {
 		h.registerCargoReviewRoutes(router)
+	}
+	if h.cargoProtocol != nil {
+		h.registerCargoProtocolRoutes(router)
 	}
 }
 

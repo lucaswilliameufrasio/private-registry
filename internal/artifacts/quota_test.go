@@ -77,6 +77,12 @@ func exerciseGenericQuotaCountsCargo(t *testing.T, service *Service, db *sql.DB,
 	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("cross-cargo", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
 		t.Fatalf("Cargo receipt did not count towards generic workspace quota: %v", err)
 	}
+	if _, err := cargoService.PublishReceipt(ctx, token.Bearer, workspace, cargoRepo, reservation.ID); err != nil {
+		t.Fatalf("publish synthetic Cargo receipt: %v", err)
+	}
+	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("cross-cargo", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
+		t.Fatalf("Cargo publication did not count towards generic workspace quota: %v", err)
+	}
 	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("cross-cargo", "v2", "file", []byte("one"))); err != nil {
 		t.Fatalf("remaining generic workspace quota was not usable: %v", err)
 	}

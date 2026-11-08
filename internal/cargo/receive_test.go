@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"private-registry/internal/backup"
 	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
@@ -528,8 +529,234 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 	if err := receipts.Receive(ctx, token.Bearer, workspace, repository, lastReservation.ID, lastFrame, bytes.NewReader(lastArchive)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := reservations.ReadSparseIndex(ctx, user, workspace, repository, "receipt_fixture"); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("Cargo index accessible without reader grant: %v", err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, user, workspace, repository, user, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.ReadSparseIndex(ctx, user, workspace, repository, "receipt_fixture"); !errors.Is(err, cargo.ErrPackageUnavailable) {
+		t.Fatalf("pending Cargo receipt appeared in index: %v", err)
+	}
+	if reader, _, err := receipts.OpenPublishedArchive(ctx, user, workspace, repository, "receipt_fixture", "1.0.5"); !errors.Is(err, cargo.ErrPackageUnavailable) {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("pending Cargo archive was accessible: %v", err)
+	}
+	if _, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("publication without review accepted: %v", err)
+	}
 	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "approved", ""); err != nil {
 		t.Fatal(err)
+	}
+	policy, err = repos.CargoReviewPolicy(ctx, user, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = repos.SetCargoReviewPolicy(ctx, user, workspace, repository, policy.Revision, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("publication accepted approval for an old policy: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	var usedBefore int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(archive_size), 0) FROM registry_cargo_reservations WHERE workspace_id = `+bind(1)+` AND status IN ('reserved', 'uploading', 'uploaded')`, workspace).Scan(&usedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = `+bind(1)+` WHERE workspace_id = `+bind(2), usedBefore, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_cargo_publish_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'cargo.publication.created' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID); err == nil {
+			t.Fatal("publication succeeded without audit")
+		}
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_versions WHERE repository_id = ?`, repository).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed audit left a published version: count=%d err=%v", count, err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_cargo_publish_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicationResults := make(chan reviewResult, 2)
+	for range 2 {
+		go func() {
+			id, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID)
+			publicationResults <- reviewResult{id: id, err: err}
+		}()
+	}
+	firstPublication, secondPublication := <-publicationResults, <-publicationResults
+	publishedID := firstPublication.id
+	if firstPublication.err != nil || secondPublication.err != nil || publishedID == "" || secondPublication.id != publishedID {
+		t.Fatalf("concurrent Cargo publication did not reconcile: first=%v second=%v", firstPublication.err, secondPublication.err)
+	}
+	var publishedCount, publicationAuditCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_versions WHERE repository_id = `+bind(1), repository).Scan(&publishedCount); err != nil || publishedCount != 1 {
+		t.Fatalf("concurrent publication created duplicate versions: count=%d err=%v", publishedCount, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events WHERE action = 'cargo.publication.created' AND target_id = `+bind(1), publishedID).Scan(&publicationAuditCount); err != nil || publicationAuditCount != 1 {
+		t.Fatalf("publication audit not recorded exactly once: count=%d err=%v", publicationAuditCount, err)
+	}
+	snapshot, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, inventoryErr := backup.InventoryCargo(ctx, snapshot, 100, 100)
+	if inventoryErr != nil {
+		_ = snapshot.Rollback()
+		t.Fatal(inventoryErr)
+	}
+	var publishedReferences int
+	for _, object := range inventory {
+		if object.Key.WorkspaceID == workspace && object.Key.SHA256 == lastFrame.SHA256 && object.Size == lastFrame.Size {
+			publishedReferences++
+		}
+	}
+	if publishedReferences != 1 {
+		_ = snapshot.Rollback()
+		t.Fatalf("Cargo inventory did not deduplicate published receipt: count=%d", publishedReferences)
+	}
+	if _, err := backup.InventoryCargo(ctx, snapshot, 100, 1); err == nil {
+		_ = snapshot.Rollback()
+		t.Fatal("Cargo inventory accepted a reference limit below the snapshot")
+	}
+	if _, err := backup.InventoryCargo(ctx, snapshot, 1, 100); err == nil {
+		_ = snapshot.Rollback()
+		t.Fatal("Cargo inventory accepted an object limit below the snapshot")
+	}
+	if err := snapshot.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	conflictTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventoryPackage string
+	if err := conflictTx.QueryRowContext(ctx, `SELECT package_id FROM registry_cargo_versions WHERE cargo_version_id = `+bind(1), publishedID).Scan(&inventoryPackage); err != nil {
+		_ = conflictTx.Rollback()
+		t.Fatal(err)
+	}
+	conflictQuery := `INSERT INTO registry_cargo_versions (cargo_version_id, workspace_id, repository_id, package_id, version, version_identity, index_entry, archive_sha256, archive_size, created_by, created_at) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, ` + bind(4) + `, '8.8.8', '8.8.8', '{}', ` + bind(5) + `, ` + bind(6) + `, ` + bind(7) + `, 'now')`
+	if _, err := conflictTx.ExecContext(ctx, conflictQuery, uuid.NewString(), workspace, repository, inventoryPackage, lastFrame.SHA256, lastFrame.Size+1, user); err != nil {
+		_ = conflictTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := backup.InventoryCargo(ctx, conflictTx, 100, 100); err == nil {
+		_ = conflictTx.Rollback()
+		t.Fatal("Cargo inventory accepted conflicting sizes for one object")
+	}
+	if err := conflictTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM registry_cargo_publications WHERE reservation_id = `+bind(1), lastReservation.ID); err == nil {
+		t.Fatal("published receipt linkage was deleted")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_publications SET cargo_version_id = cargo_version_id WHERE reservation_id = `+bind(1), lastReservation.ID); err == nil {
+		t.Fatal("published receipt linkage was updated")
+	}
+	if again, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID); err != nil || again != publishedID {
+		t.Fatalf("publication retry did not reconcile: %v", err)
+	}
+	index, err := reservations.ReadSparseIndex(ctx, user, workspace, repository, "receipt_fixture")
+	if err != nil || !bytes.Contains(index, []byte(`"vers":"1.0.5"`)) || bytes.Contains(index, []byte(`"vers":"1.0.0"`)) {
+		t.Fatalf("published Cargo sparse index incorrect: %v", err)
+	}
+	publishedArchive, publishedSize, err := receipts.OpenPublishedArchive(ctx, user, workspace, repository, "receipt_fixture", "1.0.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedBytes, err := io.ReadAll(publishedArchive)
+	publishedCloseErr := publishedArchive.Close()
+	if err != nil || publishedCloseErr != nil || publishedSize != int64(len(lastArchive)) || !bytes.Equal(publishedBytes, lastArchive) {
+		t.Fatal("published Cargo archive differs from receipt")
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_cargo_yank_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'cargo.version.yanked' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if err := reservations.SetYanked(ctx, token.Bearer, workspace, repository, "receipt_fixture", "1.0.5", true); err == nil {
+			t.Fatal("Cargo yank succeeded without audit")
+		}
+		var state int
+		if err := db.QueryRowContext(ctx, `SELECT yanked FROM registry_cargo_versions WHERE cargo_version_id = ?`, publishedID).Scan(&state); err != nil || state != 0 {
+			t.Fatalf("failed yank audit changed state: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_cargo_yank_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reservations.SetYanked(ctx, token.Bearer, workspace, repository, "receipt_fixture", "1.0.5", true); err != nil {
+		t.Fatalf("yank Cargo version: %v", err)
+	}
+	if err := reservations.SetYanked(ctx, token.Bearer, workspace, repository, "receipt_fixture", "1.0.5", true); err != nil {
+		t.Fatalf("repeat Cargo yank: %v", err)
+	}
+	index, err = reservations.ReadSparseIndex(ctx, user, workspace, repository, "receipt_fixture")
+	if err != nil || !bytes.Contains(index, []byte(`"yanked":true`)) {
+		t.Fatalf("yank not reflected in Cargo index: %v", err)
+	}
+	yankedArchive, _, err := receipts.OpenPublishedArchive(ctx, user, workspace, repository, "receipt_fixture", "1.0.5")
+	if err != nil {
+		t.Fatalf("yanked archive inaccessible to existing lockfile: %v", err)
+	}
+	if err := yankedArchive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var yankAudits int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events WHERE action = 'cargo.version.yanked' AND target_id = `+bind(1), publishedID).Scan(&yankAudits); err != nil || yankAudits != 1 {
+		t.Fatalf("Cargo yank audit count=%d err=%v", yankAudits, err)
+	}
+	if err := reservations.SetYanked(ctx, token.Bearer, workspace, repository, "receipt_fixture", "1.0.5", false); err != nil {
+		t.Fatalf("unyank Cargo version: %v", err)
+	}
+	index, err = reservations.ReadSparseIndex(ctx, user, workspace, repository, "receipt_fixture")
+	if err != nil || !bytes.Contains(index, []byte(`"yanked":false`)) {
+		t.Fatalf("unyank not reflected in Cargo index: %v", err)
+	}
+	if err := repos.RevokeRepositoryRole(ctx, user, workspace, repository, user, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.ReadSparseIndex(ctx, user, workspace, repository, "receipt_fixture"); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("Cargo index remained accessible after reader revocation: %v", err)
+	}
+	quotaFrame := cargo.PublishFrame{Metadata: []byte(`{"name":"quota_after_publish","vers":"1.0.0","deps":[],"features":{}}`), Size: 1, SHA256: strings.Repeat("d", 64)}
+	if _, err := reservations.Reserve(ctx, token.Bearer, workspace, repository, quotaFrame); !errors.Is(err, cargo.ErrReservationQuota) {
+		t.Fatalf("published version was not counted exactly once at quota: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = `+bind(1)+` WHERE workspace_id = `+bind(2), usedBefore+1, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.Reserve(ctx, token.Bearer, workspace, repository, quotaFrame); err != nil {
+		t.Fatalf("publication double-counted receipt bytes: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = NULL WHERE workspace_id = `+bind(1), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "rejected", "late rejection"); !errors.Is(err, cargo.ErrReviewUnavailable) {
+		t.Fatalf("published receipt accepted new review decision: %v", err)
+	}
+	candidates, _, err = reservations.ListReviewCandidates(ctx, reviewer, workspace, repository, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range candidates {
+		if candidate.ID == lastReservation.ID {
+			t.Fatal("published receipt remained a review candidate")
+		}
+	}
+	if _, err := repos.SetCargoReviewPolicy(ctx, user, workspace, repository, policy.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID); err != nil || again != publishedID {
+		t.Fatalf("published retry failed after later policy revision: %v", err)
 	}
 	raceArchive := syntheticCrate(t, "1.0.6")
 	raceDigest := sha256.Sum256(raceArchive)
@@ -539,6 +766,29 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 		t.Fatal(err)
 	}
 	if err := receipts.Receive(ctx, token.Bearer, workspace, repository, raceReservation.ID, raceFrame, bytes.NewReader(raceArchive)); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packageID string
+	if err := tx.QueryRowContext(ctx, `SELECT package_id FROM registry_cargo_versions WHERE cargo_version_id = `+bind(1), publishedID).Scan(&packageID); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	fakeVersion := uuid.NewString()
+	query := `INSERT INTO registry_cargo_versions (cargo_version_id, workspace_id, repository_id, package_id, version, version_identity, index_entry, archive_sha256, archive_size, created_by, created_at) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, ` + bind(4) + `, '9.9.9', '9.9.9', '{}', ` + bind(5) + `, 1, ` + bind(6) + `, 'now')`
+	if _, err := tx.ExecContext(ctx, query, fakeVersion, workspace, repository, packageID, strings.Repeat("a", 64), user); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_cargo_publications (reservation_id, cargo_version_id, workspace_id, repository_id) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, ` + bind(4) + `)`
+	if _, err := tx.ExecContext(ctx, query, raceReservation.ID, fakeVersion, workspace, repository); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("Cargo publication linked mismatched receipt and version")
+	}
+	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	raceResults := make(chan reviewResult, 2)
@@ -571,6 +821,12 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 	}
 	if err := repos.RevokeRepositoryRole(ctx, user, workspace, repository, user, repositories.GrantPublisher); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, lastReservation.ID); !errors.Is(err, repositories.ErrCargoWriteTokenUnavailable) {
+		t.Fatalf("publication retry accepted revoked publisher grant: %v", err)
+	}
+	if err := reservations.SetYanked(ctx, token.Bearer, workspace, repository, "receipt_fixture", "1.0.5", true); !errors.Is(err, repositories.ErrCargoWriteTokenUnavailable) {
+		t.Fatalf("Cargo yank accepted revoked publisher grant: %v", err)
 	}
 	if _, err := reservations.DecideReview(ctx, reviewer, workspace, repository, lastReservation.ID, "approved", ""); !errors.Is(err, cargo.ErrReviewUnavailable) {
 		t.Fatalf("approval retry accepted revoked publisher grant: %v", err)

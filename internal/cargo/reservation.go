@@ -144,13 +144,6 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		if exists {
 			return ErrReservationConflict
 		}
-		query = `SELECT EXISTS (SELECT 1 FROM registry_cargo_packages p JOIN registry_cargo_versions v ON v.package_id = p.package_id WHERE p.repository_id = ` + s.bind(1) + ` AND p.name_identity = ` + s.bind(2) + ` AND v.version_identity = ` + s.bind(3) + `)`
-		if err := tx.QueryRowContext(ctx, query, repository, nameKey, versionKey).Scan(&exists); err != nil {
-			return errors.New("Cargo version identity could not be checked")
-		}
-		if exists {
-			return ErrReservationConflict
-		}
 		query = `SELECT reservation_id, name, version, archive_sha256, archive_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated FROM registry_cargo_reservations WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
 		var existingID, name, version, digest, metadata, existingToken, existingActor string
 		var size, expires int64
@@ -165,6 +158,13 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return errors.New("Cargo reservation could not be checked")
+		}
+		query = `SELECT EXISTS (SELECT 1 FROM registry_cargo_packages p JOIN registry_cargo_versions v ON v.package_id = p.package_id WHERE p.repository_id = ` + s.bind(1) + ` AND p.name_identity = ` + s.bind(2) + ` AND v.version_identity = ` + s.bind(3) + `)`
+		if err := tx.QueryRowContext(ctx, query, repository, nameKey, versionKey).Scan(&exists); err != nil {
+			return errors.New("Cargo version identity could not be checked")
+		}
+		if exists {
+			return ErrReservationConflict
 		}
 		if err := s.checkQuota(ctx, tx, workspace, repository, frame.Size); err != nil {
 			return err
@@ -231,7 +231,7 @@ func (s *ReservationService) checkQuota(ctx context.Context, tx *sql.Tx, workspa
 			{"registry_go_module_versions", "zip_size + LENGTH(mod_bytes)", ""},
 			{"registry_go_upload_sessions", "zip_size + LENGTH(mod_bytes)", " AND status IN ('receiving', 'uploading', 'uploaded')"},
 			{"registry_cargo_versions", "archive_size", ""},
-			{"registry_cargo_reservations", "archive_size", " AND status IN ('reserved', 'uploading', 'uploaded')"},
+			{"registry_cargo_reservations", "archive_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_cargo_publications p WHERE p.reservation_id = registry_cargo_reservations.reservation_id)"},
 		} {
 			if limit.repository && source.table != "registry_cargo_versions" && source.table != "registry_cargo_reservations" {
 				continue

@@ -71,7 +71,7 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, state := range []string{"reserved", "uploading", "uploaded"} {
+	for _, state := range []string{"reserved", "uploading", "uploaded", "published"} {
 		if state == "uploading" {
 			if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploading', upload_claim_id = `+bind(1)+` WHERE reservation_id = `+bind(2), uuid.NewString(), reservation.ID); err != nil {
 				t.Fatal(err)
@@ -80,6 +80,11 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 		if state == "uploaded" {
 			if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, index_entry = '{}' WHERE reservation_id = `+bind(1), reservation.ID); err != nil {
 				t.Fatal(err)
+			}
+		}
+		if state == "published" {
+			if _, err := reservationService.PublishReceipt(ctx, token.Bearer, workspace, cargoRepo, reservation.ID); err != nil {
+				t.Fatalf("publish synthetic Cargo receipt: %v", err)
 			}
 		}
 		tx, err := db.BeginTx(ctx, nil)

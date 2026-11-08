@@ -93,25 +93,43 @@ func (s *Service) IssuePersonalReadToken(ctx context.Context, actorUserID, works
 // VerifyPersonalReadToken validates the bearer and current authority under the
 // same coordination lock used for revocation and grant mutations.
 func (s *Service) VerifyPersonalReadToken(ctx context.Context, bearer, workspaceID, repositoryID string) (string, error) {
+	var userID string
+	err := s.WithPersonalReadTokenTransaction(ctx, bearer, workspaceID, repositoryID, func(_ *sql.Tx, user string) error {
+		userID = user
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return userID, nil
+}
+
+// WithPersonalReadTokenTransaction validates the exact token and its original
+// grant while holding the authorization coordination lock. The callback may
+// read metadata but must not retain the transaction or perform network I/O.
+func (s *Service) WithPersonalReadTokenTransaction(ctx context.Context, bearer, workspaceID, repositoryID string, operation func(*sql.Tx, string) error) error {
+	if s == nil || s.db == nil || ctx == nil || operation == nil {
+		return ErrPersonalTokenUnavailable
+	}
 	workspaceID, err := parseUUID(workspaceID, ErrPersonalTokenUnavailable)
 	if err != nil {
-		return "", ErrPersonalTokenUnavailable
+		return ErrPersonalTokenUnavailable
 	}
 	repositoryID, err = parseUUID(repositoryID, ErrPersonalTokenUnavailable)
 	if err != nil {
-		return "", ErrPersonalTokenUnavailable
+		return ErrPersonalTokenUnavailable
 	}
 	if !strings.HasPrefix(bearer, "prp_") {
-		return "", ErrPersonalTokenUnavailable
+		return ErrPersonalTokenUnavailable
 	}
 	idText, encoded, found := strings.Cut(strings.TrimPrefix(bearer, "prp_"), ".")
 	id, err := parseUUID(idText, ErrPersonalTokenUnavailable)
 	if err != nil || !found || idText != id || len(encoded) != 43 {
-		return "", ErrPersonalTokenUnavailable
+		return ErrPersonalTokenUnavailable
 	}
 	secret, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
 	if err != nil || len(secret) != 32 {
-		return "", ErrPersonalTokenUnavailable
+		return ErrPersonalTokenUnavailable
 	}
 	defer clear(secret)
 	digest := sha256.Sum256(secret)
@@ -161,12 +179,9 @@ func (s *Service) VerifyPersonalReadToken(ctx context.Context, bearer, workspace
 		if !granted {
 			return ErrPersonalTokenUnavailable
 		}
-		return nil
+		return operation(tx, userID)
 	})
-	if err != nil {
-		return "", err
-	}
-	return userID, nil
+	return err
 }
 
 // ListPersonalReadTokens returns only the caller's metadata; revoked and

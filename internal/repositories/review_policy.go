@@ -143,7 +143,7 @@ func (s *Service) setReviewPolicy(ctx context.Context, actorUserID, workspaceID,
 			if format == FormatGo {
 				query = `UPDATE registry_go_upload_sessions SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('receiving', 'uploading', 'uploaded')`
 			} else {
-				query = `UPDATE registry_cargo_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
+				query = `UPDATE registry_cargo_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_cargo_publications p WHERE p.reservation_id = registry_cargo_reservations.reservation_id)`
 			}
 			if _, err := tx.ExecContext(ctx, query, workspaceID, repositoryID); err != nil {
 				return errors.New("pending uploads could not be held for review")

@@ -23,6 +23,7 @@ type PreparedSQLiteRecovery struct {
 	SnapshotSize       int64
 	GenericObjects     int
 	GoObjects          int
+	CargoObjects       int
 	Invalidated        InvalidatedCredentials
 	HeldJobs           int64
 	InvalidatedUploads int64
@@ -39,10 +40,10 @@ type PreparedSQLiteRecovery struct {
 // The caller must authenticate and decrypt the complete encrypted snapshot
 // before passing it, enforce resource budgets and protect the trusted parent.
 func PrepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotBytes int64, maxObjects, maxReferences int, setEnvelope GenericSetEnvelope, trusted GenericSetRecovery, parent, name string) (result PreparedSQLiteRecovery, retErr error) {
-	return prepareSQLiteRecovery(ctx, snapshot, maxSnapshotBytes, maxObjects, maxReferences, setEnvelope, trusted, nil, nil, parent, name)
+	return prepareSQLiteRecovery(ctx, snapshot, maxSnapshotBytes, maxObjects, maxReferences, setEnvelope, trusted, nil, nil, nil, nil, parent, name)
 }
 
-func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotBytes int64, maxObjects, maxReferences int, setEnvelope GenericSetEnvelope, trusted GenericSetRecovery, goEnvelope *GoSetEnvelope, trustedGo *GenericSetRecovery, parent, name string) (result PreparedSQLiteRecovery, retErr error) {
+func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotBytes int64, maxObjects, maxReferences int, setEnvelope GenericSetEnvelope, trusted GenericSetRecovery, goEnvelope *GoSetEnvelope, trustedGo *GenericSetRecovery, cargoEnvelope *CargoSetEnvelope, trustedCargo *GenericSetRecovery, parent, name string) (result PreparedSQLiteRecovery, retErr error) {
 	if ctx == nil || snapshot == nil || maxSnapshotBytes < 1 || maxSnapshotBytes > 1<<40 || maxObjects < 1 || maxObjects > maxGenericSetObjects || maxReferences < 1 || maxReferences > 10000000 || !filepath.IsAbs(parent) || !recoveryDirectoryName.MatchString(name) {
 		return result, errors.New("isolated SQLite recovery parameters are invalid")
 	}
@@ -63,6 +64,17 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 			return result, errors.New("Go recovery context does not match snapshot context")
 		}
 		if _, err := VerifyGoSet(*goEnvelope, trustedGo.Signer, trustedGo.InstallationID, trustedGo.BackupID, trustedGo.SnapshotSHA256); err != nil {
+			return result, err
+		}
+	}
+	if (cargoEnvelope == nil) != (trustedCargo == nil) {
+		return result, errors.New("Cargo recovery set and trust must be supplied together")
+	}
+	if cargoEnvelope != nil {
+		if trustedCargo.InstallationID != trusted.InstallationID || trustedCargo.BackupID != trusted.BackupID || trustedCargo.SnapshotSHA256 != trusted.SnapshotSHA256 {
+			return result, errors.New("Cargo recovery context does not match snapshot context")
+		}
+		if _, err := VerifyCargoSet(*cargoEnvelope, trustedCargo.Signer, trustedCargo.InstallationID, trustedCargo.BackupID, trustedCargo.SnapshotSHA256); err != nil {
 			return result, err
 		}
 	}
@@ -132,16 +144,21 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if inventoryErr == nil {
 		goInventory, inventoryErr = InventoryGo(ctx, inventoryTx, maxObjects, maxReferences)
 	}
-	var hasCargoVersions bool
+	var cargoInventory []GenericObject
 	if inventoryErr == nil {
-		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_cargo_versions UNION ALL SELECT 1 FROM registry_cargo_reservations WHERE object_verified = 1)`).Scan(&hasCargoVersions)
+		cargoInventory, inventoryErr = InventoryCargo(ctx, inventoryTx, maxObjects, maxReferences)
 	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {
 		return result, errors.New("isolated SQLite recovery inventory could not be verified")
 	}
-	if hasCargoVersions {
+	if cargoEnvelope == nil && len(cargoInventory) > 0 {
 		return result, errors.New("partial recovery cannot prepare a catalog containing Cargo versions")
+	}
+	if cargoEnvelope != nil {
+		if _, err := VerifyCargoSetInventory(*cargoEnvelope, trustedCargo.Signer, trustedCargo.InstallationID, trustedCargo.BackupID, digest, cargoInventory); err != nil {
+			return result, err
+		}
 	}
 	if _, err := VerifyGenericSetInventory(setEnvelope, trusted.Signer, trusted.InstallationID, trusted.BackupID, digest, inventory); err != nil {
 		return result, err
@@ -174,5 +191,5 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if err := tx.Commit(); err != nil {
 		return result, errors.New("isolated SQLite recovery transaction could not commit")
 	}
-	return PreparedSQLiteRecovery{DatabasePath: path, SnapshotSize: size, GenericObjects: len(inventory), GoObjects: len(goInventory), Invalidated: invalidated, HeldJobs: heldJobs, InvalidatedUploads: invalidatedUploads}, nil
+	return PreparedSQLiteRecovery{DatabasePath: path, SnapshotSize: size, GenericObjects: len(inventory), GoObjects: len(goInventory), CargoObjects: len(cargoInventory), Invalidated: invalidated, HeldJobs: heldJobs, InvalidatedUploads: invalidatedUploads}, nil
 }
