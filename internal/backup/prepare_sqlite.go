@@ -150,7 +150,7 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	}
 	var hasNPMVersions bool
 	if inventoryErr == nil {
-		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_npm_versions)`).Scan(&hasNPMVersions)
+		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_npm_versions UNION ALL SELECT 1 FROM registry_npm_reservations WHERE object_verified = 1)`).Scan(&hasNPMVersions)
 	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {

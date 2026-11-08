@@ -12,7 +12,7 @@ func (s *ReservationService) ExpireUploadBatch(ctx context.Context, now time.Tim
 	if s == nil || s.db == nil || ctx == nil || now.IsZero() || limit < 1 || limit > 256 {
 		return 0, errors.New("npm reservation expiration parameters are invalid")
 	}
-	query := `SELECT reservation_id, expires_at_ms FROM registry_npm_reservations WHERE status = 'reserved' AND expires_at_ms <= ` + s.bind(1) + ` ORDER BY expires_at_ms, reservation_id LIMIT ` + s.bind(2)
+	query := `SELECT reservation_id, expires_at_ms FROM registry_npm_reservations WHERE status IN ('reserved', 'uploading') AND expires_at_ms <= ` + s.bind(1) + ` ORDER BY expires_at_ms, reservation_id LIMIT ` + s.bind(2)
 	rows, err := s.db.QueryContext(ctx, query, now.UTC().UnixMilli(), limit)
 	if err != nil {
 		return 0, errors.New("npm reservation expiration candidates could not be read")
@@ -39,7 +39,7 @@ func (s *ReservationService) ExpireUploadBatch(ctx context.Context, now time.Tim
 	}
 	count := 0
 	for _, item := range candidates {
-		query := `UPDATE registry_npm_reservations SET status = 'expired' WHERE reservation_id = ` + s.bind(1) + ` AND expires_at_ms = ` + s.bind(2) + ` AND status = 'reserved'`
+		query := `UPDATE registry_npm_reservations SET status = 'expired', upload_claim_id = NULL WHERE reservation_id = ` + s.bind(1) + ` AND expires_at_ms = ` + s.bind(2) + ` AND status IN ('reserved', 'uploading')`
 		result, err := s.db.ExecContext(ctx, query, item.id, item.expires)
 		if err != nil {
 			return count, errors.New("npm reservation expiration could not be recorded")

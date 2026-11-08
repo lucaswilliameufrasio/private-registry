@@ -122,6 +122,7 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal("create artifact service:", err)
 	}
+	exerciseNPMReceiptValidatesAndStores(t, db, config.Postgres, repositoryService, objectStore, workspaceID, ownerID, publisherID)
 
 	payload := []byte("PostgreSQL publication and ticketed read")
 	session, err := service.StartUpload(ctx, publisherID, workspaceID, repositoryID,
@@ -298,9 +299,19 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 		t.Fatalf("repeated PostgreSQL recovery held jobs=%d error=%v", heldAgain, err)
 	}
 	uploads, err := backup.InvalidateRestoredUploads(ctx, recoveryTx, config.Postgres, jobNow)
-	if err != nil || uploads != 2 {
+	if err != nil || uploads != 4 {
 		_ = recoveryTx.Rollback()
 		t.Fatalf("PostgreSQL recovery invalidated uploads=%d error=%v", uploads, err)
+	}
+	var npmStatus string
+	var npmInvalidated int
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_npm_reservations WHERE workspace_id = $1 AND name = 'fixture' AND object_verified = 1`, workspaceID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "uploaded" || npmInvalidated != 1 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery did not hold npm receipt: status=%q invalidated=%d err=%v", npmStatus, npmInvalidated, err)
+	}
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_npm_reservations WHERE workspace_id = $1 AND name = 'fixture' AND object_verified = 0`, workspaceID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "expired" || npmInvalidated != 1 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery did not expire npm reservation: status=%q invalidated=%d err=%v", npmStatus, npmInvalidated, err)
 	}
 	uploadsAgain, err := backup.InvalidateRestoredUploads(ctx, recoveryTx, config.Postgres, jobNow)
 	if err != nil || uploadsAgain != 0 {

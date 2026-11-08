@@ -38,13 +38,15 @@ func exerciseNPMReservationMigration(t *testing.T, ctx context.Context, db *sql.
 	old := migrationFS(t, "sql/sqlite/000001_installation.sql", string(first)).(fstest.MapFS)
 	delete(old, "sql/sqlite/000028_npm_reservations.sql")
 	delete(old, "sql/postgres/000028_npm_reservations.sql")
+	delete(old, "sql/sqlite/000029_npm_receipts.sql")
+	delete(old, "sql/postgres/000029_npm_receipts.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 27 {
 		t.Fatalf("prepare v27 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 28 || len(report.AppliedVersions) != 1 || report.AppliedVersions[0] != 28 {
-			t.Fatalf("v28 upgrade failed: %+v err=%v", report, err)
+		if err != nil || report.CurrentVersion != 29 || len(report.AppliedVersions) != 2 || report.AppliedVersions[0] != 28 || report.AppliedVersions[1] != 29 {
+			t.Fatalf("v28–v29 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 			t.Fatal(err)

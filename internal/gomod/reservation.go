@@ -213,7 +213,7 @@ func (s *Service) checkReservationQuota(ctx context.Context, tx *sql.Tx, workspa
 			} else if table == "registry_npm_versions" {
 				expression = "tarball_size"
 			} else if table == "registry_npm_reservations" {
-				expression, condition = "tarball_size", " AND status = 'reserved'"
+				expression, condition = "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded')"
 			}
 			query := `SELECT COALESCE(SUM(` + expression + `), 0) FROM ` + table + ` WHERE workspace_id = ` + s.bind(1) + condition
 			args := []any{workspaceID}

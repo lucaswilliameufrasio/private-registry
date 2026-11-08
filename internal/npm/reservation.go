@@ -85,7 +85,7 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 			return repositories.ErrNPMWriteTokenUnavailable
 		}
 		now := time.Now().UTC().Truncate(time.Millisecond)
-		query := `UPDATE registry_npm_reservations SET status = 'expired' WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND status = 'reserved' AND expires_at_ms <= ` + s.bind(3)
+		query := `UPDATE registry_npm_reservations SET status = 'expired', upload_claim_id = NULL WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND status IN ('reserved', 'uploading') AND expires_at_ms <= ` + s.bind(3)
 		if _, err := tx.ExecContext(ctx, query, repository, request.Name, now.UnixMilli()); err != nil {
 			return errors.New("expired npm reservation could not be reconciled")
 		}
@@ -97,7 +97,7 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		if exists {
 			return ErrReservationConflict
 		}
-		query = `SELECT reservation_id, version, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated FROM registry_npm_reservations WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status = 'reserved'`
+		query = `SELECT reservation_id, version, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated FROM registry_npm_reservations WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
 		var id, version, digest, metadata, storedToken, storedActor string
 		var size, expires int64
 		var invalidated int
@@ -170,7 +170,7 @@ func (s *ReservationService) checkQuota(ctx context.Context, tx *sql.Tx, workspa
 			{"registry_cargo_versions", "archive_size", ""},
 			{"registry_cargo_reservations", "archive_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_cargo_publications p WHERE p.reservation_id = registry_cargo_reservations.reservation_id)"},
 			{"registry_npm_versions", "tarball_size", ""},
-			{"registry_npm_reservations", "tarball_size", " AND status = 'reserved'"},
+			{"registry_npm_reservations", "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded')"},
 		} {
 			if limit.repository && source.table != "registry_npm_versions" && source.table != "registry_npm_reservations" {
 				continue

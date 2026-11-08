@@ -225,8 +225,25 @@ func exerciseNPMReservationQuotaAndLifecycle(t *testing.T, artifacts *Service, d
 	if count, err := service.ExpireUploadBatch(ctx, time.Now().UTC().Add(time.Hour), 1); err != nil || count != 1 {
 		t.Fatalf("npm reservation expiration failed: count=%d err=%v", count, err)
 	}
-	if count, err := service.ExpireUploadBatch(ctx, time.Now().UTC().Add(time.Hour), 1); err != nil || count != 0 {
-		t.Fatalf("npm expiration was not idempotent: count=%d err=%v", count, err)
+	for attempt := 0; attempt < 3; attempt++ {
+		count, err := service.ExpireUploadBatch(ctx, time.Now().UTC().Add(time.Hour), 1)
+		if err != nil || count < 0 || count > 1 {
+			t.Fatalf("npm expiration exceeded its batch bound: count=%d err=%v", count, err)
+		}
+		if count == 0 {
+			break
+		}
+		if attempt == 2 {
+			t.Fatal("npm expiration did not converge")
+		}
+	}
+	winner := first.reservation
+	if first.err != nil {
+		winner = second.reservation
+	}
+	var expiredStatus string
+	if err := db.QueryRowContext(ctx, `SELECT status FROM registry_npm_reservations WHERE reservation_id = `+p(1), winner.ID).Scan(&expiredStatus); err != nil || expiredStatus != "expired" {
+		t.Fatalf("npm reservation did not expire: status=%q err=%v", expiredStatus, err)
 	}
 	if err := artifacts.repositories.RevokeRepositoryRole(ctx, owner, workspace, repository, actor, repositories.GrantPublisher); err != nil {
 		t.Fatal(err)
