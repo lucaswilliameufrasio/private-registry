@@ -35,4 +35,5 @@ func TestPostgresModulePublicationAndAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	exerciseModulePublication(t, ctx, db, cfg.DatabaseDriver, t.TempDir(), nil)
+	exerciseGoQuotaCountsCargoReceipt(t, ctx, db, cfg.DatabaseDriver, t.TempDir())
 }

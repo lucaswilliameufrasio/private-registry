@@ -31,6 +31,7 @@ type Format string
 const (
 	FormatGeneric Format = "generic"
 	FormatGo      Format = "go"
+	FormatCargo   Format = "cargo"
 )
 
 const (

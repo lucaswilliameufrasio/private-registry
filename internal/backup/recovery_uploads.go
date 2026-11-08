@@ -53,7 +53,7 @@ func InvalidateRestoredUploads(ctx context.Context, tx *sql.Tx, driver config.Da
 		return 0, errors.New("recovered Go uploads could not be counted; rollback required")
 	}
 	count += goCount
-	cargoUpdated, err := tx.ExecContext(ctx, `UPDATE registry_cargo_reservations SET recovery_invalidated = 1, status = 'expired' WHERE status = 'reserved' AND recovery_invalidated = 0`)
+	cargoUpdated, err := tx.ExecContext(ctx, `UPDATE registry_cargo_reservations SET recovery_invalidated = 1, status = CASE WHEN status IN ('reserved', 'uploading') THEN 'expired' ELSE status END, upload_claim_id = NULL WHERE status IN ('reserved', 'uploading', 'uploaded') AND recovery_invalidated = 0`)
 	if err != nil {
 		return 0, errors.New("recovered Cargo reservations could not be invalidated; rollback required")
 	}

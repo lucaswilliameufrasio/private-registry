@@ -72,6 +72,15 @@ func TestRestoreGenericSetRequiresCompleteMetadataAndIsolatedDestination(t *test
 		t.Fatal(err)
 	}
 	root := t.TempDir()
+	protected, err := storage.NewFileSystem(filepath.Join(root, "protected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedBytes := []byte("synthetic protected object outside recovery destination")
+	protectedInfo, err := protected.Put(ctx, workspace, bytes.NewReader(protectedBytes), int64(len(protectedBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	destination, err := storage.NewFileSystem(filepath.Join(root, "restored"))
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +117,15 @@ func TestRestoreGenericSetRequiresCompleteMetadataAndIsolatedDestination(t *test
 	if err := RestoreGenericSet(ctx, setEnvelope, trusted, badSources, identity, stage, partial); err == nil {
 		t.Fatal("corrupt second ciphertext was accepted")
 	}
+	protectedReader, afterInfo, err := protected.Open(ctx, protectedInfo.Key)
+	if err != nil {
+		t.Fatal("protected object unavailable after failed isolated restore:", err)
+	}
+	afterBytes, readErr := io.ReadAll(protectedReader)
+	closeErr := protectedReader.Close()
+	if readErr != nil || closeErr != nil || afterInfo != protectedInfo || !bytes.Equal(afterBytes, protectedBytes) {
+		t.Fatal("failed isolated restore changed the protected object")
+	}
 	firstReader, _, err := partial.Open(ctx, trusted.Inventory[0].Key)
 	if err != nil {
 		t.Fatal("expected first object in unpromotable partial destination:", err)
@@ -121,6 +139,15 @@ func TestRestoreGenericSetRequiresCompleteMetadataAndIsolatedDestination(t *test
 	}
 	if err := RestoreGenericSet(ctx, setEnvelope, trusted, sources, identity, stage, destination); err != nil {
 		t.Fatal("restore complete synthetic set:", err)
+	}
+	protectedReader, afterInfo, err = protected.Open(ctx, protectedInfo.Key)
+	if err != nil {
+		t.Fatal("protected object unavailable after successful isolated restore:", err)
+	}
+	afterBytes, readErr = io.ReadAll(protectedReader)
+	closeErr = protectedReader.Close()
+	if readErr != nil || closeErr != nil || afterInfo != protectedInfo || !bytes.Equal(afterBytes, protectedBytes) {
+		t.Fatal("successful isolated restore changed the protected object")
 	}
 	for _, object := range trusted.Inventory {
 		reader, info, err := destination.Open(ctx, object.Key)

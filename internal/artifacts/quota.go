@@ -37,7 +37,7 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&cargoUsage); err != nil || cargoUsage < 0 {
 			return errors.New("workspace Cargo quota usage could not be checked")
 		}
-		query = `SELECT COALESCE(SUM(archive_size), 0) FROM registry_cargo_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status = 'reserved'`
+		query = `SELECT COALESCE(SUM(archive_size), 0) FROM registry_cargo_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&cargoReserved); err != nil || cargoReserved < 0 {
 			return errors.New("workspace Cargo quota reservations could not be checked")
 		}

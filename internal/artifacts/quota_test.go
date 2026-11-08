@@ -61,11 +61,21 @@ func exerciseGenericQuotaCountsCargo(t *testing.T, service *Service, db *sql.DB,
 		t.Fatal(err)
 	}
 	frame := cargo.PublishFrame{Metadata: []byte(`{"name":"fixture","vers":"1.0.0","deps":[],"features":{}}`), Size: 7, SHA256: strings.Repeat("a", 64)}
-	if _, err := cargoService.Reserve(ctx, token.Bearer, workspace, cargoRepo, frame); err != nil {
+	reservation, err := cargoService.Reserve(ctx, token.Bearer, workspace, cargoRepo, frame)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("cross-cargo", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
 		t.Fatalf("Cargo reservation did not count towards generic workspace quota: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploading', upload_claim_id = `+bindArg(1)+` WHERE reservation_id = `+bindArg(2), uuid.NewString(), reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, index_entry = '{}' WHERE reservation_id = `+bindArg(1), reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("cross-cargo", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
+		t.Fatalf("Cargo receipt did not count towards generic workspace quota: %v", err)
 	}
 	if _, err := service.StartUpload(ctx, actor, workspace, repository, requestFor("cross-cargo", "v2", "file", []byte("one"))); err != nil {
 		t.Fatalf("remaining generic workspace quota was not usable: %v", err)

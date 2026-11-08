@@ -125,7 +125,7 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 			return repositories.ErrCargoWriteTokenUnavailable
 		}
 		now := time.Now().UTC().Truncate(time.Millisecond)
-		query := `UPDATE registry_cargo_reservations SET status = 'expired' WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND status = 'reserved' AND expires_at_ms <= ` + s.bind(3)
+		query := `UPDATE registry_cargo_reservations SET status = 'expired', upload_claim_id = NULL WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND status IN ('reserved', 'uploading') AND expires_at_ms <= ` + s.bind(3)
 		if _, err := tx.ExecContext(ctx, query, repository, nameKey, now.UnixMilli()); err != nil {
 			return errors.New("expired Cargo reservation could not be reconciled")
 		}
@@ -137,7 +137,7 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		if exists {
 			return ErrReservationConflict
 		}
-		query = `SELECT EXISTS (SELECT 1 FROM registry_cargo_reservations WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND name <> ` + s.bind(3) + ` AND status = 'reserved')`
+		query = `SELECT EXISTS (SELECT 1 FROM registry_cargo_reservations WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND name <> ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded'))`
 		if err := tx.QueryRowContext(ctx, query, repository, nameKey, entry.Name).Scan(&exists); err != nil {
 			return errors.New("Cargo reserved package identity could not be checked")
 		}
@@ -151,7 +151,7 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		if exists {
 			return ErrReservationConflict
 		}
-		query = `SELECT reservation_id, name, version, archive_sha256, archive_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated FROM registry_cargo_reservations WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status = 'reserved'`
+		query = `SELECT reservation_id, name, version, archive_sha256, archive_size, metadata_sha256, token_id, created_by, expires_at_ms, recovery_invalidated FROM registry_cargo_reservations WHERE repository_id = ` + s.bind(1) + ` AND name_identity = ` + s.bind(2) + ` AND version_identity = ` + s.bind(3) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
 		var existingID, name, version, digest, metadata, existingToken, existingActor string
 		var size, expires int64
 		var invalidated int
@@ -174,8 +174,13 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 			return errors.New("Cargo reservation identity could not be created")
 		}
 		expiresAt := now.Add(24 * time.Hour)
-		query = `INSERT INTO registry_cargo_reservations (reservation_id, workspace_id, repository_id, name, name_identity, version, version_identity, archive_sha256, archive_size, metadata_sha256, token_id, created_by, status, created_at_ms, expires_at_ms) VALUES (` + s.bind(1) + `, ` + s.bind(2) + `, ` + s.bind(3) + `, ` + s.bind(4) + `, ` + s.bind(5) + `, ` + s.bind(6) + `, ` + s.bind(7) + `, ` + s.bind(8) + `, ` + s.bind(9) + `, ` + s.bind(10) + `, ` + s.bind(11) + `, ` + s.bind(12) + `, 'reserved', ` + s.bind(13) + `, ` + s.bind(14) + `)`
-		if _, err := tx.ExecContext(ctx, query, id.String(), workspace, repository, entry.Name, nameKey, entry.Version, versionKey, frame.SHA256, frame.Size, metadataHash, tokenID, actor, now.UnixMilli(), expiresAt.UnixMilli()); err != nil {
+		var reviewHold int
+		query = `SELECT review_required FROM registry_repositories WHERE workspace_id = ` + s.bind(1) + ` AND repository_id = ` + s.bind(2)
+		if err := tx.QueryRowContext(ctx, query, workspace, repository).Scan(&reviewHold); err != nil {
+			return errors.New("Cargo review policy could not be read")
+		}
+		query = `INSERT INTO registry_cargo_reservations (reservation_id, workspace_id, repository_id, name, name_identity, version, version_identity, archive_sha256, archive_size, metadata_sha256, token_id, created_by, status, review_hold, created_at_ms, expires_at_ms) VALUES (` + s.bind(1) + `, ` + s.bind(2) + `, ` + s.bind(3) + `, ` + s.bind(4) + `, ` + s.bind(5) + `, ` + s.bind(6) + `, ` + s.bind(7) + `, ` + s.bind(8) + `, ` + s.bind(9) + `, ` + s.bind(10) + `, ` + s.bind(11) + `, ` + s.bind(12) + `, 'reserved', ` + s.bind(13) + `, ` + s.bind(14) + `, ` + s.bind(15) + `)`
+		if _, err := tx.ExecContext(ctx, query, id.String(), workspace, repository, entry.Name, nameKey, entry.Version, versionKey, frame.SHA256, frame.Size, metadataHash, tokenID, actor, reviewHold, now.UnixMilli(), expiresAt.UnixMilli()); err != nil {
 			return errors.New("Cargo reservation could not be created")
 		}
 		auditID, err := uuid.NewV7()
@@ -226,7 +231,7 @@ func (s *ReservationService) checkQuota(ctx context.Context, tx *sql.Tx, workspa
 			{"registry_go_module_versions", "zip_size + LENGTH(mod_bytes)", ""},
 			{"registry_go_upload_sessions", "zip_size + LENGTH(mod_bytes)", " AND status IN ('receiving', 'uploading', 'uploaded')"},
 			{"registry_cargo_versions", "archive_size", ""},
-			{"registry_cargo_reservations", "archive_size", " AND status = 'reserved'"},
+			{"registry_cargo_reservations", "archive_size", " AND status IN ('reserved', 'uploading', 'uploaded')"},
 		} {
 			if limit.repository && source.table != "registry_cargo_versions" && source.table != "registry_cargo_reservations" {
 				continue

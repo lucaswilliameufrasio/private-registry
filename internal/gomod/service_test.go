@@ -132,6 +132,7 @@ func TestSQLiteModulePublicationAndAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	exerciseModulePublication(t, ctx, db, cfg.DatabaseDriver, root, nil)
+	exerciseGoQuotaCountsCargoReceipt(t, ctx, db, cfg.DatabaseDriver, root)
 }
 
 func exerciseModulePublication(t *testing.T, ctx context.Context, db *sql.DB, driver config.DatabaseDriver, root string, remote storage.Driver) {

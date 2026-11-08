@@ -17,6 +17,15 @@ type ReviewPolicy struct {
 }
 
 func (s *Service) GoReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string) (ReviewPolicy, error) {
+	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatGo)
+}
+
+// CargoReviewPolicy remains internal until reviewed publication is available.
+func (s *Service) CargoReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string) (ReviewPolicy, error) {
+	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatCargo)
+}
+
+func (s *Service) reviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, format Format) (ReviewPolicy, error) {
 	actorID, err := parseUUID(actorUserID, ErrUnauthenticated)
 	if err != nil {
 		return ReviewPolicy{}, ErrUnauthenticated
@@ -44,7 +53,7 @@ func (s *Service) GoReviewPolicy(ctx context.Context, actorUserID, workspaceID, 
 		if role != workspaces.RoleOwner && role != workspaces.RoleAdministrator {
 			return ErrForbidden
 		}
-		if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, FormatGo); err != nil {
+		if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, format); err != nil {
 			return err
 		}
 		query := `SELECT review_required, review_revision FROM registry_repositories WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2)
@@ -65,6 +74,16 @@ func (s *Service) GoReviewPolicy(ctx context.Context, actorUserID, workspaceID, 
 // publication exist. Enabling it holds all in-flight and received Go uploads;
 // disabling it never clears existing holds.
 func (s *Service) SetGoReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool) (ReviewPolicy, error) {
+	return s.setReviewPolicy(ctx, actorUserID, workspaceID, repositoryID, expectedRevision, required, FormatGo)
+}
+
+// SetCargoReviewPolicy holds pending Cargo receipts when review becomes
+// required. Disabling the policy never clears an existing review hold.
+func (s *Service) SetCargoReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool) (ReviewPolicy, error) {
+	return s.setReviewPolicy(ctx, actorUserID, workspaceID, repositoryID, expectedRevision, required, FormatCargo)
+}
+
+func (s *Service) setReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool, format Format) (ReviewPolicy, error) {
 	actorID, err := parseUUID(actorUserID, ErrUnauthenticated)
 	if err != nil {
 		return ReviewPolicy{}, ErrUnauthenticated
@@ -92,7 +111,7 @@ func (s *Service) SetGoReviewPolicy(ctx context.Context, actorUserID, workspaceI
 		if role != workspaces.RoleOwner && role != workspaces.RoleAdministrator {
 			return ErrForbidden
 		}
-		if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, FormatGo); err != nil {
+		if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, format); err != nil {
 			return err
 		}
 		query := `SELECT review_required, review_revision FROM registry_repositories WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2)
@@ -121,9 +140,13 @@ func (s *Service) SetGoReviewPolicy(ctx context.Context, actorUserID, workspaceI
 			return ErrReviewPolicyRevision
 		}
 		if required {
-			query = `UPDATE registry_go_upload_sessions SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('receiving', 'uploading', 'uploaded')`
+			if format == FormatGo {
+				query = `UPDATE registry_go_upload_sessions SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('receiving', 'uploading', 'uploaded')`
+			} else {
+				query = `UPDATE registry_cargo_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
+			}
 			if _, err := tx.ExecContext(ctx, query, workspaceID, repositoryID); err != nil {
-				return errors.New("pending Go uploads could not be held for review")
+				return errors.New("pending uploads could not be held for review")
 			}
 		}
 		if err := recordAudit(ctx, tx, s.driver, actorID, "repository.review_policy.changed", "repository", repositoryID); err != nil {

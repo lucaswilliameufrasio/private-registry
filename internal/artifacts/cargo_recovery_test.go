@@ -15,24 +15,63 @@ import (
 
 	"github.com/google/uuid"
 	"private-registry/internal/backup"
+	"private-registry/internal/cargo"
+	"private-registry/internal/config"
+	"private-registry/internal/repositories"
 	"private-registry/internal/spikes/sqlitebackup"
 )
 
 func TestPartialRecoveryRejectsCargoVersionsWithoutChangingSource(t *testing.T) {
+	for _, kind := range []string{"version", "receipt"} {
+		t.Run(kind, func(t *testing.T) {
+			exercisePartialRecoveryRejectsCargo(t, kind)
+		})
+	}
+}
+
+func exercisePartialRecoveryRejectsCargo(t *testing.T, kind string) {
+	t.Helper()
 	fixture := newArtifactFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	user := fixture.userIDs["publisher"]
 	repository, packageID, versionID := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	for _, item := range []struct {
-		query string
-		args  []any
-	}{
-		{`INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'synthetic-cargo', 'Synthetic Cargo', ?, 'now', 'now', 'cargo')`, []any{repository, fixture.workspaceID, user}},
-		{`INSERT INTO registry_cargo_packages (package_id, workspace_id, repository_id, name, name_identity, created_by, created_at) VALUES (?, ?, ?, 'fixture', 'fixture', ?, 'now')`, []any{packageID, fixture.workspaceID, repository, user}},
-		{`INSERT INTO registry_cargo_versions (cargo_version_id, workspace_id, repository_id, package_id, version, version_identity, index_entry, archive_sha256, archive_size, created_by, created_at) VALUES (?, ?, ?, ?, '1.0.0', '1.0.0', '{}', ?, 12, ?, 'now')`, []any{versionID, fixture.workspaceID, repository, packageID, strings.Repeat("a", 64), user}},
-	} {
-		if _, err := fixture.db.ExecContext(ctx, item.query, item.args...); err != nil {
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'synthetic-cargo', 'Synthetic Cargo', ?, 'now', 'now', 'cargo')`, repository, fixture.workspaceID, user); err != nil {
+		t.Fatal(err)
+	}
+	if kind == "version" {
+		for _, item := range []struct {
+			query string
+			args  []any
+		}{
+			{`INSERT INTO registry_cargo_packages (package_id, workspace_id, repository_id, name, name_identity, created_by, created_at) VALUES (?, ?, ?, 'fixture', 'fixture', ?, 'now')`, []any{packageID, fixture.workspaceID, repository, user}},
+			{`INSERT INTO registry_cargo_versions (cargo_version_id, workspace_id, repository_id, package_id, version, version_identity, index_entry, archive_sha256, archive_size, created_by, created_at) VALUES (?, ?, ?, ?, '1.0.0', '1.0.0', '{}', ?, 12, ?, 'now')`, []any{versionID, fixture.workspaceID, repository, packageID, strings.Repeat("a", 64), user}},
+		} {
+			if _, err := fixture.db.ExecContext(ctx, item.query, item.args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	} else {
+		if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, fixture.userIDs["owner"], fixture.workspaceID, repository, user, repositories.GrantPublisher); err != nil {
+			t.Fatal(err)
+		}
+		token, err := fixture.repositoryService.IssueCargoWriteToken(ctx, user, fixture.workspaceID, repository, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		service, err := cargo.NewReservationService(fixture.db, fixture.repositoryService, config.SQLite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reservation, err := service.Reserve(ctx, token.Bearer, fixture.workspaceID, repository, cargo.PublishFrame{Metadata: []byte(`{"name":"fixture","vers":"1.0.0","deps":[],"features":{}}`), Size: 12, SHA256: strings.Repeat("a", 64)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		versionID = reservation.ID
+		if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploading', upload_claim_id = ? WHERE reservation_id = ?`, uuid.NewString(), versionID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'uploaded', upload_claim_id = NULL, object_verified = 1, index_entry = '{}' WHERE reservation_id = ?`, versionID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -72,7 +111,11 @@ func TestPartialRecoveryRejectsCargoVersionsWithoutChangingSource(t *testing.T) 
 		t.Fatal("failed recovery marker missing:", err)
 	}
 	var count int
-	if err := fixture.db.QueryRowContext(ctx, `SELECT count(*) FROM registry_cargo_versions WHERE cargo_version_id = ? AND archive_sha256 = ?`, versionID, strings.Repeat("a", 64)).Scan(&count); err != nil || count != 1 {
+	query := `SELECT count(*) FROM registry_cargo_versions WHERE cargo_version_id = ? AND archive_sha256 = ?`
+	if kind == "receipt" {
+		query = `SELECT count(*) FROM registry_cargo_reservations WHERE reservation_id = ? AND archive_sha256 = ? AND status = 'uploaded' AND object_verified = 1`
+	}
+	if err := fixture.db.QueryRowContext(ctx, query, versionID, strings.Repeat("a", 64)).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("source Cargo version changed: count=%d err=%v", count, err)
 	}
 }

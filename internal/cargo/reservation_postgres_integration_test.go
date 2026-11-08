@@ -35,4 +35,5 @@ func TestPostgresCargoReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	exerciseReservations(t, ctx, db, config.Postgres)
+	exerciseCargoReceipt(t, ctx, db, config.Postgres, t.TempDir())
 }

@@ -134,7 +134,7 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	}
 	var hasCargoVersions bool
 	if inventoryErr == nil {
-		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_cargo_versions)`).Scan(&hasCargoVersions)
+		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_cargo_versions UNION ALL SELECT 1 FROM registry_cargo_reservations WHERE object_verified = 1)`).Scan(&hasCargoVersions)
 	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {
