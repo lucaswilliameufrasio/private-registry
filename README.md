@@ -4,6 +4,8 @@ Registry privado self-hosted em desenvolvimento. A fundação contém migrations
 
 **Atualização de schema:** a migration atual é a v24. Ela inclui fundações experimentais de catálogo, credencial, reservas, recibos, revisão e publicação Cargo; o adapter continua opt-in e a API recusa a criação de repositórios Cargo. O comando `serve` verifica o histórico e os checksums das migrations antes de abrir o listener, mas não executa migrations. Referências históricas abaixo a versões anteriores precedem essa atualização.
 
+**PostgreSQL e rede:** conexões TCP exigem `REGISTRY_DATABASE_ALLOWED_NETWORKS` com CIDRs canônicos explícitos e DSN com `sslmode=verify-full` e trust TLS adequado; sem redes, TCP é negado. Para hostname, `REGISTRY_DATABASE_DNS_SERVER` deve conter IP e porta explícitos do resolvedor autorizado; sem ele, somente IP literal é aceito. Fallbacks PostgreSQL TCP não são permitidos. Um DSN de socket Unix local permanece disponível, limitado ao socket configurado e sem fallback de rede. Essa proteção não é uma política global de saída: outros clientes, DNS e subprocessos exigem controles próprios ([ADR 0032](docs/adr/0032-outbound-http-boundary.md)).
+
 **Trabalhos recuperados:** após uma futura promoção segura, `GET /api/v1/admin/jobs/recovery` lista metadados limitados de jobs suspensos para administradores. `POST /api/v1/admin/jobs/{jobID}/release-recovery` libera somente jobs idempotentes de expiração de uploads genéricos ou Go, com MFA recente, CSRF, `expected_revision` e `confirm_destinations_and_policies: true`; a confirmação é declaração do operador, não validação automática. Outros jobs e uploads invalidados seguem bloqueados. A preparação experimental de SQLite continua deixando `RECOVERY_INCOMPLETE`, e não há promoção operacional completa.
 
 ## Especificação
@@ -56,6 +58,8 @@ O plano, o roadmap e o progresso de implementação também estão registrados n
 ## Desenvolvimento
 
 Requisitos desta entrega: Go 1.26.10 ou superior; o `go.mod` prefere Go 1.27.3 para incluir correções de segurança da biblioteca padrão. Também são necessários Make, Bash, Docker Compose para fixtures de integração (Floci, PostgreSQL, OCI, Authentik e Valkey), Mix/Hex fixados, Rustup/Cargo 1.99.0, Node.js/npm 24.21.0/11.19.0 e Dart SDK 3.13.5 para os contratos de cliente. Se `dart` não estiver no `PATH`, indique `PUB_TEST_DART_BIN=/path/to/dart`. Dependências Go fixadas em `go.mod`/`go.sum`; módulo local provisório `private-registry`. O remote confirmado é `git@github.com:lucaswilliameufrasio/private-registry.git`. O binário do spike não exige CGO.
+
+O teste de integração offline em Linux também exige `bwrap` e namespaces de usuário e rede não privilegiados disponíveis; ele falha explicitamente se o sandbox não puder ser criado. Não altere configurações do host para fazê-lo passar sem autorização. O teste usa filesystem temporário e somente loopback no namespace, sem comprovar o isolamento da instalação de produção.
 
 ```sh
 go mod download

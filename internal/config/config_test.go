@@ -68,6 +68,38 @@ func TestLoadFromAcceptsPostgresDSNWithoutConnecting(t *testing.T) {
 	}
 }
 
+func TestDatabaseAllowedNetworksAreExplicitAndCanonical(t *testing.T) {
+	cfg, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_DATABASE_ALLOWED_NETWORKS": "192.0.2.0/24, 2001:db8::/32"}))
+	if err != nil || len(cfg.DatabaseAllowedNetworks) != 2 || cfg.DatabaseAllowedNetworks[0] != netip.MustParsePrefix("192.0.2.0/24") || cfg.DatabaseAllowedNetworks[1] != netip.MustParsePrefix("2001:db8::/32") {
+		t.Fatalf("database allowed networks were not parsed: %v", err)
+	}
+	for _, raw := range []string{"", "192.0.2.1/24", "192.0.2.1", "192.0.2.0/24,", "::ffff:192.0.2.0/120", strings.Repeat("192.0.2.0/24,", 129)} {
+		if _, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_DATABASE_ALLOWED_NETWORKS": raw})); err == nil {
+			t.Fatal("invalid database allowed networks were accepted")
+		}
+	}
+	cfg, err = LoadFrom(lookupMap(nil))
+	if err != nil || len(cfg.DatabaseAllowedNetworks) != 0 {
+		t.Fatal("database network access did not default to denied")
+	}
+}
+
+func TestDatabaseDNSServerMustBeExplicitUnicastAddress(t *testing.T) {
+	cfg, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_DATABASE_DNS_SERVER": "127.0.0.1:5353"}))
+	if err != nil || cfg.DatabaseDNSServer != netip.MustParseAddrPort("127.0.0.1:5353") {
+		t.Fatalf("database DNS server was not parsed: %v", err)
+	}
+	for _, raw := range []string{"", "dns.example:53", "127.0.0.1:0", "0.0.0.0:53", "224.0.0.1:53", "[::ffff:127.0.0.1]:53", "127.0.0.1:053", " 127.0.0.1:53"} {
+		if _, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_DATABASE_DNS_SERVER": raw})); err == nil {
+			t.Fatal("invalid database DNS server was accepted")
+		}
+	}
+	cfg, err = LoadFrom(lookupMap(nil))
+	if err != nil || cfg.DatabaseDNSServer.IsValid() {
+		t.Fatal("database DNS server was implicitly enabled")
+	}
+}
+
 func TestLoadFromResolvesOptionalMasterKeyFilePath(t *testing.T) {
 	keyPath := filepath.Join("secrets", "registry-master.key")
 	absoluteKeyPath, err := filepath.Abs(keyPath)

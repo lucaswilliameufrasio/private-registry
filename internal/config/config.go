@@ -22,18 +22,20 @@ const (
 )
 
 type Config struct {
-	ListenAddress          string
-	DataDir                string
-	MasterKeyFile          string
-	CanonicalOrigin        string
-	AssetOrigin            string
-	PublicAssetCORSOrigins []string
-	TrustedProxies         []netip.Prefix
-	DatabaseDriver         DatabaseDriver
-	DatabaseDSN            string
-	DatabaseMaxOpenConns   int
-	MaxUploadBytes         int64
-	MaxConcurrentUploads   int
+	ListenAddress           string
+	DataDir                 string
+	MasterKeyFile           string
+	CanonicalOrigin         string
+	AssetOrigin             string
+	PublicAssetCORSOrigins  []string
+	TrustedProxies          []netip.Prefix
+	DatabaseDriver          DatabaseDriver
+	DatabaseDSN             string
+	DatabaseAllowedNetworks []netip.Prefix
+	DatabaseDNSServer       netip.AddrPort
+	DatabaseMaxOpenConns    int
+	MaxUploadBytes          int64
+	MaxConcurrentUploads    int
 }
 
 type MasterKeySettings struct {
@@ -155,6 +157,32 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if driver == SQLite {
 		defaultDSN = filepath.Join(dataDir, "registry.sqlite")
 	}
+	var databaseAllowedNetworks []netip.Prefix
+	var databaseDNSServer netip.AddrPort
+	if raw, exists := lookup("REGISTRY_DATABASE_DNS_SERVER"); exists {
+		var err error
+		databaseDNSServer, err = netip.ParseAddrPort(raw)
+		address := databaseDNSServer.Addr()
+		if err != nil || databaseDNSServer.String() != raw || databaseDNSServer.Port() == 0 || address.Is4In6() || address.Zone() != "" || address.IsUnspecified() || address.IsMulticast() || address == netip.MustParseAddr("255.255.255.255") {
+			return Config{}, errors.New("database DNS server must be a canonical unicast IP and port")
+		}
+	}
+	if raw, exists := lookup("REGISTRY_DATABASE_ALLOWED_NETWORKS"); exists {
+		if strings.TrimSpace(raw) == "" || len(raw) > 4096 {
+			return Config{}, errors.New("database allowed networks must be a bounded CIDR list")
+		}
+		parts := strings.Split(raw, ",")
+		if len(parts) > 128 {
+			return Config{}, errors.New("database allowed networks contains too many entries")
+		}
+		for _, part := range parts {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+			if err != nil || prefix != prefix.Masked() || prefix.Addr().Is4In6() || prefix.Addr().Zone() != "" {
+				return Config{}, errors.New("database allowed networks must contain canonical CIDRs")
+			}
+			databaseAllowedNetworks = append(databaseAllowedNetworks, prefix)
+		}
+	}
 	dsn, err := value(lookup, "REGISTRY_DATABASE_DSN", defaultDSN)
 	if err != nil {
 		return Config{}, err
@@ -201,18 +229,20 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	}
 
 	return Config{
-		ListenAddress:          listenAddress,
-		DataDir:                filepath.Clean(dataDir),
-		MasterKeyFile:          masterKeyFile,
-		CanonicalOrigin:        canonicalOrigin,
-		AssetOrigin:            assetOrigin,
-		PublicAssetCORSOrigins: publicAssetCORSOrigins,
-		TrustedProxies:         trustedProxies,
-		DatabaseDriver:         driver,
-		DatabaseDSN:            dsn,
-		DatabaseMaxOpenConns:   maxOpenConns,
-		MaxUploadBytes:         maxUploadBytes,
-		MaxConcurrentUploads:   maxConcurrentUploads,
+		ListenAddress:           listenAddress,
+		DataDir:                 filepath.Clean(dataDir),
+		MasterKeyFile:           masterKeyFile,
+		CanonicalOrigin:         canonicalOrigin,
+		AssetOrigin:             assetOrigin,
+		PublicAssetCORSOrigins:  publicAssetCORSOrigins,
+		TrustedProxies:          trustedProxies,
+		DatabaseDriver:          driver,
+		DatabaseDSN:             dsn,
+		DatabaseAllowedNetworks: databaseAllowedNetworks,
+		DatabaseDNSServer:       databaseDNSServer,
+		DatabaseMaxOpenConns:    maxOpenConns,
+		MaxUploadBytes:          maxUploadBytes,
+		MaxConcurrentUploads:    maxConcurrentUploads,
 	}, nil
 }
 

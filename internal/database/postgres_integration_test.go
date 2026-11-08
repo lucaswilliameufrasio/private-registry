@@ -6,11 +6,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"private-registry/internal/config"
+	"private-registry/internal/egress"
 	"private-registry/internal/testinfra"
 )
 
@@ -63,6 +67,44 @@ func TestOpenPostgresUsesRealLocalDatabase(t *testing.T) {
 		_, _ = db.ExecContext(ctx, "DROP TABLE "+table)
 		_ = db.Close()
 		t.Fatalf("unexpected PostgreSQL fixture version: %s", version)
+	}
+	pgxConfig, err := pgx.ParseConfig(fixture.DSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgxConfig, err = egress.RestrictPostgresUnix(pgxConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := pgx.ConnectConfig(ctx, pgxConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	queryResult := make(chan error, 1)
+	go func() {
+		_, err := connection.Exec(ctx, "SELECT pg_sleep(10)")
+		queryResult <- err
+	}()
+	started := false
+	for !started {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'active' AND query = 'SELECT pg_sleep(10)')`, connection.PgConn().PID()).Scan(&started); err != nil {
+			t.Fatal(err)
+		}
+		if !started {
+			select {
+			case <-ctx.Done():
+				t.Fatal("PostgreSQL query did not start")
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	if err := connection.PgConn().CancelRequest(ctx); err != nil {
+		t.Fatal("cancel PostgreSQL query through restricted socket:", err)
+	}
+	var pgErr *pgconn.PgError
+	if err := <-queryResult; !errors.As(err, &pgErr) || pgErr.Code != "57014" {
+		t.Fatalf("PostgreSQL did not report canceled query: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

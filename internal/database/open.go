@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 	"private-registry/internal/config"
+	"private-registry/internal/egress"
 )
 
 func Open(ctx context.Context, cfg config.Config) (*sql.DB, error) {
@@ -46,6 +47,16 @@ func Open(ctx context.Context, cfg config.Config) (*sql.DB, error) {
 		pgxConfig, err := pgx.ParseConfig(cfg.DatabaseDSN)
 		if err != nil {
 			return nil, errors.New("PostgreSQL database DSN is invalid")
+		}
+		if filepath.IsAbs(pgxConfig.Host) {
+			pgxConfig, err = egress.RestrictPostgresUnix(pgxConfig)
+		} else if cfg.DatabaseDNSServer.IsValid() {
+			pgxConfig, err = egress.RestrictPostgresWithDNS(pgxConfig, cfg.DatabaseAllowedNetworks, cfg.DatabaseDNSServer)
+		} else {
+			pgxConfig, err = egress.RestrictPostgres(pgxConfig, cfg.DatabaseAllowedNetworks)
+		}
+		if err != nil {
+			return nil, errors.New("PostgreSQL outbound policy is invalid or missing")
 		}
 		db = stdlib.OpenDB(*pgxConfig)
 		db.SetMaxOpenConns(cfg.DatabaseMaxOpenConns)

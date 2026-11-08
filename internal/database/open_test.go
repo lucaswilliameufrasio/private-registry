@@ -2,6 +2,9 @@ package database
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,6 +89,43 @@ func TestOpenSQLiteUsesDurablePrivateDatabaseAndRequiredPragmas(t *testing.T) {
 	}
 	if value != "survives restart" {
 		t.Fatalf("database data did not survive reopen: %q", value)
+	}
+}
+
+func TestPostgresOpenDeniesTCPBeforeConnectingWithoutPolicyOrVerifiedTLS(t *testing.T) {
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, tc := range []struct {
+		name     string
+		dsn      string
+		networks []netip.Prefix
+	}{
+		{"no networks", fmt.Sprintf("host=127.0.0.1 port=%d user=synthetic dbname=synthetic sslmode=verify-full", port), nil},
+		{"plaintext", fmt.Sprintf("host=127.0.0.1 port=%d user=synthetic dbname=synthetic sslmode=disable", port), []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}},
+		{"mixed fallback", fmt.Sprintf("host=/synthetic,127.0.0.1 port=%d user=synthetic dbname=synthetic sslmode=disable", port), []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{DatabaseDriver: config.Postgres, DatabaseDSN: tc.dsn, DatabaseAllowedNetworks: tc.networks, DatabaseMaxOpenConns: 1}
+			if db, err := Open(ctx, cfg); err == nil {
+				_ = db.Close()
+				t.Fatal("unsafe PostgreSQL connection was accepted")
+			}
+		})
+	}
+	if err := listener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := listener.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("rejected PostgreSQL configuration reached the TCP fixture")
+	} else if networkErr, ok := err.(net.Error); !ok || !networkErr.Timeout() {
+		t.Fatalf("unexpected listener error: %v", err)
 	}
 }
 

@@ -3,11 +3,13 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -24,11 +26,59 @@ type Postgres struct {
 	socketDir   string
 }
 
+// ProxyLoopback relays one test stream to the owned fixture's TCP loopback.
+// The container itself remains network-isolated; this is not a general proxy.
+func (p *Postgres) ProxyLoopback(ctx context.Context, stream io.ReadWriter) error {
+	if p == nil || p.containerID == "" || ctx == nil || stream == nil {
+		return errors.New("synthetic PostgreSQL proxy parameters are invalid")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return errors.New("synthetic PostgreSQL proxy requires a deadline")
+	}
+	command := exec.CommandContext(ctx, "docker", "exec", "--interactive", "--user=postgres", p.containerID, "nc", "127.0.0.1", "5432")
+	command.Stdin = stream
+	command.Stdout = stream
+	command.WaitDelay = 2 * time.Second
+	if err := command.Run(); err != nil {
+		return errors.New("synthetic PostgreSQL loopback proxy failed")
+	}
+	return nil
+}
+
 func (p *Postgres) DSN() string {
 	if p == nil || p.socketDir == "" {
 		return ""
 	}
 	return fmt.Sprintf("host=%s port=5432 user=postgres dbname=postgres sslmode=disable", p.socketDir)
+}
+
+// EnableSyntheticTLS configures TLS only on this owned disposable fixture.
+// Certificate and key are generated for the test and passed through stdin,
+// never command arguments. It must not be used with operational credentials.
+func (p *Postgres) EnableSyntheticTLS(ctx context.Context, certificate, key []byte) error {
+	if p == nil || p.containerID == "" || ctx == nil || len(certificate) == 0 || len(key) == 0 || len(certificate) > 1<<20 || len(key) > 1<<20 {
+		return errors.New("synthetic PostgreSQL TLS fixture parameters are invalid")
+	}
+	for _, item := range []struct {
+		path string
+		data []byte
+	}{
+		{"server.crt", certificate},
+		{"server.key", key},
+	} {
+		command := exec.CommandContext(ctx, "docker", "exec", "--interactive", "--user=postgres", p.containerID, "sh", "-c", "umask 077\ncat > \"$PGDATA/"+item.path+"\"")
+		command.Stdin = bytes.NewReader(item.data)
+		if _, err := command.CombinedOutput(); err != nil {
+			return errors.New("synthetic PostgreSQL TLS fixture file could not be written")
+		}
+	}
+	for _, query := range []string{"ALTER SYSTEM SET ssl = 'on'", "SELECT pg_reload_conf()"} {
+		command := exec.CommandContext(ctx, "docker", "exec", "--user=postgres", p.containerID, "psql", "--host=/var/run/postgresql", "--username=postgres", "--no-password", "--set=ON_ERROR_STOP=1", "--command="+query)
+		if _, err := command.CombinedOutput(); err != nil {
+			return errors.New("synthetic PostgreSQL TLS fixture could not be configured")
+		}
+	}
+	return nil
 }
 
 func StartPostgres(ctx context.Context) (*Postgres, error) {
