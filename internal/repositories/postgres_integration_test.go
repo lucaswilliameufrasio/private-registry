@@ -213,4 +213,5 @@ func TestPostgresRepositoryIdentityAuthorizationAndVisibility(t *testing.T) {
 	exerciseGoNamespacePolicy(t, ctx, db, config.Postgres)
 	exercisePersonalReadTokens(t, ctx, db, config.Postgres)
 	exerciseCargoWriteTokenLifecycle(t, ctx, db, config.Postgres)
+	exerciseNPMWriteTokenLifecycle(t, ctx, db, config.Postgres)
 }

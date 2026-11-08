@@ -57,6 +57,17 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	npmRepository := uuid.NewString()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'recovery-npm', 'Recovery npm', ?, 'now', 'now', 'npm')`, npmRepository, fixture.workspaceID, fixture.userIDs["owner"]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, fixture.userIDs["owner"], fixture.workspaceID, npmRepository, publisherID, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	npmToken, err := fixture.repositoryService.IssueNPMWriteToken(ctx, publisherID, fixture.workspaceID, npmRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cargoReservations, err := cargo.NewReservationService(fixture.db, fixture.repositoryService, config.SQLite)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +148,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
-	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 4 {
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.NPMWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 4 {
 		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
@@ -341,6 +352,12 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err := fixture.repositoryService.WithCargoWriteTokenTransaction(ctx, cargoToken.Bearer, fixture.workspaceID, cargoRepository, applyCargo); err != nil {
 		t.Fatalf("source Cargo credential changed by isolated recovery: %v", err)
 	}
+	if err := recoveredRepositories.WithNPMWriteTokenTransaction(ctx, npmToken.Bearer, fixture.workspaceID, npmRepository, applyCargo); !errors.Is(err, repositories.ErrNPMWriteTokenUnavailable) {
+		t.Fatalf("recovered npm credential accepted: %v", err)
+	}
+	if err := fixture.repositoryService.WithNPMWriteTokenTransaction(ctx, npmToken.Bearer, fixture.workspaceID, npmRepository, applyCargo); err != nil {
+		t.Fatalf("source npm credential changed by isolated recovery: %v", err)
+	}
 	recoveredArtifacts, err := New(recoveredDB, config.SQLite, recoveredRepositories, fixture.storage, Options{MaxUploadBytes: 1024, MaxConcurrentUploads: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -365,7 +382,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (27, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (28, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
 		_ = futureTx.Rollback()
 		t.Fatal(err)
 	}

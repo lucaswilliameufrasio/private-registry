@@ -62,13 +62,15 @@ func exerciseNPMCatalogUpgrade(t *testing.T, ctx context.Context, db *sql.DB, cf
 	old := migrationFS(t, "sql/sqlite/000001_installation.sql", string(first)).(fstest.MapFS)
 	delete(old, "sql/sqlite/000026_npm_catalog.sql")
 	delete(old, "sql/postgres/000026_npm_catalog.sql")
+	delete(old, "sql/sqlite/000027_npm_write_tokens.sql")
+	delete(old, "sql/postgres/000027_npm_write_tokens.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 25 {
 		t.Fatalf("prepare v25 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 26 || len(report.AppliedVersions) != 1 || report.AppliedVersions[0] != 26 {
-			t.Fatalf("v26 upgrade failed: %+v err=%v", report, err)
+		if err != nil || report.CurrentVersion != 27 || len(report.AppliedVersions) != 2 || report.AppliedVersions[0] != 26 || report.AppliedVersions[1] != 27 {
+			t.Fatalf("v26–v27 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
 			t.Fatal(err)
