@@ -44,12 +44,14 @@ func exerciseNPMReviewMigration(t *testing.T, ctx context.Context, db *sql.DB, c
 	delete(old, "sql/postgres/000032_npm_dist_tags.sql")
 	delete(old, "sql/sqlite/000033_pub_repository_format.sql")
 	delete(old, "sql/postgres/000033_pub_repository_format.sql")
+	delete(old, "sql/sqlite/000034_pub_catalog.sql")
+	delete(old, "sql/postgres/000034_pub_catalog.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 29 {
 		t.Fatalf("prepare v29 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 33 || len(report.AppliedVersions) != 4 || report.AppliedVersions[0] != 30 || report.AppliedVersions[1] != 31 || report.AppliedVersions[2] != 32 || report.AppliedVersions[3] != 33 {
+		if err != nil || report.CurrentVersion != 34 || len(report.AppliedVersions) != 5 || report.AppliedVersions[0] != 30 || report.AppliedVersions[1] != 31 || report.AppliedVersions[2] != 32 || report.AppliedVersions[3] != 33 || report.AppliedVersions[4] != 34 {
 			t.Fatalf("v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

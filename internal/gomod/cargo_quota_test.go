@@ -162,4 +162,34 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); err != nil {
 		t.Fatalf("remaining Go quota rejected after npm reservation: %v", err)
 	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = 24 WHERE workspace_id = `+bind(1), workspace); err != nil {
+		t.Fatal(err)
+	}
+	pubRepo, pubPackage := uuid.NewString(), uuid.NewString()
+	query = `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + bind(1) + `, ` + bind(2) + `, 'pub', 'Pub', ` + bind(3) + `, 'now', 'now', 'pub')`
+	if _, err := db.ExecContext(ctx, query, pubRepo, workspace, user); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_pub_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, 'fixture', ` + bind(4) + `, 'now')`
+	if _, err := db.ExecContext(ctx, query, pubPackage, workspace, pubRepo, user); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_pub_versions (pub_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, created_by, created_at) VALUES (` + bind(1) + `, ` + bind(2) + `, ` + bind(3) + `, ` + bind(4) + `, '1.0.0', '1.0.0', 'fixture', ` + bind(5) + `, 7, ` + bind(6) + `, 'now')`
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), workspace, pubRepo, pubPackage, strings.Repeat("a", 64), user); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 2); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("Pub version did not count towards Go quota: %v", err)
+	}
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); err != nil {
+		t.Fatalf("remaining Go quota rejected after Pub version: %v", err)
+	}
 }

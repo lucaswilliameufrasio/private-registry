@@ -164,6 +164,31 @@ func exerciseNPMReservationQuotaAndLifecycle(t *testing.T, artifacts *Service, d
 	if err := service.Cancel(ctx, token.Bearer, workspace, repository, reservation.ID); err != nil {
 		t.Fatal(err)
 	}
+	pubRepository, pubPackage := uuid.NewString(), uuid.NewString()
+	query = `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + p(1) + `, ` + p(2) + `, 'pub-quota', 'Pub', ` + p(3) + `, ` + p(4) + `, ` + p(5) + `, 'pub')`
+	if _, err := db.ExecContext(ctx, query, pubRepository, workspace, owner, created, created); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_pub_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, 'fixture', ` + p(4) + `, ` + p(5) + `)`
+	if _, err := db.ExecContext(ctx, query, pubPackage, workspace, pubRepository, actor, created); err != nil {
+		t.Fatal(err)
+	}
+	query = `INSERT INTO registry_pub_versions (pub_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, created_by, created_at) VALUES (` + p(1) + `, ` + p(2) + `, ` + p(3) + `, ` + p(4) + `, '1.0.0', '1.0.0', 'fixture', ` + p(5) + `, 7, ` + p(6) + `, ` + p(7) + `)`
+	if _, err := db.ExecContext(ctx, query, uuid.NewString(), workspace, pubRepository, pubPackage, strings.Repeat("f", 64), actor, created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.StartUpload(ctx, actor, workspace, genericRepository, requestFor("pub-quota", "v1", "file", []byte("four"))); !errors.Is(err, ErrLogicalQuotaExceeded) {
+		t.Fatalf("Pub version not counted by generic quota: %v", err)
+	}
+	if _, err := cargoService.Reserve(ctx, cargoToken.Bearer, workspace, cargoRepository, frame); !errors.Is(err, cargo.ErrReservationQuota) {
+		t.Fatalf("Pub version not counted by Cargo quota: %v", err)
+	}
+	if _, err := service.Reserve(ctx, token.Bearer, workspace, repository, other); !errors.Is(err, npm.ErrReservationQuota) {
+		t.Fatalf("Pub version not counted by npm quota: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_workspaces SET logical_quota_bytes = 17 WHERE workspace_id = `+p(1), workspace); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events WHERE action = 'npm.reservation.cancelled' AND target_id = `+p(1), reservation.ID).Scan(&auditCount); err != nil || auditCount != 1 {
 		t.Fatalf("npm cancellation audit is not exactly once: count=%d err=%v", auditCount, err)
 	}

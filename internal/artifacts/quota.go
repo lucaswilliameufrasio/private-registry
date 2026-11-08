@@ -9,7 +9,9 @@ import (
 // checkGenericQuota runs under the repository write transaction's shared
 // installation lock. Upload-session insertion is the reservation; rejected or
 // expired sessions release it, while uploaded and published sessions retain it.
-// Other artifact formats and administrator-managed policy are not yet covered.
+// Workspace accounting also includes the implemented Go, Cargo, npm and Pub
+// catalog entries and their applicable reservations. Other formats are not yet
+// covered.
 func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID, repositoryID string, size int64) error {
 	if size == 0 {
 		return nil
@@ -23,7 +25,7 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 	}
 	// Each published Go version owns its ZIP and separately served go.mod.
 	// Count both logical references, even when physical objects are shared.
-	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved int64
+	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved, pubUsage int64
 	if workspaceLimit.Valid {
 		query = `SELECT COALESCE(SUM(zip_size + LENGTH(mod_bytes)), 0) FROM registry_go_module_versions WHERE workspace_id = ` + bind(s.driver, 1)
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&goUsage); err != nil || goUsage < 0 {
@@ -48,6 +50,10 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_npm_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)`
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&npmReserved); err != nil || npmReserved < 0 {
 			return errors.New("workspace npm quota reservations could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_versions WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubUsage); err != nil || pubUsage < 0 {
+			return errors.New("workspace Pub quota usage could not be checked")
 		}
 	}
 	for _, limit := range []struct {
@@ -90,6 +96,9 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 			return ErrLogicalQuotaExceeded
 		}
 		if !limit.repository && npmReserved > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && pubUsage > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved {
 			return ErrLogicalQuotaExceeded
 		}
 	}

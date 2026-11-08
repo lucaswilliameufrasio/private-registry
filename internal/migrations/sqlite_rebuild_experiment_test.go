@@ -65,6 +65,8 @@ func TestSQLiteRepositoryRebuildExperiment(t *testing.T) {
 			delete(old, "sql/postgres/000032_npm_dist_tags.sql")
 			delete(old, "sql/sqlite/000033_pub_repository_format.sql")
 			delete(old, "sql/postgres/000033_pub_repository_format.sql")
+			delete(old, "sql/sqlite/000034_pub_catalog.sql")
+			delete(old, "sql/postgres/000034_pub_catalog.sql")
 			if _, err := migrateWithFS(ctx, db, cfg, old); err != nil {
 				t.Fatal(err)
 			}
@@ -115,7 +117,7 @@ func TestSQLiteRepositoryRebuildExperiment(t *testing.T) {
 					}
 				} else {
 					report, err = Migrate(ctx, db, cfg)
-					if err != nil || report.CurrentVersion != 33 || len(report.AppliedVersions) != 16 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 || report.AppliedVersions[8] != 26 || report.AppliedVersions[9] != 27 || report.AppliedVersions[10] != 28 || report.AppliedVersions[11] != 29 || report.AppliedVersions[12] != 30 || report.AppliedVersions[13] != 31 || report.AppliedVersions[14] != 32 || report.AppliedVersions[15] != 33 {
+					if err != nil || report.CurrentVersion != 34 || len(report.AppliedVersions) != 17 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 || report.AppliedVersions[8] != 26 || report.AppliedVersions[9] != 27 || report.AppliedVersions[10] != 28 || report.AppliedVersions[11] != 29 || report.AppliedVersions[12] != 30 || report.AppliedVersions[13] != 31 || report.AppliedVersions[14] != 32 || report.AppliedVersions[15] != 33 || report.AppliedVersions[16] != 34 {
 						t.Fatalf("v17 to v30 upgrade failed: %+v err=%v", report, err)
 					}
 					if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
