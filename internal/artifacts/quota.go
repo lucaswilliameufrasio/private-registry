@@ -25,7 +25,7 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 	}
 	// Each published Go version owns its ZIP and separately served go.mod.
 	// Count both logical references, even when physical objects are shared.
-	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved, pubUsage int64
+	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved, pubUsage, pubReserved int64
 	if workspaceLimit.Valid {
 		query = `SELECT COALESCE(SUM(zip_size + LENGTH(mod_bytes)), 0) FROM registry_go_module_versions WHERE workspace_id = ` + bind(s.driver, 1)
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&goUsage); err != nil || goUsage < 0 {
@@ -54,6 +54,10 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_versions WHERE workspace_id = ` + bind(s.driver, 1)
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubUsage); err != nil || pubUsage < 0 {
 			return errors.New("workspace Pub quota usage could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status = 'reserved'`
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubReserved); err != nil || pubReserved < 0 {
+			return errors.New("workspace Pub quota reservations could not be checked")
 		}
 	}
 	for _, limit := range []struct {
@@ -99,6 +103,9 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 			return ErrLogicalQuotaExceeded
 		}
 		if !limit.repository && pubUsage > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && pubReserved > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved-pubUsage {
 			return ErrLogicalQuotaExceeded
 		}
 	}

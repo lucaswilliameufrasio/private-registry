@@ -73,6 +73,8 @@ func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
 	delete(old, "sql/postgres/000034_pub_catalog.sql")
 	delete(old, "sql/sqlite/000035_pub_write_tokens.sql")
 	delete(old, "sql/postgres/000035_pub_write_tokens.sql")
+	delete(old, "sql/sqlite/000036_pub_reservations.sql")
+	delete(old, "sql/postgres/000036_pub_reservations.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != int64(version-1) {
 		t.Fatalf("prepare pre-rebuild fixture: %+v err=%v", report, err)
 	}
@@ -162,7 +164,7 @@ func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
 		}
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 35 {
+	if err != nil || report.CurrentVersion != 36 {
 		t.Fatalf("migration did not resume after synthetic crash: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

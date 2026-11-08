@@ -17,6 +17,7 @@ import (
 	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/npm"
+	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/storage"
 )
@@ -191,5 +192,30 @@ func exerciseGoQuotaCountsCargoReceipt(t *testing.T, ctx context.Context, db *sq
 	}
 	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); err != nil {
 		t.Fatalf("remaining Go quota rejected after Pub version: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, user, workspace, pubRepo, user, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	pubToken, err := repos.IssuePubWriteToken(ctx, user, workspace, pubRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubService, err := pub.NewReservationService(db, repos, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pubService.Reserve(ctx, pubToken.Bearer, workspace, pubRepo, pub.ReservationRequest{Name: "reserved", Version: "1.0.0", TarballSHA256: strings.Repeat("f", 64), TarballSize: 1, MetadataSHA256: strings.Repeat("d", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := service.checkReservationQuota(ctx, tx, workspace, goRepo, 1); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("Pub version and reservation did not count towards Go quota: %v", err)
 	}
 }

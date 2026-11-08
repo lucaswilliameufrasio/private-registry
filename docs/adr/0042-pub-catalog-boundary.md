@@ -20,3 +20,9 @@ Recebimento de conteúdo validado, credenciais, reserva, revisão, publicação,
 A migration v35 e o serviço interno permitem emitir, listar e revogar uma credencial Pub limitada a um repositório e ao grant de publicação original. O token armazena apenas verificador, expira, exige conta e membership ativos e não revive quando o grant é revogado e concedido novamente. Quando um grant de leitura existe na emissão, sua identidade também fica vinculada para uso posterior; a credencial de publicação, por si só, não concede leitura. Não há rota de emissão, upload ou publicação habilitada nesta fatia; futuros endpoints devem exigir MFA recente e CSRF.
 
 O upgrade e rollback injetado da v35, o ciclo de vida do token e as verificações de isolamento passaram três vezes com race em SQLite e PostgreSQL. O recovery SQLite isolado invalidou o token restaurado e preservou o original, também em três execuções com race. O `make verify` integral passou, incluindo integrações repetidas e race, após corrigir uma colisão de portas na fixture DNS. A invalidação de tokens não torna o recovery completo nem substitui a restauração de todos os formatos.
+
+## Reservas experimentais
+
+A migration v36 adiciona reservas limitadas por identidade Pub e credencial de publicação, com expiração lazy, cancelamento auditado e quota compartilhada com os formatos já implementados. Retentativa idêntica reconcilia a mesma reserva; metadados diferentes para a mesma identidade não são aceitos. A reserva não recebe nem verifica conteúdo, não cria publicação e não habilita rotas. A cópia de recovery isolado expira e invalida reservas ativas, sem alterar a origem.
+
+Os testes focados de migration, quota, concorrência e recovery passaram três vezes com race em SQLite e PostgreSQL, incluindo a quota Pub → Go. O `make verify` integral passou após a inclusão dessa regressão. Upload, revisão, publicação, leitura e recovery completo continuam obrigatórios.

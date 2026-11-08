@@ -46,12 +46,14 @@ func exerciseNPMPublicationMigration(t *testing.T, ctx context.Context, db *sql.
 	delete(old, "sql/postgres/000034_pub_catalog.sql")
 	delete(old, "sql/sqlite/000035_pub_write_tokens.sql")
 	delete(old, "sql/postgres/000035_pub_write_tokens.sql")
+	delete(old, "sql/sqlite/000036_pub_reservations.sql")
+	delete(old, "sql/postgres/000036_pub_reservations.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 30 {
 		t.Fatalf("prepare v30 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 35 || len(report.AppliedVersions) != 5 || report.AppliedVersions[0] != 31 || report.AppliedVersions[1] != 32 || report.AppliedVersions[2] != 33 || report.AppliedVersions[3] != 34 || report.AppliedVersions[4] != 35 {
+		if err != nil || report.CurrentVersion != 36 || len(report.AppliedVersions) != 6 || report.AppliedVersions[0] != 31 || report.AppliedVersions[1] != 32 || report.AppliedVersions[2] != 33 || report.AppliedVersions[3] != 34 || report.AppliedVersions[4] != 35 || report.AppliedVersions[5] != 36 {
 			t.Fatalf("v31 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
