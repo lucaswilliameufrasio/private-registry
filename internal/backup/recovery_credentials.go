@@ -32,7 +32,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 		return InvalidatedCredentials{}, errors.New("isolated credential recovery requires a deadline")
 	}
 	var count, minimum, maximum int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != 20 || minimum != 1 || maximum != 20 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != 21 || minimum != 1 || maximum != 21 {
 		return InvalidatedCredentials{}, errors.New("recovered database schema is not supported for credential invalidation")
 	}
 	bind := func(index int) string {

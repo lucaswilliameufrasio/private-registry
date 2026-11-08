@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"private-registry/internal/artifacts"
 	"private-registry/internal/backup"
+	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/migrations"
@@ -137,7 +138,7 @@ func exerciseModulePublication(t *testing.T, ctx context.Context, db *sql.DB, dr
 	t.Helper()
 	bind := func(n int) string {
 		if driver == config.Postgres {
-			return []string{"", "$1", "$2", "$3"}[n]
+			return []string{"", "$1", "$2", "$3", "$4", "$5"}[n]
 		}
 		return "?"
 	}
@@ -622,6 +623,45 @@ func exerciseModulePublication(t *testing.T, ctx context.Context, db *sql.DB, dr
 		t.Fatalf("Go reservation ignored repository quota: %v", err)
 	}
 	if _, err := repoService.SetLogicalQuotaPolicy(ctx, owner, workspace.ID, repo.ID, repositoryPolicy.Revision+1, nil); err != nil {
+		t.Fatal(err)
+	}
+	cargoRepo := uuid.NewString()
+	created := time.Now().UTC().Format(time.RFC3339Nano)
+	query := `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + bind(1) + `, ` + bind(2) + `, 'cargo-quota', 'Cargo quota', ` + bind(3) + `, ` + bind(4) + `, ` + bind(5) + `, 'cargo')`
+	if _, err := db.ExecContext(ctx, query, cargoRepo, workspace.ID, owner, created, created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repoService.GrantRepositoryRole(ctx, owner, workspace.ID, cargoRepo, publisher, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	cargoToken, err := repoService.IssueCargoWriteToken(ctx, publisher, workspace.ID, cargoRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoReservations, err := cargo.NewReservationService(db, repoService, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoFrame := cargo.PublishFrame{Metadata: []byte(`{"name":"quota_fixture","vers":"1.0.0","deps":[],"features":{}}`), Size: 10, SHA256: strings.Repeat("a", 64)}
+	cargoReservation, err := cargoReservations.Reserve(ctx, cargoToken.Bearer, workspace.ID, cargoRepo, cargoFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = repoService.LogicalQuotaPolicy(ctx, owner, workspace.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit = publishedUsage + int64(len(genericData)) + request.ZipSize + int64(len(mod)) + cargoFrame.Size + otherRequest.ZipSize + int64(len(mod)) - 1
+	if _, err := repoService.SetLogicalQuotaPolicy(ctx, owner, workspace.ID, "", policy.Revision, &limit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReservePublication(ctx, publisher, workspace.ID, repo.ID, otherRequest); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("Go reservation ignored Cargo reservation bytes: %v", err)
+	}
+	if _, err := repoService.SetLogicalQuotaPolicy(ctx, owner, workspace.ID, "", policy.Revision+1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_cargo_reservations SET status = 'expired' WHERE reservation_id = `+bind(1), cargoReservation.ID); err != nil {
 		t.Fatal(err)
 	}
 	policy, err = repoService.LogicalQuotaPolicy(ctx, owner, workspace.ID, "")

@@ -409,4 +409,18 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 		t.Fatal("seed quota grant:", err)
 	}
 	exerciseGenericQuota(t, service, db, config.Postgres, publisherID, quotaWorkspace, quotaRepository)
+	crossWorkspace, crossRepository := uuid.NewString(), uuid.NewString()
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspaces (workspace_id, slug, display_name, status, created_by, created_at) VALUES ($1, 'cargo-cross-quota', 'Cross quota', 'active', $2, $3)`, crossWorkspace, ownerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_workspace_memberships (workspace_id, user_id, role, status, created_by, created_at, updated_at) VALUES ($1, $2, 'member', 'active', $3, $4, $4)`, crossWorkspace, publisherID, ownerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at) VALUES ($1, $2, 'generic', 'Generic', $3, $4, $4)`, crossRepository, crossWorkspace, ownerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_repository_grants (grant_id, repository_id, workspace_id, user_id, role, granted_by, granted_at) VALUES ($1, $2, $3, $4, 'publisher', $5, $6)`, uuid.NewString(), crossRepository, crossWorkspace, publisherID, ownerID, now); err != nil {
+		t.Fatal(err)
+	}
+	exerciseGenericQuotaCountsCargo(t, service, db, config.Postgres, publisherID, crossWorkspace, crossRepository)
 }

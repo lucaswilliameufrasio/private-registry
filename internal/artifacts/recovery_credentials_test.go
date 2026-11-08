@@ -11,11 +11,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"private-registry/internal/backup"
+	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/jobs"
@@ -52,6 +54,14 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	cargoToken, err := fixture.repositoryService.IssueCargoWriteToken(ctx, publisherID, fixture.workspaceID, cargoRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoReservations, err := cargo.NewReservationService(fixture.db, fixture.repositoryService, config.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoReservation, err := cargoReservations.Reserve(ctx, cargoToken.Bearer, fixture.workspaceID, cargoRepository, cargo.PublishFrame{Metadata: []byte(`{"name":"fixture","vers":"1.0.0","deps":[],"features":{}}`), Size: 7, SHA256: strings.Repeat("a", 64)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +137,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
-	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 3 {
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 4 {
 		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
@@ -158,6 +168,14 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = preparedDB.Close() })
+	var recoveredStatus, sourceStatus string
+	var recoveredInvalidated, sourceInvalidated int
+	if err := preparedDB.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_cargo_reservations WHERE reservation_id = ?`, cargoReservation.ID).Scan(&recoveredStatus, &recoveredInvalidated); err != nil || recoveredStatus != "expired" || recoveredInvalidated != 1 {
+		t.Fatalf("recovered Cargo reservation not invalidated: %v", err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_cargo_reservations WHERE reservation_id = ?`, cargoReservation.ID).Scan(&sourceStatus, &sourceInvalidated); err != nil || sourceStatus != "reserved" || sourceInvalidated != 0 {
+		t.Fatalf("source Cargo reservation changed: %v", err)
+	}
 	preparedQueue, err := jobs.New(preparedDB, config.SQLite)
 	if err != nil {
 		t.Fatal(err)
@@ -347,7 +365,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (21, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (22, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
 		_ = futureTx.Rollback()
 		t.Fatal(err)
 	}

@@ -83,12 +83,16 @@ func exerciseRecoveryJobAdministration(t *testing.T, ctx context.Context, db *sq
 	if err != nil {
 		t.Fatal(err)
 	}
+	cargoID, err := queue.Enqueue(ctx, "recovery-cargo", "expire-cargo-reservations", `{"secret":"not-exposed"}`, 3, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	count, err := backup.HoldRestoredJobs(ctx, tx, driver, now)
-	if err != nil || count != 3 {
+	if err != nil || count != 4 {
 		_ = tx.Rollback()
 		t.Fatalf("hold jobs count=%d err=%v", count, err)
 	}
@@ -99,7 +103,7 @@ func exerciseRecoveryJobAdministration(t *testing.T, ctx context.Context, db *sq
 		t.Fatalf("member listed held jobs: %v", err)
 	}
 	items, more, err := service.ListRecoveryJobs(ctx, admin, "", 10)
-	if err != nil || more || len(items) != 3 {
+	if err != nil || more || len(items) != 4 {
 		t.Fatalf("held jobs = %+v more=%t err=%v", items, more, err)
 	}
 	firstPage, more, err := service.ListRecoveryJobs(ctx, admin, "", 1)
@@ -111,10 +115,14 @@ func exerciseRecoveryJobAdministration(t *testing.T, ctx context.Context, db *sq
 		t.Fatalf("held jobs second page=%+v more=%t err=%v", secondPage, more, err)
 	}
 	thirdPage, more, err := service.ListRecoveryJobs(ctx, admin, secondPage[0].ID, 1)
-	if err != nil || more || len(thirdPage) != 1 || thirdPage[0].ID == secondPage[0].ID {
+	if err != nil || !more || len(thirdPage) != 1 || thirdPage[0].ID == secondPage[0].ID {
 		t.Fatalf("held jobs third page=%+v more=%t err=%v", thirdPage, more, err)
 	}
-	var revision, goRevision int64
+	fourthPage, more, err := service.ListRecoveryJobs(ctx, admin, thirdPage[0].ID, 1)
+	if err != nil || more || len(fourthPage) != 1 || fourthPage[0].ID == thirdPage[0].ID {
+		t.Fatalf("held jobs fourth page=%+v more=%t err=%v", fourthPage, more, err)
+	}
+	var revision, goRevision, cargoRevision int64
 	for _, item := range items {
 		if item.ID == id {
 			revision = item.Revision
@@ -129,6 +137,12 @@ func exerciseRecoveryJobAdministration(t *testing.T, ctx context.Context, db *sq
 			goRevision = item.Revision
 			if item.Kind != "expire-go-uploads" || item.PreviousStatus != "pending" {
 				t.Fatalf("held Go expiration job = %+v", item)
+			}
+		}
+		if item.ID == cargoID {
+			cargoRevision = item.Revision
+			if item.Kind != "expire-cargo-reservations" || item.PreviousStatus != "pending" {
+				t.Fatalf("held Cargo expiration job = %+v", item)
 			}
 		}
 	}
@@ -171,6 +185,15 @@ func exerciseRecoveryJobAdministration(t *testing.T, ctx context.Context, db *sq
 	if err := service.ReleaseRecoveryJob(ctx, admin, goID, goRevision); !errors.Is(err, ErrRecoveryJobConflict) {
 		t.Fatalf("held Go job released twice: %v", err)
 	}
+	if err := service.ReleaseRecoveryJob(ctx, member, cargoID, cargoRevision); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("member released held Cargo job: %v", err)
+	}
+	if err := service.ReleaseRecoveryJob(ctx, admin, cargoID, cargoRevision); err != nil {
+		t.Fatalf("administrator could not release Cargo expiration: %v", err)
+	}
+	if err := service.ReleaseRecoveryJob(ctx, admin, cargoID, cargoRevision); !errors.Is(err, ErrRecoveryJobConflict) {
+		t.Fatalf("held Cargo job released twice: %v", err)
+	}
 	if err := queue.Finish(ctx, id, active.LeaseToken, true, now.Add(time.Second), time.Time{}); !errors.Is(err, jobs.ErrLease) {
 		t.Fatalf("old lease remained valid: %v", err)
 	}
@@ -179,7 +202,7 @@ func exerciseRecoveryJobAdministration(t *testing.T, ctx context.Context, db *sq
 		t.Fatalf("released job claim=%+v err=%v", reclaimed, err)
 	}
 	var audit int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_audit_events WHERE action = 'job.recovery.released' AND actor_user_id = `+bind(driver, 1), admin).Scan(&audit); err != nil || audit != 2 {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_audit_events WHERE action = 'job.recovery.released' AND actor_user_id = `+bind(driver, 1), admin).Scan(&audit); err != nil || audit != 3 {
 		t.Fatalf("recovery release audit=%d err=%v", audit, err)
 	}
 }

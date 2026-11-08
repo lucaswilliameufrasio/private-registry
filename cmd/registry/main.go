@@ -21,6 +21,7 @@ import (
 	"private-registry/internal/artifacts"
 	"private-registry/internal/auth"
 	"private-registry/internal/bootstrap"
+	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/gomod"
@@ -161,6 +162,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
+	cargoReservations, err := cargo.NewReservationService(db, repositoryService, cfg.DatabaseDriver)
+	if err != nil {
+		return err
+	}
+	cargoExpirationWorker, err := maintenance.NewCargoReservationExpiration(jobQueue, cargoReservations)
+	if err != nil {
+		return err
+	}
 	health := server.NewHealth(db)
 	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, server.AuthHTTPConfig{
 		CanonicalOrigin:        cfg.CanonicalOrigin,
@@ -180,7 +189,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	var workers sync.WaitGroup
-	for _, worker := range []*maintenance.UploadExpiration{expirationWorker, goExpirationWorker} {
+	for _, worker := range []*maintenance.UploadExpiration{expirationWorker, goExpirationWorker, cargoExpirationWorker} {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()

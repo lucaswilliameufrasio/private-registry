@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"private-registry/internal/artifacts"
+	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/gomod"
@@ -149,6 +150,54 @@ func exerciseUploadExpiration(t *testing.T, db *sql.DB, driver config.DatabaseDr
 	var goJobs, goAttempts int
 	if err := db.QueryRowContext(ctx, bind(`SELECT count(*), max(attempts) FROM registry_jobs WHERE idempotency_key = ?`), goExpirationKey).Scan(&goJobs, &goAttempts); err != nil || goJobs != 1 || goAttempts != 0 {
 		t.Fatalf("Go recurring job count=%d attempts=%d err=%v", goJobs, goAttempts, err)
+	}
+	cargoRepository, cargoGrant, cargoToken := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (?, ?, 'cargo-maintenance', 'Cargo', ?, ?, ?, 'cargo')`), cargoRepository, workspaceID, userID, timestamp, timestamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_repository_grants (grant_id, repository_id, workspace_id, user_id, role, granted_by, granted_at) VALUES (?, ?, ?, ?, 'publisher', ?, ?)`), cargoGrant, cargoRepository, workspaceID, userID, userID, timestamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, bind(`INSERT INTO registry_cargo_write_tokens (token_id, user_id, workspace_id, repository_id, publisher_grant_id, secret_sha256, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`), cargoToken, userID, workspaceID, cargoRepository, cargoGrant, strings.Repeat("a", 64), now.Add(-2*time.Hour).UnixMilli(), now.Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	cargoIDs := []string{uuid.NewString(), uuid.NewString()}
+	for index, expires := range []time.Time{now.Add(-time.Minute), now.Add(time.Hour)} {
+		query := `INSERT INTO registry_cargo_reservations (reservation_id, workspace_id, repository_id, name, name_identity, version, version_identity, archive_sha256, archive_size, metadata_sha256, token_id, created_by, status, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, ?, '1.0.0', '1.0.0', ?, 1, ?, ?, ?, 'reserved', ?, ?)`
+		name := fmt.Sprintf("fixture%d", index)
+		if _, err := db.ExecContext(ctx, bind(query), cargoIDs[index], workspaceID, cargoRepository, name, name, strings.Repeat("b", 64), strings.Repeat("c", 64), cargoToken, userID, now.Add(-2*time.Hour).UnixMilli(), expires.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cargoService, err := cargo.NewReservationService(db, repositoryService, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoWorker, err := NewCargoReservationExpiration(queue, cargoService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoWorker.clock = func() time.Time { return now }
+	if err := cargoWorker.RunOnce(ctx); err != nil {
+		t.Fatal("Cargo maintenance run:", err)
+	}
+	for index, expected := range []string{"expired", "reserved"} {
+		var cargoStatus string
+		if err := db.QueryRowContext(ctx, bind(`SELECT status FROM registry_cargo_reservations WHERE reservation_id = ?`), cargoIDs[index]).Scan(&cargoStatus); err != nil || cargoStatus != expected {
+			t.Fatalf("Cargo reservation %d status=%q err=%v", index, cargoStatus, err)
+		}
+	}
+	cargoRestarted, err := NewCargoReservationExpiration(queue, cargoService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cargoRestarted.clock = func() time.Time { return now.Add(runInterval) }
+	if err := cargoRestarted.RunOnce(ctx); err != nil {
+		t.Fatal("restart Cargo maintenance:", err)
+	}
+	var cargoJobs, cargoAttempts int
+	if err := db.QueryRowContext(ctx, bind(`SELECT count(*), max(attempts) FROM registry_jobs WHERE idempotency_key = ?`), cargoExpirationKey).Scan(&cargoJobs, &cargoAttempts); err != nil || cargoJobs != 1 || cargoAttempts != 0 {
+		t.Fatalf("Cargo recurring job count=%d attempts=%d err=%v", cargoJobs, cargoAttempts, err)
 	}
 	worker, err := NewUploadExpiration(queue, service)
 	if err != nil {

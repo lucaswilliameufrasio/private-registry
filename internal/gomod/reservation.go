@@ -197,8 +197,8 @@ func (s *Service) checkReservationQuota(ctx context.Context, tx *sql.Tx, workspa
 			return ErrQuotaExceeded
 		}
 		remaining -= size
-		for _, table := range []string{"registry_generic_upload_sessions", "registry_go_module_versions", "registry_go_upload_sessions"} {
-			if limit.repository && table == "registry_generic_upload_sessions" {
+		for _, table := range []string{"registry_generic_upload_sessions", "registry_go_module_versions", "registry_go_upload_sessions", "registry_cargo_versions", "registry_cargo_reservations"} {
+			if limit.repository && (table == "registry_generic_upload_sessions" || table == "registry_cargo_versions" || table == "registry_cargo_reservations") {
 				continue
 			}
 			expression, condition := "zip_size + LENGTH(mod_bytes)", ""
@@ -206,6 +206,10 @@ func (s *Service) checkReservationQuota(ctx context.Context, tx *sql.Tx, workspa
 				expression, condition = "expected_size", " AND status IN ('receiving', 'uploading', 'uploaded', 'published')"
 			} else if table == "registry_go_upload_sessions" {
 				condition = " AND status IN ('receiving', 'uploading', 'uploaded')"
+			} else if table == "registry_cargo_versions" {
+				expression = "archive_size"
+			} else if table == "registry_cargo_reservations" {
+				expression, condition = "archive_size", " AND status = 'reserved'"
 			}
 			query := `SELECT COALESCE(SUM(` + expression + `), 0) FROM ` + table + ` WHERE workspace_id = ` + s.bind(1) + condition
 			args := []any{workspaceID}

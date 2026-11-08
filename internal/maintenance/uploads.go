@@ -9,19 +9,22 @@ import (
 	"time"
 
 	"private-registry/internal/artifacts"
+	"private-registry/internal/cargo"
 	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 )
 
 const (
-	expirationKey    = "maintenance:expire-generic-uploads:v1"
-	expirationKind   = "expire-generic-uploads"
-	goExpirationKey  = "maintenance:expire-go-uploads:v1"
-	goExpirationKind = "expire-go-uploads"
-	batchSize        = 128
-	runInterval      = time.Minute
-	operationLimit   = 10 * time.Second
-	leaseDuration    = 30 * time.Second
+	expirationKey       = "maintenance:expire-generic-uploads:v1"
+	expirationKind      = "expire-generic-uploads"
+	goExpirationKey     = "maintenance:expire-go-uploads:v1"
+	goExpirationKind    = "expire-go-uploads"
+	cargoExpirationKey  = "maintenance:expire-cargo-reservations:v1"
+	cargoExpirationKind = "expire-cargo-reservations"
+	batchSize           = 128
+	runInterval         = time.Minute
+	operationLimit      = 10 * time.Second
+	leaseDuration       = 30 * time.Second
 )
 
 type UploadExpiration struct {
@@ -30,6 +33,13 @@ type UploadExpiration struct {
 	clock     func() time.Time
 	key       string
 	kind      string
+}
+
+func NewCargoReservationExpiration(queue *jobs.Queue, service *cargo.ReservationService) (*UploadExpiration, error) {
+	if queue == nil || service == nil {
+		return nil, errors.New("Cargo reservation expiration dependencies are required")
+	}
+	return &UploadExpiration{queue: queue, artifacts: service, clock: time.Now, key: cargoExpirationKey, kind: cargoExpirationKind}, nil
 }
 
 type uploadExpirer interface {
