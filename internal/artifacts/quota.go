@@ -45,7 +45,7 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&npmUsage); err != nil || npmUsage < 0 {
 			return errors.New("workspace npm quota usage could not be checked")
 		}
-		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_npm_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded')`
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_npm_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)`
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&npmReserved); err != nil || npmReserved < 0 {
 			return errors.New("workspace npm quota reservations could not be checked")
 		}

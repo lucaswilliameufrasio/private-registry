@@ -169,3 +169,28 @@ func TestPostgresNPMReviewMigration(t *testing.T) {
 		})
 	}
 }
+
+func TestPostgresNPMPublicationMigration(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "upgrade", true: "rollback"}[fail], func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			fixture, err := testinfra.StartPostgres(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := fixture.Stop(); err != nil {
+					t.Errorf("stop PostgreSQL fixture: %v", err)
+				}
+			}()
+			cfg := config.Config{DatabaseDriver: config.Postgres, DatabaseDSN: fixture.DSN(), DatabaseMaxOpenConns: 4}
+			db, err := database.Open(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			exerciseNPMPublicationMigration(t, ctx, db, cfg, fail)
+		})
+	}
+}

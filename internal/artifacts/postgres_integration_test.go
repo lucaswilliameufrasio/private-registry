@@ -299,19 +299,28 @@ func TestPostgresGenericArtifactPublishAndTicketedDownload(t *testing.T) {
 		t.Fatalf("repeated PostgreSQL recovery held jobs=%d error=%v", heldAgain, err)
 	}
 	uploads, err := backup.InvalidateRestoredUploads(ctx, recoveryTx, config.Postgres, jobNow)
-	if err != nil || uploads != 4 {
+	if err != nil || uploads != 6 {
 		_ = recoveryTx.Rollback()
 		t.Fatalf("PostgreSQL recovery invalidated uploads=%d error=%v", uploads, err)
 	}
 	var npmStatus string
 	var npmInvalidated int
-	if err := recoveryTx.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_npm_reservations WHERE workspace_id = $1 AND name = 'fixture' AND object_verified = 1`, workspaceID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "uploaded" || npmInvalidated != 1 {
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT r.status, r.recovery_invalidated FROM registry_npm_reservations r JOIN registry_repositories p ON p.repository_id = r.repository_id WHERE r.workspace_id = $1 AND p.slug = 'npm-receive' AND r.name = 'fixture' AND r.object_verified = 1`, workspaceID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "uploaded" || npmInvalidated != 1 {
 		_ = recoveryTx.Rollback()
 		t.Fatalf("PostgreSQL recovery did not hold npm receipt: status=%q invalidated=%d err=%v", npmStatus, npmInvalidated, err)
 	}
 	if err := recoveryTx.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_npm_reservations WHERE workspace_id = $1 AND name = 'fixture' AND object_verified = 0`, workspaceID).Scan(&npmStatus, &npmInvalidated); err != nil || npmStatus != "expired" || npmInvalidated != 1 {
 		_ = recoveryTx.Rollback()
 		t.Fatalf("PostgreSQL recovery did not expire npm reservation: status=%q invalidated=%d err=%v", npmStatus, npmInvalidated, err)
+	}
+	var publishedCount, remainingCount int
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_npm_reservations r JOIN registry_npm_publications p ON p.reservation_id = r.reservation_id WHERE r.workspace_id = $1 AND r.status = 'uploaded' AND r.recovery_invalidated = 1`, workspaceID).Scan(&publishedCount); err != nil || publishedCount != 1 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery did not hold published npm receipt: count=%d err=%v", publishedCount, err)
+	}
+	if err := recoveryTx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_npm_reservations WHERE workspace_id = $1 AND name = 'remaining' AND status = 'expired' AND recovery_invalidated = 1`, workspaceID).Scan(&remainingCount); err != nil || remainingCount != 1 {
+		_ = recoveryTx.Rollback()
+		t.Fatalf("PostgreSQL recovery did not expire remaining npm reservation: count=%d err=%v", remainingCount, err)
 	}
 	uploadsAgain, err := backup.InvalidateRestoredUploads(ctx, recoveryTx, config.Postgres, jobNow)
 	if err != nil || uploadsAgain != 0 {

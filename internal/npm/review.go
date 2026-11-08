@@ -33,7 +33,7 @@ func (s *ReservationService) DecideReview(ctx context.Context, reviewer, workspa
 	}
 	var result string
 	err = s.repositories.WithNPMReviewerTransaction(ctx, reviewer, workspace, repository, func(tx *sql.Tx, reviewerGrant string) error {
-		query := `SELECT r.created_by, r.status, r.review_hold, r.recovery_invalidated, r.object_verified, p.review_revision, t.publisher_grant_id FROM registry_npm_reservations r JOIN registry_repositories p ON p.repository_id = r.repository_id AND p.workspace_id = r.workspace_id JOIN registry_npm_write_tokens t ON t.token_id = r.token_id WHERE r.reservation_id = ` + s.bind(1) + ` AND r.workspace_id = ` + s.bind(2) + ` AND r.repository_id = ` + s.bind(3)
+		query := `SELECT r.created_by, r.status, r.review_hold, r.recovery_invalidated, r.object_verified, p.review_revision, t.publisher_grant_id FROM registry_npm_reservations r JOIN registry_repositories p ON p.repository_id = r.repository_id AND p.workspace_id = r.workspace_id JOIN registry_npm_write_tokens t ON t.token_id = r.token_id WHERE r.reservation_id = ` + s.bind(1) + ` AND r.workspace_id = ` + s.bind(2) + ` AND r.repository_id = ` + s.bind(3) + ` AND NOT EXISTS (SELECT 1 FROM registry_npm_publications np WHERE np.reservation_id = r.reservation_id)`
 		var publisher, status, publisherGrant string
 		var hold, invalidated, verified int
 		var revision int64

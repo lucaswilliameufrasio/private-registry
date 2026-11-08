@@ -233,7 +233,7 @@ func (s *ReservationService) checkQuota(ctx context.Context, tx *sql.Tx, workspa
 			{"registry_cargo_versions", "archive_size", ""},
 			{"registry_cargo_reservations", "archive_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_cargo_publications p WHERE p.reservation_id = registry_cargo_reservations.reservation_id)"},
 			{"registry_npm_versions", "tarball_size", ""},
-			{"registry_npm_reservations", "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded')"},
+			{"registry_npm_reservations", "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)"},
 		} {
 			if limit.repository && source.table != "registry_cargo_versions" && source.table != "registry_cargo_reservations" {
 				continue

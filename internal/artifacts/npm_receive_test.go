@@ -371,4 +371,105 @@ func exerciseNPMReceiptValidatesAndStores(t *testing.T, db *sql.DB, driver confi
 	if entries, err := os.ReadDir(stage); err != nil || len(entries) != 0 {
 		t.Fatalf("revoked npm receipt left staging: %v", err)
 	}
+	publicationRepo := uuid.NewString()
+	query = `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format, review_required) VALUES (` + p(1) + `, ` + p(2) + `, 'npm-publication', 'npm', ` + p(3) + `, 'now', 'now', 'npm', 1)`
+	if _, err := db.ExecContext(ctx, query, publicationRepo, workspace, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, publicationRepo, publisher, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	publicationToken, err := repos.IssueNPMWriteToken(ctx, publisher, workspace, publicationRepo, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicationReservation, err := reservations.Reserve(ctx, publicationToken.Bearer, workspace, publicationRepo, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.Receive(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID, publication, bytes.NewReader(content)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.PublishReceipt(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("npm publication without review was accepted: %v", err)
+	}
+	var catalogCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_versions WHERE repository_id = `+p(1), publicationRepo).Scan(&catalogCount); err != nil || catalogCount != 0 {
+		t.Fatalf("pending review left npm catalog version: count=%d err=%v", catalogCount, err)
+	}
+	if _, err := repos.GrantNPMReviewer(ctx, owner, workspace, publicationRepo, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, publicationRepo, publicationReservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	if driver == config.SQLite {
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER synthetic_npm_publication_audit_failure BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'npm.publication.created' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reservations.PublishReceipt(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID); err == nil {
+			t.Fatal("npm publication succeeded without audit")
+		}
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_publications WHERE reservation_id = ?`, publicationReservation.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed npm publication audit left linkage: count=%d err=%v", count, err)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_packages WHERE repository_id = ?`, publicationRepo).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed npm publication audit left package: count=%d err=%v", count, err)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_npm_versions WHERE repository_id = ?`, publicationRepo).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed npm publication audit left version: count=%d err=%v", count, err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER synthetic_npm_publication_audit_failure`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicationResults := make(chan struct {
+		id  string
+		err error
+	}, 2)
+	for range 2 {
+		go func() {
+			id, err := reservations.PublishReceipt(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID)
+			publicationResults <- struct {
+				id  string
+				err error
+			}{id, err}
+		}()
+	}
+	firstPublication, secondPublication := <-publicationResults, <-publicationResults
+	if firstPublication.err != nil || secondPublication.err != nil || firstPublication.id == "" || firstPublication.id != secondPublication.id {
+		t.Fatalf("concurrent npm publication retry failed: %v %v", firstPublication.err, secondPublication.err)
+	}
+	var publicationAuditCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM registry_audit_events WHERE action = 'npm.publication.created' AND target_id = `+p(1), firstPublication.id).Scan(&publicationAuditCount); err != nil || publicationAuditCount != 1 {
+		t.Fatalf("concurrent npm publication audit count=%d err=%v", publicationAuditCount, err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, publicationRepo, publicationReservation.ID, "rejected", "late rejection"); !errors.Is(err, npm.ErrReviewUnavailable) {
+		t.Fatalf("published npm receipt accepted a review decision: %v", err)
+	}
+	if candidates, _, err := reservations.ListReviewCandidates(ctx, owner, workspace, publicationRepo, "", 10); err != nil || len(candidates) != 0 {
+		t.Fatalf("published npm receipt remained a review candidate: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET logical_quota_bytes = `+p(1)+` WHERE repository_id = `+p(2), request.TarballSize+1, publicationRepo); err != nil {
+		t.Fatal(err)
+	}
+	remaining := request
+	remaining.Name = "remaining"
+	remaining.TarballSize = 1
+	if _, err := reservations.Reserve(ctx, publicationToken.Bearer, workspace, publicationRepo, remaining); err != nil {
+		t.Fatalf("published npm receipt was double-counted: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM registry_npm_publications WHERE reservation_id = `+p(1), publicationReservation.ID); err == nil {
+		t.Fatal("npm publication linkage was deleted")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_npm_publications SET npm_version_id = `+p(1)+` WHERE reservation_id = `+p(2), uuid.NewString(), publicationReservation.ID); err == nil {
+		t.Fatal("npm publication linkage was mutable")
+	}
+	if err := repos.RevokeRepositoryRole(ctx, owner, workspace, publicationRepo, publisher, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.PublishReceipt(ctx, publicationToken.Bearer, workspace, publicationRepo, publicationReservation.ID); !errors.Is(err, repositories.ErrNPMWriteTokenUnavailable) {
+		t.Fatalf("revoked publisher retried npm publication: %v", err)
+	}
 }

@@ -30,7 +30,7 @@ func (s *ReceiptService) OpenReviewArchive(ctx context.Context, reviewer, worksp
 	var digest string
 	var size int64
 	err = s.repositories.WithNPMReviewerTransaction(ctx, reviewer, workspace, repository, func(tx *sql.Tx, _ string) error {
-		query := `SELECT r.tarball_sha256, r.tarball_size FROM registry_npm_reservations r WHERE r.reservation_id = ` + s.bind(1) + ` AND r.workspace_id = ` + s.bind(2) + ` AND r.repository_id = ` + s.bind(3) + ` AND r.status = 'uploaded' AND r.object_verified = 1 AND r.review_hold = 1 AND r.recovery_invalidated = 0 AND NOT EXISTS (SELECT 1 FROM registry_npm_review_decisions d WHERE d.reservation_id = r.reservation_id AND d.decision = 'rejected')`
+		query := `SELECT r.tarball_sha256, r.tarball_size FROM registry_npm_reservations r WHERE r.reservation_id = ` + s.bind(1) + ` AND r.workspace_id = ` + s.bind(2) + ` AND r.repository_id = ` + s.bind(3) + ` AND r.status = 'uploaded' AND r.object_verified = 1 AND r.review_hold = 1 AND r.recovery_invalidated = 0 AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = r.reservation_id) AND NOT EXISTS (SELECT 1 FROM registry_npm_review_decisions d WHERE d.reservation_id = r.reservation_id AND d.decision = 'rejected')`
 		if err := tx.QueryRowContext(ctx, query, reservationID, workspace, repository).Scan(&digest, &size); errors.Is(err, sql.ErrNoRows) {
 			return ErrReviewUnavailable
 		} else if err != nil {
@@ -73,7 +73,7 @@ func (s *ReservationService) ListReviewCandidates(ctx context.Context, reviewer,
 	}
 	items := make([]ReviewCandidate, 0, limit+1)
 	err := s.repositories.WithNPMReviewerTransaction(ctx, reviewer, workspace, repository, func(tx *sql.Tx, _ string) error {
-		query := `SELECT r.reservation_id, r.name, r.version, r.created_by FROM registry_npm_reservations r WHERE r.workspace_id = ` + s.bind(1) + ` AND r.repository_id = ` + s.bind(2) + ` AND r.status = 'uploaded' AND r.object_verified = 1 AND r.review_hold = 1 AND r.recovery_invalidated = 0 AND r.reservation_id > ` + s.bind(3) + ` AND NOT EXISTS (SELECT 1 FROM registry_npm_review_decisions d WHERE d.reservation_id = r.reservation_id AND d.decision = 'rejected') ORDER BY r.reservation_id LIMIT ` + s.bind(4)
+		query := `SELECT r.reservation_id, r.name, r.version, r.created_by FROM registry_npm_reservations r WHERE r.workspace_id = ` + s.bind(1) + ` AND r.repository_id = ` + s.bind(2) + ` AND r.status = 'uploaded' AND r.object_verified = 1 AND r.review_hold = 1 AND r.recovery_invalidated = 0 AND r.reservation_id > ` + s.bind(3) + ` AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = r.reservation_id) AND NOT EXISTS (SELECT 1 FROM registry_npm_review_decisions d WHERE d.reservation_id = r.reservation_id AND d.decision = 'rejected') ORDER BY r.reservation_id LIMIT ` + s.bind(4)
 		rows, err := tx.QueryContext(ctx, query, workspace, repository, after, limit+1)
 		if err != nil {
 			return errors.New("npm review candidates could not be listed")
