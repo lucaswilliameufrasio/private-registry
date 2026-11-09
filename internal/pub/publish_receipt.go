@@ -14,6 +14,19 @@ import (
 // It does not expose an pub endpoint, move dist-tags, serve files or establish
 // complete backup. Native success must not be reported before commit.
 func (s *ReservationService) PublishReceipt(ctx context.Context, bearer, workspace, repository, reservationID string) (string, error) {
+	return s.publishReceipt(ctx, bearer, workspace, repository, reservationID, "")
+}
+
+// PublishNativeUpload rechecks the session inside the publication transaction.
+func (s *ReservationService) PublishNativeUpload(ctx context.Context, bearer, workspace, repository, uploadID string) (string, error) {
+	reservationID, err := s.NativeUploadReservation(ctx, bearer, workspace, repository, uploadID)
+	if err != nil {
+		return "", err
+	}
+	return s.publishReceipt(ctx, bearer, workspace, repository, reservationID, uploadID)
+}
+
+func (s *ReservationService) publishReceipt(ctx context.Context, bearer, workspace, repository, reservationID, uploadID string) (string, error) {
 	if s == nil || ctx == nil {
 		return "", ErrReservationUnavailable
 	}
@@ -24,6 +37,16 @@ func (s *ReservationService) PublishReceipt(ctx context.Context, bearer, workspa
 	var publishedID string
 	err = s.repositories.WithPubWriteTokenTransaction(ctx, bearer, workspace, repository, func(tx *sql.Tx, actor string) error {
 		tokenID, _, _ := strings.Cut(strings.TrimPrefix(bearer, "prpw_"), ".")
+		if uploadID != "" {
+			query := `SELECT EXISTS (SELECT 1 FROM registry_pub_native_uploads WHERE upload_id = ` + s.bind(1) + ` AND workspace_id = ` + s.bind(2) + ` AND repository_id = ` + s.bind(3) + ` AND token_id = ` + s.bind(4) + ` AND created_by = ` + s.bind(5) + ` AND reservation_id = ` + s.bind(6) + ` AND recovery_invalidated = 0 AND expires_at_ms > ` + s.bind(7) + `)`
+			var allowed bool
+			if err := tx.QueryRowContext(ctx, query, uploadID, workspace, repository, tokenID, actor, reservationID, time.Now().UTC().UnixMilli()).Scan(&allowed); err != nil {
+				return errors.New("Pub native upload could not be checked")
+			}
+			if !allowed {
+				return ErrNativeUploadUnavailable
+			}
+		}
 		query := `SELECT name, version, version_identity, tarball_sha256, tarball_size, manifest FROM registry_pub_reservations WHERE reservation_id = ` + s.bind(1) + ` AND workspace_id = ` + s.bind(2) + ` AND repository_id = ` + s.bind(3) + ` AND created_by = ` + s.bind(4) + ` AND token_id = ` + s.bind(5) + ` AND status = 'uploaded' AND object_verified = 1 AND recovery_invalidated = 0`
 		var name, version, versionKey, digest, manifest string
 		var size int64

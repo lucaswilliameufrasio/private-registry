@@ -49,6 +49,8 @@ func exercisePubCatalogMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 	delete(old, "sql/postgres/000038_pub_review.sql")
 	delete(old, "sql/sqlite/000039_pub_publications.sql")
 	delete(old, "sql/postgres/000039_pub_publications.sql")
+	delete(old, "sql/sqlite/000040_pub_native_uploads.sql")
+	delete(old, "sql/postgres/000040_pub_native_uploads.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 33 {
 		t.Fatalf("prepare v33 fixture: %+v err=%v", report, err)
 	}
@@ -77,7 +79,7 @@ func exercisePubCatalogMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 		return
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 39 || len(report.AppliedVersions) != 6 || report.AppliedVersions[0] != 34 || report.AppliedVersions[1] != 35 || report.AppliedVersions[2] != 36 || report.AppliedVersions[3] != 37 || report.AppliedVersions[4] != 38 || report.AppliedVersions[5] != 39 {
+	if err != nil || report.CurrentVersion != 40 || len(report.AppliedVersions) != 7 || report.AppliedVersions[0] != 34 || report.AppliedVersions[1] != 35 || report.AppliedVersions[2] != 36 || report.AppliedVersions[3] != 37 || report.AppliedVersions[4] != 38 || report.AppliedVersions[5] != 39 || report.AppliedVersions[6] != 40 {
 		t.Fatalf("Pub catalog upgrade: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

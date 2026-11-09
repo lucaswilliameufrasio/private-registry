@@ -111,6 +111,38 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := reservations.StartNativeUpload(context.Background(), token.Bearer, workspace, repository); !errors.Is(err, pub.ErrNativeUploadUnavailable) {
+		t.Fatalf("native upload accepted missing deadline: %v", err)
+	}
+	uploadID, err := reservations.StartNativeUpload(ctx, token.Bearer, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherNativeToken, err := repos.IssuePubWriteToken(ctx, publisher, workspace, repository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservations.CheckNativeUpload(ctx, otherNativeToken.Bearer, workspace, repository, uploadID); !errors.Is(err, pub.ErrNativeUploadUnavailable) {
+		t.Fatalf("native upload accepted a different credential: %v", err)
+	}
+	if err := reservations.BindNativeUpload(ctx, token.Bearer, workspace, repository, uploadID, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reservations.BindNativeUpload(ctx, token.Bearer, workspace, repository, uploadID, reservation.ID); err != nil {
+		t.Fatalf("native upload binding was not idempotent: %v", err)
+	}
+	if got, err := reservations.NativeUploadReservation(ctx, token.Bearer, workspace, repository, uploadID); err != nil || got != reservation.ID {
+		t.Fatalf("bound native upload was not found: %v", err)
+	}
+	if received, err := reservations.NativeUploadReceived(ctx, token.Bearer, workspace, repository, uploadID, reservation.ID); err != nil || received {
+		t.Fatalf("unreceived native upload was reported as received: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_pub_native_uploads SET recovery_invalidated = 1 WHERE upload_id = `+p(1), uploadID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reservations.CheckNativeUpload(ctx, token.Bearer, workspace, repository, uploadID); !errors.Is(err, pub.ErrNativeUploadUnavailable) {
+		t.Fatalf("invalidated native upload remained usable: %v", err)
+	}
 	stage := filepath.Join(t.TempDir(), "stage")
 	if err := os.Mkdir(stage, 0o700); err != nil {
 		t.Fatal(err)
@@ -210,6 +242,16 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	}
 	if err := receiver.Receive(ctx, token.Bearer, workspace, repository, reservation.ID, input, bytes.NewReader(content)); err != nil {
 		t.Fatal(err)
+	}
+	reviewUpload, err := reservations.StartNativeUpload(ctx, token.Bearer, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservations.BindNativeUpload(ctx, token.Bearer, workspace, repository, reviewUpload, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.PublishNativeUpload(ctx, token.Bearer, workspace, repository, reviewUpload); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("native publication bypassed pending review: %v", err)
 	}
 	var status, stored string
 	var verified, hold int
@@ -433,6 +475,13 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	if err != nil {
 		t.Fatal(err)
 	}
+	concurrentUpload, err := reservations.StartNativeUpload(ctx, concurrentToken.Bearer, workspace, concurrentRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservations.BindNativeUpload(ctx, concurrentToken.Bearer, workspace, concurrentRepository, concurrentUpload, concurrentReservation.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, concurrentRepository, owner, repositories.GrantReader); err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +566,7 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	publications := make(chan publishResult, 2)
 	for range 2 {
 		go func() {
-			id, err := reservations.PublishReceipt(ctx, concurrentToken.Bearer, workspace, concurrentRepository, concurrentReservation.ID)
+			id, err := reservations.PublishNativeUpload(ctx, concurrentToken.Bearer, workspace, concurrentRepository, concurrentUpload)
 			publications <- publishResult{id: id, err: err}
 		}()
 	}

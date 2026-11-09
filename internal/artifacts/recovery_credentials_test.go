@@ -85,6 +85,10 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	pubNativeUpload, err := pubReservations.StartNativeUpload(ctx, pubToken.Bearer, fixture.workspaceID, pubRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pubReservation, err := pubReservations.Reserve(ctx, pubToken.Bearer, fixture.workspaceID, pubRepository, pub.ReservationRequest{Name: "fixture", Version: "1.0.0", TarballSHA256: strings.Repeat("a", 64), TarballSize: 7, MetadataSHA256: strings.Repeat("b", 64)})
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +181,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 		t.Fatal(err)
 	}
 	prepared, err := backup.PrepareSQLiteRecovery(ctx, bytes.NewReader(snapshotBytes), 64<<20, 10, 10, setEnvelope, trusted, parent, "prepared")
-	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.NPMWriteTokens != 1 || prepared.Invalidated.PubWriteTokens != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 6 {
+	if err != nil || prepared.GenericObjects != 1 || prepared.Invalidated.Sessions != 1 || prepared.Invalidated.PersonalTokens != 1 || prepared.Invalidated.CargoWriteTokens != 1 || prepared.Invalidated.NPMWriteTokens != 1 || prepared.Invalidated.PubWriteTokens != 1 || prepared.Invalidated.PubNativeUploads != 1 || prepared.Invalidated.DownloadTickets != 1 || prepared.HeldJobs != 2 || prepared.InvalidatedUploads != 6 {
 		t.Fatalf("prepare isolated SQLite recovery: %+v error=%v", prepared, err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "prepared", "RECOVERY_INCOMPLETE")); err != nil {
@@ -210,6 +214,12 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	t.Cleanup(func() { _ = preparedDB.Close() })
 	var recoveredStatus, sourceStatus string
 	var recoveredInvalidated, sourceInvalidated int
+	if err := preparedDB.QueryRowContext(ctx, `SELECT recovery_invalidated FROM registry_pub_native_uploads WHERE upload_id = ?`, pubNativeUpload).Scan(&recoveredInvalidated); err != nil || recoveredInvalidated != 1 {
+		t.Fatalf("recovered native Pub session not invalidated: %v", err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT recovery_invalidated FROM registry_pub_native_uploads WHERE upload_id = ?`, pubNativeUpload).Scan(&sourceInvalidated); err != nil || sourceInvalidated != 0 {
+		t.Fatalf("source native Pub session changed: %v", err)
+	}
 	if err := preparedDB.QueryRowContext(ctx, `SELECT status, recovery_invalidated FROM registry_pub_reservations WHERE reservation_id = ?`, pubReservation.ID).Scan(&recoveredStatus, &recoveredInvalidated); err != nil || recoveredStatus != "expired" || recoveredInvalidated != 1 {
 		t.Fatalf("recovered Pub reservation not invalidated: %v", err)
 	}
@@ -431,7 +441,7 @@ func TestIsolatedRecoveryInvalidatesOldCapabilitiesWithoutChangingSource(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (40, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+	if _, err := futureTx.ExecContext(ctx, `INSERT INTO registry_migration_checksums (version_id, checksum) VALUES (41, ?)`, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
 		_ = futureTx.Rollback()
 		t.Fatal(err)
 	}
