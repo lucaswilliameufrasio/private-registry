@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"private-registry/internal/backup"
 	"private-registry/internal/config"
 	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
@@ -605,6 +606,48 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_audit_events WHERE action = 'pub.publication.created' AND target_id = `+p(1), first.id).Scan(&publicationCount); err != nil || publicationCount != 1 {
 		t.Fatalf("Pub publication audit count differs: count=%d err=%v", publicationCount, err)
+	}
+	snapshot, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := backup.InventoryPub(ctx, snapshot, 100, 100)
+	matches := 0
+	for _, object := range inventory {
+		if object.Key.WorkspaceID == workspace && object.Key.SHA256 == request.TarballSHA256 && object.Size == request.TarballSize {
+			matches++
+		}
+	}
+	if err != nil || matches != 1 {
+		_ = snapshot.Rollback()
+		t.Fatalf("Pub inventory did not deduplicate verified references: matches=%d err=%v", matches, err)
+	}
+	if _, err := backup.InventoryPub(ctx, snapshot, 100, 1); err == nil {
+		_ = snapshot.Rollback()
+		t.Fatal("Pub inventory exceeded reference limit")
+	}
+	if err := snapshot.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	conflictTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictPackage := uuid.NewString()
+	if _, err := conflictTx.ExecContext(ctx, `INSERT INTO registry_pub_packages (package_id, workspace_id, repository_id, name, created_by, created_at) VALUES (`+p(1)+`, `+p(2)+`, `+p(3)+`, 'inventory_conflict', `+p(4)+`, 'now')`, conflictPackage, workspace, concurrentRepository, publisher); err != nil {
+		_ = conflictTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := conflictTx.ExecContext(ctx, `INSERT INTO registry_pub_versions (pub_version_id, workspace_id, repository_id, package_id, version, version_identity, manifest, tarball_sha256, tarball_size, created_by, created_at) VALUES (`+p(1)+`, `+p(2)+`, `+p(3)+`, `+p(4)+`, '1.0.0', '1.0.0', '{}', `+p(5)+`, `+p(6)+`, `+p(7)+`, 'now')`, uuid.NewString(), workspace, concurrentRepository, conflictPackage, request.TarballSHA256, request.TarballSize+1, publisher); err != nil {
+		_ = conflictTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := backup.InventoryPub(ctx, conflictTx, 100, 100); err == nil {
+		_ = conflictTx.Rollback()
+		t.Fatal("Pub inventory accepted conflicting sizes")
+	}
+	if err := conflictTx.Rollback(); err != nil {
+		t.Fatal(err)
 	}
 	versions, err := reservations.ReadPublishedVersionsWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name)
 	if err != nil || len(versions) != 1 || versions[0].Version != request.Version || versions[0].SHA256 != request.TarballSHA256 || !bytes.Equal(versions[0].Manifest, manifest) {
