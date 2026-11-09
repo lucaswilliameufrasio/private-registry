@@ -221,6 +221,139 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_audit_events WHERE action = 'pub.receipt.verified' AND target_id = `+p(1), reservation.ID).Scan(&auditCount); err != nil || auditCount != 1 {
 		t.Fatalf("Pub receipt audit count differs: count=%d err=%v", auditCount, err)
 	}
+	if _, _, err := reservations.ListReviewCandidates(ctx, owner, workspace, repository, "", 10); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("ungranted user listed Pub review candidates: %v", err)
+	}
+	beforeReviewOpen := countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID); !errors.Is(err, repositories.ErrForbidden) || reader != nil || countedObjects.opens.Load() != beforeReviewOpen {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("ungranted reviewer accessed Pub storage: %v", err)
+	}
+	if _, err := repos.GrantPubReviewer(ctx, owner, workspace, repository, publisher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, publisher, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, pub.ErrReviewUnavailable) {
+		t.Fatalf("publisher approved own Pub receipt: %v", err)
+	}
+	if _, err := repos.GrantPubReviewer(ctx, owner, workspace, repository, owner); err != nil {
+		t.Fatal(err)
+	}
+	candidates, _, err := reservations.ListReviewCandidates(ctx, owner, workspace, repository, "", 10)
+	if err != nil || len(candidates) != 1 || candidates[0].ID != reservation.ID {
+		t.Fatalf("Pub review candidate missing: %v", err)
+	}
+	reviewReader, reviewSize, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBytes, readErr := io.ReadAll(reviewReader)
+	closeErr := reviewReader.Close()
+	if readErr != nil || closeErr != nil || reviewSize != int64(len(content)) || !bytes.Equal(reviewBytes, content) {
+		t.Fatalf("Pub review archive differs: read=%v close=%v", readErr, closeErr)
+	}
+	if driver == config.Postgres {
+		if _, err := db.ExecContext(ctx, `CREATE FUNCTION fixture_reject_pub_review_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'pub.review.approved' THEN RAISE EXCEPTION 'synthetic audit failure'; END IF; RETURN NEW; END $$`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER fixture_reject_pub_review_audit BEFORE INSERT ON registry_audit_events FOR EACH ROW EXECUTE FUNCTION fixture_reject_pub_review_audit()`); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := db.ExecContext(ctx, `CREATE TRIGGER fixture_reject_pub_review_audit BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'pub.review.approved' BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); err == nil {
+		t.Fatal("Pub review succeeded without audit")
+	}
+	var reviewCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_pub_review_decisions WHERE reservation_id = `+p(1), reservation.ID).Scan(&reviewCount); err != nil || reviewCount != 0 {
+		t.Fatalf("failed review audit left a decision: count=%d err=%v", reviewCount, err)
+	}
+	if driver == config.Postgres {
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER fixture_reject_pub_review_audit ON registry_audit_events`); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := db.ExecContext(ctx, `DROP TRIGGER fixture_reject_pub_review_audit`); err != nil {
+		t.Fatal(err)
+	}
+	approval, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); err != nil || retry != approval {
+		t.Fatalf("Pub review approval retry differs: %v", err)
+	}
+	checkApproval := func() error {
+		return repos.WithPubWriteTokenTransaction(ctx, token.Bearer, workspace, repository, func(tx *sql.Tx, actor string) error {
+			return reservations.RequireCurrentApproval(ctx, tx, workspace, repository, reservation.ID, actor)
+		})
+	}
+	if err := checkApproval(); err != nil {
+		t.Fatalf("current Pub approval rejected: %v", err)
+	}
+	if _, err := repos.SetPubReviewPolicy(ctx, owner, workspace, repository, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("Pub policy change left old approval valid: %v", err)
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.RevokePubReviewer(ctx, owner, workspace, repository, owner); err != nil {
+		t.Fatal(err)
+	}
+	beforeReviewOpen = countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID); !errors.Is(err, repositories.ErrForbidden) || reader != nil || countedObjects.opens.Load() != beforeReviewOpen {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("revoked reviewer accessed Pub storage: %v", err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("revoked Pub reviewer left approval valid: %v", err)
+	}
+	if _, err := repos.GrantPubReviewer(ctx, owner, workspace, repository, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproval(); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("Pub reviewer regrant revived old approval: %v", err)
+	}
+	type decisionResult struct {
+		decision string
+		err      error
+	}
+	decisions := make(chan decisionResult, 2)
+	for _, decision := range []string{"approved", "rejected"} {
+		go func(decision string) {
+			reason := ""
+			if decision == "rejected" {
+				reason = "synthetic rejection"
+			}
+			_, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, decision, reason)
+			decisions <- decisionResult{decision: decision, err: err}
+		}(decision)
+	}
+	for range 2 {
+		result := <-decisions
+		if result.decision == "rejected" && result.err != nil {
+			t.Fatalf("concurrent Pub rejection failed: %v", result.err)
+		}
+		if result.decision == "approved" && result.err != nil && !errors.Is(result.err, pub.ErrReviewUnavailable) {
+			t.Fatalf("concurrent Pub approval failed unexpectedly: %v", result.err)
+		}
+	}
+	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, pub.ErrReviewUnavailable) {
+		t.Fatalf("rejected Pub receipt was approved afterward: %v", err)
+	}
+	beforeReviewOpen = countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID); !errors.Is(err, pub.ErrReviewUnavailable) || reader != nil || countedObjects.opens.Load() != beforeReviewOpen {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("rejected Pub receipt accessed review storage: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET logical_quota_bytes = `+p(1)+` WHERE repository_id = `+p(2), request.TarballSize, repository); err != nil {
 		t.Fatal(err)
 	}
