@@ -393,6 +393,9 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	}
 	if h.pubWriteProtocol != nil {
 		h.registerPubWriteRoutes(router)
+		router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/pub-write-tokens", h.issuePubWriteToken)
+		router.Get("/api/v1/pub-write-tokens", h.listPubWriteTokens)
+		router.Delete("/api/v1/pub-write-tokens/{tokenID}", h.revokePubWriteToken)
 	}
 }
 
@@ -1361,7 +1364,7 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):
 		writeAPIError(response, http.StatusPreconditionFailed, "public_visibility_confirmation_required")
-	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable), errors.Is(err, repositories.ErrNPMWriteTokenUnavailable):
+	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable), errors.Is(err, repositories.ErrNPMWriteTokenUnavailable), errors.Is(err, repositories.ErrPubWriteTokenUnavailable):
 		writeAPIError(response, http.StatusNotFound, "resource_unavailable")
 	case errors.Is(err, repositories.ErrMembershipUnavailable):
 		writeAPIError(response, http.StatusNotFound, "membership_unavailable")
