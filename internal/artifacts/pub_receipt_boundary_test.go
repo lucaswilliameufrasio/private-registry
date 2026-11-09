@@ -111,6 +111,32 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	if err != nil {
 		t.Fatal(err)
 	}
+	atomicUpload, err := reservations.StartNativeUpload(ctx, token.Bearer, workspace, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atomicRequest := request
+	atomicRequest.Name = "native_atomic_fixture"
+	atomicReservation, err := reservations.ReserveNativeUpload(ctx, token.Bearer, workspace, repository, atomicUpload, atomicRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := reservations.ReserveNativeUpload(ctx, token.Bearer, workspace, repository, atomicUpload, atomicRequest)
+	if err != nil || retry.ID != atomicReservation.ID {
+		t.Fatalf("native reservation retry changed identity: %v", err)
+	}
+	conflictingRequest := atomicRequest
+	conflictingRequest.Name = "native_conflicting_fixture"
+	if _, err := reservations.ReserveNativeUpload(ctx, token.Bearer, workspace, repository, atomicUpload, conflictingRequest); !errors.Is(err, pub.ErrReservationConflict) {
+		t.Fatalf("native session accepted a second reservation: %v", err)
+	}
+	var orphanCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_pub_reservations WHERE repository_id = `+p(1)+` AND name = `+p(2), repository, conflictingRequest.Name).Scan(&orphanCount); err != nil || orphanCount != 0 {
+		t.Fatalf("conflicting native binding left an orphan: count=%d err=%v", orphanCount, err)
+	}
+	if err := reservations.Cancel(ctx, token.Bearer, workspace, repository, atomicReservation.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := reservations.StartNativeUpload(context.Background(), token.Bearer, workspace, repository); !errors.Is(err, pub.ErrNativeUploadUnavailable) {
 		t.Fatalf("native upload accepted missing deadline: %v", err)
 	}

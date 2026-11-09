@@ -50,3 +50,9 @@ As provas focadas passaram três vezes com race no checkout conciliado em SQLite
 A v40 prepara sessões de upload temporárias vinculadas ao token e repositório originais, com vínculo idempotente a uma reserva e revalidação na transação de publicação. Revisão pendente não equivale a publicação. O recovery isolado invalida sessões da cópia restaurada, sem mudar a origem. As migrations continuam explícitas via Goose; o servidor não executa migrations nem expõe essas sessões por padrão.
 
 No worktree isolado, migrations SQLite/PostgreSQL e provas de sessão, revisão e publicação passaram três vezes com race; o recovery SQLite isolado também passou três vezes com race. No checkout conciliado passaram build, formatação, lint, unitários, `go test -p=1 -timeout=40m -tags=integration -count=3 ./...` e `go test -p=1 -race -timeout=40m -tags=integration -count=1 ./...`, usando cache Go dedicado após falhas anteriores de infraestrutura. Não há ainda prova de uma jornada nativa Pub ponta a ponta nesta fatia.
+
+## Protocolo HTTP experimental
+
+O handler pode receber explicitamente os serviços Pub e habilitar as rotas de leitura e escrita; essa opção ainda não é configurada pelo `serve`. A reserva e o vínculo à sessão nativa ocorrem na mesma transação. Uma publicação pendente de revisão não retorna sucesso de publicação nem fica disponível para download.
+
+As provas focadas passaram três vezes com race em SQLite, PostgreSQL e Floci quando aplicável, incluindo conflito sem reserva órfã e teste com cliente Dart real em TLS local: publicação, consumo de dependências e recusa de publicação pendente de revisão. Passaram build, formatação, lint, unitários, `go test -p=1 -timeout=40m -tags=integration -count=3 ./...` e `go test -p=1 -race -timeout=40m -tags=integration -count=1 ./...`. Isso não comprova seleção no `serve`, recuperação integral ou operação produtiva.

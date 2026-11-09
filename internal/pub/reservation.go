@@ -65,6 +65,18 @@ func validDigest(value string) bool {
 // must authenticate before receiving a body and independently validate staged
 // content; this method does not receive, review, publish or serve an object.
 func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, repository string, request ReservationRequest) (Reservation, error) {
+	return s.reserve(ctx, bearer, workspace, repository, "", request)
+}
+
+// ReserveNativeUpload binds the reservation to the upload session atomically.
+func (s *ReservationService) ReserveNativeUpload(ctx context.Context, bearer, workspace, repository, uploadID string, request ReservationRequest) (Reservation, error) {
+	if !canonicalUUID(uploadID) {
+		return Reservation{}, ErrNativeUploadUnavailable
+	}
+	return s.reserve(ctx, bearer, workspace, repository, uploadID, request)
+}
+
+func (s *ReservationService) reserve(ctx context.Context, bearer, workspace, repository, uploadID string, request ReservationRequest) (Reservation, error) {
 	if s == nil || ctx == nil || request.TarballSize < 1 || request.TarballSize > 64<<20 || !validDigest(request.TarballSHA256) || !validDigest(request.MetadataSHA256) {
 		return Reservation{}, errors.New("pub reservation parameters are invalid")
 	}
@@ -85,6 +97,36 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 			return repositories.ErrPubWriteTokenUnavailable
 		}
 		now := time.Now().UTC().Truncate(time.Millisecond)
+		var existingBinding sql.NullString
+		if uploadID != "" {
+			query := `SELECT reservation_id FROM registry_pub_native_uploads WHERE upload_id = ` + s.bind(1) + ` AND workspace_id = ` + s.bind(2) + ` AND repository_id = ` + s.bind(3) + ` AND token_id = ` + s.bind(4) + ` AND created_by = ` + s.bind(5) + ` AND recovery_invalidated = 0 AND expires_at_ms > ` + s.bind(6)
+			if err := tx.QueryRowContext(ctx, query, uploadID, workspace, repository, tokenID, actor, now.UnixMilli()).Scan(&existingBinding); errors.Is(err, sql.ErrNoRows) {
+				return ErrNativeUploadUnavailable
+			} else if err != nil {
+				return errors.New("Pub native upload could not be checked")
+			}
+		}
+		bindReservation := func(reservationID string) error {
+			if uploadID == "" {
+				return nil
+			}
+			if existingBinding.Valid {
+				if existingBinding.String != reservationID {
+					return ErrReservationConflict
+				}
+				return nil
+			}
+			query := `UPDATE registry_pub_native_uploads SET reservation_id = ` + s.bind(1) + ` WHERE upload_id = ` + s.bind(2) + ` AND reservation_id IS NULL AND recovery_invalidated = 0 AND expires_at_ms > ` + s.bind(3)
+			changed, err := tx.ExecContext(ctx, query, reservationID, uploadID, time.Now().UTC().UnixMilli())
+			if err != nil {
+				return errors.New("Pub native upload could not be bound")
+			}
+			count, err := changed.RowsAffected()
+			if err != nil || count != 1 {
+				return ErrNativeUploadUnavailable
+			}
+			return s.audit(ctx, tx, actor, "pub.native_upload.bound", uploadID, now)
+		}
 		query := `UPDATE registry_pub_reservations SET status = 'expired', upload_claim_id = NULL WHERE repository_id = ` + s.bind(1) + ` AND name = ` + s.bind(2) + ` AND status IN ('reserved', 'uploading') AND expires_at_ms <= ` + s.bind(3)
 		if _, err := tx.ExecContext(ctx, query, repository, request.Name, now.UnixMilli()); err != nil {
 			return errors.New("expired pub reservation could not be reconciled")
@@ -99,7 +141,7 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 				return ErrReservationConflict
 			}
 			result = Reservation{ID: id, ExpiresAt: time.UnixMilli(expires).UTC()}
-			return nil
+			return bindReservation(id)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return errors.New("pub reservation identity could not be checked")
@@ -123,6 +165,9 @@ func (s *ReservationService) Reserve(ctx context.Context, bearer, workspace, rep
 		query = `INSERT INTO registry_pub_reservations (reservation_id, workspace_id, repository_id, name, version, version_identity, tarball_sha256, tarball_size, metadata_sha256, token_id, created_by, status, created_at_ms, expires_at_ms) VALUES (` + s.bind(1) + `, ` + s.bind(2) + `, ` + s.bind(3) + `, ` + s.bind(4) + `, ` + s.bind(5) + `, ` + s.bind(6) + `, ` + s.bind(7) + `, ` + s.bind(8) + `, ` + s.bind(9) + `, ` + s.bind(10) + `, ` + s.bind(11) + `, 'reserved', ` + s.bind(12) + `, ` + s.bind(13) + `)`
 		if _, err := tx.ExecContext(ctx, query, result.ID, workspace, repository, request.Name, request.Version, identity, request.TarballSHA256, request.TarballSize, request.MetadataSHA256, tokenID, actor, now.UnixMilli(), result.ExpiresAt.UnixMilli()); err != nil {
 			return errors.New("pub reservation could not be created")
+		}
+		if err := bindReservation(result.ID); err != nil {
+			return err
 		}
 		return s.audit(ctx, tx, actor, "pub.reservation.created", result.ID, now)
 	})

@@ -22,6 +22,7 @@ import (
 	"private-registry/internal/cargo"
 	"private-registry/internal/gomod"
 	"private-registry/internal/npm"
+	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
 	"private-registry/internal/workspaces"
@@ -49,6 +50,10 @@ type AuthHTTPConfig struct {
 	NPMReceipts            *npm.ReceiptService
 	NPMReadProtocol        bool
 	NPMWriteProtocol       *NPMWriteProtocolConfig
+	PubReservations        *pub.ReservationService
+	PubReceipts            *pub.ReceiptService
+	PubReadProtocol        bool
+	PubWriteProtocol       *PubWriteProtocolConfig
 }
 
 type authHTTP struct {
@@ -65,6 +70,11 @@ type authHTTP struct {
 	npmReadProtocol        bool
 	npmWriteProtocol       *npmWriteProtocol
 	npmMetadataSlots       chan struct{}
+	pubReservations        *pub.ReservationService
+	pubReceipts            *pub.ReceiptService
+	pubReadProtocol        bool
+	pubWriteProtocol       *pubWriteProtocol
+	pubMetadataSlots       chan struct{}
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -269,6 +279,16 @@ func NewHandler(
 	if npmWrite != nil && !cfg.NPMReadProtocol {
 		return nil, errors.New("npm write protocol requires npm read protocol services")
 	}
+	if cfg.PubReadProtocol && (cfg.PubReservations == nil || cfg.PubReceipts == nil) {
+		return nil, errors.New("Pub read protocol requires reservation and receipt services")
+	}
+	pubWrite, err := newPubWriteProtocol(cfg.PubWriteProtocol)
+	if err != nil {
+		return nil, err
+	}
+	if pubWrite != nil && (cfg.PubReservations == nil || cfg.PubReceipts == nil || !cfg.PubReadProtocol) {
+		return nil, errors.New("Pub write protocol requires Pub read protocol services")
+	}
 
 	router := chi.NewRouter()
 	health.registerRoutes(router)
@@ -286,6 +306,11 @@ func NewHandler(
 		npmReadProtocol:        cfg.NPMReadProtocol,
 		npmWriteProtocol:       npmWrite,
 		npmMetadataSlots:       make(chan struct{}, 4),
+		pubReservations:        cfg.PubReservations,
+		pubReceipts:            cfg.PubReceipts,
+		pubReadProtocol:        cfg.PubReadProtocol,
+		pubWriteProtocol:       pubWrite,
+		pubMetadataSlots:       make(chan struct{}, 4),
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -362,6 +387,12 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	}
 	if h.npmWriteProtocol != nil {
 		router.Put("/npm/{workspaceID}/{repositoryID}/*", h.npmPublish)
+	}
+	if h.pubReadProtocol {
+		h.registerPubReadRoutes(router)
+	}
+	if h.pubWriteProtocol != nil {
+		h.registerPubWriteRoutes(router)
 	}
 }
 
