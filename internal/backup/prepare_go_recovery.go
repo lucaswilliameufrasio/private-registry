@@ -18,24 +18,31 @@ import (
 // bounded private staging, hard resource limits and isolated source access.
 // Configuration, internal keys and all other formats remain outside this flow.
 func PrepareEncryptedSQLiteGoRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, parent, name string, genericSources, goSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (result PreparedSQLiteRecovery, retErr error) {
-	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, nil, nil, nil, nil, parent, name, genericSources, goSources, nil, nil, identity, newStage)
+	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, nil, nil, nil, nil, nil, nil, parent, name, genericSources, goSources, nil, nil, nil, identity, newStage)
 }
 
 // PrepareEncryptedSQLiteCargoRecovery restores generic, Go and Cargo objects
 // into a new isolated directory. The incomplete marker is never removed.
 // It does not restore configuration or other formats, nor authorize promotion.
 func PrepareEncryptedSQLiteCargoRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet CargoSetEnvelope, cargoTrust GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (PreparedSQLiteRecovery, error) {
-	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, &cargoSet, &cargoTrust, nil, nil, parent, name, genericSources, goSources, cargoSources, nil, identity, newStage)
+	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, &cargoSet, &cargoTrust, nil, nil, nil, nil, parent, name, genericSources, goSources, cargoSources, nil, nil, identity, newStage)
 }
 
 // PrepareEncryptedSQLiteNPMRecovery restores generic, Go, Cargo and npm
 // objects into a new isolated directory. It never removes the incomplete
 // marker, restores configuration or keys, or authorizes promotion.
 func PrepareEncryptedSQLiteNPMRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet CargoSetEnvelope, cargoTrust GenericSetRecovery, npmSet NPMSetEnvelope, npmTrust GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources, npmSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (PreparedSQLiteRecovery, error) {
-	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, &cargoSet, &cargoTrust, &npmSet, &npmTrust, parent, name, genericSources, goSources, cargoSources, npmSources, identity, newStage)
+	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, &cargoSet, &cargoTrust, &npmSet, &npmTrust, nil, nil, parent, name, genericSources, goSources, cargoSources, npmSources, nil, identity, newStage)
 }
 
-func prepareEncryptedSQLiteFormatsRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet *CargoSetEnvelope, cargoTrust *GenericSetRecovery, npmSet *NPMSetEnvelope, npmTrust *GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources, npmSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (result PreparedSQLiteRecovery, retErr error) {
+// PrepareEncryptedSQLitePubRecovery restores generic, Go, Cargo, npm and Pub
+// objects into a new isolated directory. The incomplete marker remains; keys,
+// configuration, other formats and promotion are outside this operation.
+func PrepareEncryptedSQLitePubRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet CargoSetEnvelope, cargoTrust GenericSetRecovery, npmSet NPMSetEnvelope, npmTrust GenericSetRecovery, pubSet PubSetEnvelope, pubTrust GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources, npmSources, pubSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (PreparedSQLiteRecovery, error) {
+	return prepareEncryptedSQLiteFormatsRecovery(ctx, ciphertext, maxCiphertext, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, goSet, goTrust, &cargoSet, &cargoTrust, &npmSet, &npmTrust, &pubSet, &pubTrust, parent, name, genericSources, goSources, cargoSources, npmSources, pubSources, identity, newStage)
+}
+
+func prepareEncryptedSQLiteFormatsRecovery(ctx context.Context, ciphertext io.Reader, maxCiphertext, maxSnapshotBytes int64, maxObjects, maxReferences int, genericSet GenericSetEnvelope, genericTrust GenericSetRecovery, goSet GoSetEnvelope, goTrust GenericSetRecovery, cargoSet *CargoSetEnvelope, cargoTrust *GenericSetRecovery, npmSet *NPMSetEnvelope, npmTrust *GenericSetRecovery, pubSet *PubSetEnvelope, pubTrust *GenericSetRecovery, parent, name string, genericSources, goSources, cargoSources, npmSources, pubSources []RecoveryObjectSource, identity age.Identity, newStage func() (RecoveryStage, error)) (result PreparedSQLiteRecovery, retErr error) {
 	if ctx == nil || ciphertext == nil || identity == nil || newStage == nil {
 		return result, errors.New("encrypted SQLite Go recovery parameters are invalid")
 	}
@@ -77,7 +84,7 @@ func prepareEncryptedSQLiteFormatsRecovery(ctx context.Context, ciphertext io.Re
 	if _, err := stage.Seek(0, io.SeekStart); err != nil {
 		return result, errors.New("encrypted SQLite Go recovery staging cannot be rewound")
 	}
-	prepared, err := prepareSQLiteRecovery(ctx, stage, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, &goSet, &goTrust, cargoSet, cargoTrust, npmSet, npmTrust, parent, name)
+	prepared, err := prepareSQLiteRecovery(ctx, stage, maxSnapshotBytes, maxObjects, maxReferences, genericSet, genericTrust, &goSet, &goTrust, cargoSet, cargoTrust, npmSet, npmTrust, pubSet, pubTrust, parent, name)
 	if err != nil {
 		return result, err
 	}
@@ -109,6 +116,10 @@ func prepareEncryptedSQLiteFormatsRecovery(ctx context.Context, ciphertext io.Re
 	if inventoryErr == nil && npmSet != nil {
 		npmInventory, inventoryErr = InventoryNPM(ctx, tx, maxObjects, maxReferences)
 	}
+	var pubInventory []GenericObject
+	if inventoryErr == nil && pubSet != nil {
+		pubInventory, inventoryErr = InventoryPub(ctx, tx, maxObjects, maxReferences)
+	}
 	rollbackErr := tx.Rollback()
 	closeErr := db.Close()
 	if inventoryErr != nil || rollbackErr != nil || closeErr != nil {
@@ -135,6 +146,12 @@ func prepareEncryptedSQLiteFormatsRecovery(ctx context.Context, ciphertext io.Re
 	if npmSet != nil {
 		npmTrust.Inventory = npmInventory
 		if err := RestoreNPMSet(ctx, *npmSet, *npmTrust, npmSources, identity, newStage, store); err != nil {
+			return result, err
+		}
+	}
+	if pubSet != nil {
+		pubTrust.Inventory = pubInventory
+		if err := RestorePubSet(ctx, *pubSet, *pubTrust, pubSources, identity, newStage, store); err != nil {
 			return result, err
 		}
 	}

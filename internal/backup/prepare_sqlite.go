@@ -25,6 +25,7 @@ type PreparedSQLiteRecovery struct {
 	GoObjects          int
 	CargoObjects       int
 	NPMObjects         int
+	PubObjects         int
 	Invalidated        InvalidatedCredentials
 	HeldJobs           int64
 	InvalidatedUploads int64
@@ -41,10 +42,10 @@ type PreparedSQLiteRecovery struct {
 // The caller must authenticate and decrypt the complete encrypted snapshot
 // before passing it, enforce resource budgets and protect the trusted parent.
 func PrepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotBytes int64, maxObjects, maxReferences int, setEnvelope GenericSetEnvelope, trusted GenericSetRecovery, parent, name string) (result PreparedSQLiteRecovery, retErr error) {
-	return prepareSQLiteRecovery(ctx, snapshot, maxSnapshotBytes, maxObjects, maxReferences, setEnvelope, trusted, nil, nil, nil, nil, nil, nil, parent, name)
+	return prepareSQLiteRecovery(ctx, snapshot, maxSnapshotBytes, maxObjects, maxReferences, setEnvelope, trusted, nil, nil, nil, nil, nil, nil, nil, nil, parent, name)
 }
 
-func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotBytes int64, maxObjects, maxReferences int, setEnvelope GenericSetEnvelope, trusted GenericSetRecovery, goEnvelope *GoSetEnvelope, trustedGo *GenericSetRecovery, cargoEnvelope *CargoSetEnvelope, trustedCargo *GenericSetRecovery, npmEnvelope *NPMSetEnvelope, trustedNPM *GenericSetRecovery, parent, name string) (result PreparedSQLiteRecovery, retErr error) {
+func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotBytes int64, maxObjects, maxReferences int, setEnvelope GenericSetEnvelope, trusted GenericSetRecovery, goEnvelope *GoSetEnvelope, trustedGo *GenericSetRecovery, cargoEnvelope *CargoSetEnvelope, trustedCargo *GenericSetRecovery, npmEnvelope *NPMSetEnvelope, trustedNPM *GenericSetRecovery, pubEnvelope *PubSetEnvelope, trustedPub *GenericSetRecovery, parent, name string) (result PreparedSQLiteRecovery, retErr error) {
 	if ctx == nil || snapshot == nil || maxSnapshotBytes < 1 || maxSnapshotBytes > 1<<40 || maxObjects < 1 || maxObjects > maxGenericSetObjects || maxReferences < 1 || maxReferences > 10000000 || !filepath.IsAbs(parent) || !recoveryDirectoryName.MatchString(name) {
 		return result, errors.New("isolated SQLite recovery parameters are invalid")
 	}
@@ -87,6 +88,17 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 			return result, errors.New("npm recovery context does not match snapshot context")
 		}
 		if _, err := VerifyNPMSet(*npmEnvelope, trustedNPM.Signer, trustedNPM.InstallationID, trustedNPM.BackupID, trustedNPM.SnapshotSHA256); err != nil {
+			return result, err
+		}
+	}
+	if (pubEnvelope == nil) != (trustedPub == nil) {
+		return result, errors.New("Pub recovery set and trust must be supplied together")
+	}
+	if pubEnvelope != nil {
+		if trustedPub.InstallationID != trusted.InstallationID || trustedPub.BackupID != trusted.BackupID || trustedPub.SnapshotSHA256 != trusted.SnapshotSHA256 {
+			return result, errors.New("Pub recovery context does not match snapshot context")
+		}
+		if _, err := VerifyPubSet(*pubEnvelope, trustedPub.Signer, trustedPub.InstallationID, trustedPub.BackupID, trustedPub.SnapshotSHA256); err != nil {
 			return result, err
 		}
 	}
@@ -164,16 +176,21 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if inventoryErr == nil {
 		npmInventory, inventoryErr = InventoryNPM(ctx, inventoryTx, maxObjects, maxReferences)
 	}
-	var hasPubVersions bool
+	var pubInventory []GenericObject
 	if inventoryErr == nil {
-		inventoryErr = inventoryTx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_pub_versions UNION ALL SELECT 1 FROM registry_pub_reservations WHERE object_verified = 1)`).Scan(&hasPubVersions)
+		pubInventory, inventoryErr = InventoryPub(ctx, inventoryTx, maxObjects, maxReferences)
 	}
 	rollbackErr := inventoryTx.Rollback()
 	if inventoryErr != nil || rollbackErr != nil {
 		return result, errors.New("isolated SQLite recovery inventory could not be verified")
 	}
-	if hasPubVersions {
+	if pubEnvelope == nil && len(pubInventory) > 0 {
 		return result, errors.New("partial recovery cannot prepare a catalog containing Pub versions")
+	}
+	if pubEnvelope != nil {
+		if _, err := VerifyPubSetInventory(*pubEnvelope, trustedPub.Signer, trustedPub.InstallationID, trustedPub.BackupID, digest, pubInventory); err != nil {
+			return result, err
+		}
 	}
 	if npmEnvelope == nil && len(npmInventory) > 0 {
 		return result, errors.New("partial recovery cannot prepare a catalog containing npm versions")
@@ -222,5 +239,5 @@ func prepareSQLiteRecovery(ctx context.Context, snapshot io.Reader, maxSnapshotB
 	if err := tx.Commit(); err != nil {
 		return result, errors.New("isolated SQLite recovery transaction could not commit")
 	}
-	return PreparedSQLiteRecovery{DatabasePath: path, SnapshotSize: size, GenericObjects: len(inventory), GoObjects: len(goInventory), CargoObjects: len(cargoInventory), NPMObjects: len(npmInventory), Invalidated: invalidated, HeldJobs: heldJobs, InvalidatedUploads: invalidatedUploads}, nil
+	return PreparedSQLiteRecovery{DatabasePath: path, SnapshotSize: size, GenericObjects: len(inventory), GoObjects: len(goInventory), CargoObjects: len(cargoInventory), NPMObjects: len(npmInventory), PubObjects: len(pubInventory), Invalidated: invalidated, HeldJobs: heldJobs, InvalidatedUploads: invalidatedUploads}, nil
 }
