@@ -393,6 +393,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	}
 	if h.pubWriteProtocol != nil {
 		h.registerPubWriteRoutes(router)
+		h.registerPubReviewRoutes(router)
 		router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/pub-write-tokens", h.issuePubWriteToken)
 		router.Get("/api/v1/pub-write-tokens", h.listPubWriteTokens)
 		router.Delete("/api/v1/pub-write-tokens/{tokenID}", h.revokePubWriteToken)

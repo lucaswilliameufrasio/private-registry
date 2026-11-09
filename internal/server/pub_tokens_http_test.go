@@ -3,8 +3,13 @@
 package server
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +25,7 @@ import (
 	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/storage"
+	"private-registry/internal/workspaces"
 )
 
 func TestPubWriteTokenHTTPRequiresMFAAndCSRF(t *testing.T) {
@@ -64,6 +70,7 @@ func TestPubWriteTokenHTTPRequiresMFAAndCSRF(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/pub-write-tokens", workspace.ID, repository)
+	reviewBase := fmt.Sprintf("/api/v1/workspaces/%s/repositories/%s/pub", workspace.ID, repository)
 	login := authHTTPRequest(handler, http.MethodPost, "/api/v1/auth/login", fmt.Sprintf(`{"login_name":%q,"password":%q}`, authTestLogin, authTestPassword), authTestOrigin, "registry.example")
 	if login.Code != http.StatusOK {
 		t.Fatalf("login failed: %d", login.Code)
@@ -71,6 +78,9 @@ func TestPubWriteTokenHTTPRequiresMFAAndCSRF(t *testing.T) {
 	cookies := assertSessionCookies(t, login)
 	if response := authHTTPRequestWithCookies(handler, http.MethodPost, path, `{}`, authTestOrigin, "registry.example", cookies, cookies[csrfCookieName].Value); response.Code == http.StatusCreated {
 		t.Fatal("Pub token issued before MFA")
+	}
+	if response := authHTTPRequestWithCookies(handler, http.MethodPut, reviewBase+"/reviewers/"+owner, "", authTestOrigin, "registry.example", cookies, cookies[csrfCookieName].Value); response.Code == http.StatusOK {
+		t.Fatal("Pub reviewer granted before MFA")
 	}
 	begin := authHTTPRequestWithCookies(handler, http.MethodPost, "/api/v1/auth/mfa/enrollment", "", authTestOrigin, "registry.example", cookies, cookies[csrfCookieName].Value)
 	if begin.Code != http.StatusOK {
@@ -90,6 +100,70 @@ func TestPubWriteTokenHTTPRequiresMFAAndCSRF(t *testing.T) {
 		t.Fatalf("MFA completion failed: %d", complete.Code)
 	}
 	cookies = assertSessionCookies(t, complete)
+	if response := authHTTPRequestWithCookies(handler, http.MethodPut, reviewBase+"/reviewers/"+owner, "", authTestOrigin, "registry.example", cookies, ""); response.Code == http.StatusOK {
+		t.Fatal("Pub reviewer granted without CSRF")
+	}
+	if response := authHTTPRequestWithCookies(handler, http.MethodPut, reviewBase+"/reviewers/"+owner, "", authTestOrigin, "registry.example", cookies, cookies[csrfCookieName].Value); response.Code != http.StatusOK {
+		t.Fatalf("Pub reviewer grant failed: %d", response.Code)
+	}
+	if response := authHTTPRequestWithCookies(handler, http.MethodPut, reviewBase+"/review-policy", `{"required":true,"expected_revision":0}`, authTestOrigin, "registry.example", cookies, ""); response.Code == http.StatusOK {
+		t.Fatal("Pub review policy changed without CSRF")
+	}
+	if response := authHTTPRequestWithCookies(handler, http.MethodPut, reviewBase+"/review-policy", `{"required":true,"expected_revision":0}`, authTestOrigin, "registry.example", cookies, cookies[csrfCookieName].Value); response.Code != http.StatusOK {
+		t.Fatalf("Pub review policy change failed: %d", response.Code)
+	}
+	publisher := uuid.NewString()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES (?, 'Synthetic publisher', 'now', 'now')`, publisher); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.workspaceService.SetMembershipRole(ctx, owner, workspace.ID, publisher, workspaces.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repositoryService.GrantRepositoryRole(ctx, owner, workspace.ID, repository, publisher, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	publisherToken, err := fixture.repositoryService.IssuePubWriteToken(ctx, publisher, workspace.ID, repository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte("name: review_fixture\nversion: 1.0.0\n")
+	var content bytes.Buffer
+	compressor := gzip.NewWriter(&content)
+	archive := tar.NewWriter(compressor)
+	if err := archive.WriteHeader(&tar.Header{Name: "pubspec.yaml", Mode: 0o600, Size: int64(len(manifest))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	digest, metadata := sha256.Sum256(content.Bytes()), sha256.Sum256(manifest)
+	reservation, err := reservations.Reserve(ctx, publisherToken.Bearer, workspace.ID, repository, pub.ReservationRequest{Name: "review_fixture", Version: "1.0.0", TarballSHA256: hex.EncodeToString(digest[:]), TarballSize: int64(content.Len()), MetadataSHA256: hex.EncodeToString(metadata[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receipts.Receive(ctx, publisherToken.Bearer, workspace.ID, repository, reservation.ID, pub.ReceiptInput{Name: "review_fixture", Version: "1.0.0", Manifest: manifest, Size: int64(content.Len())}, bytes.NewReader(content.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	listedReviews := authHTTPRequestWithCookies(handler, http.MethodGet, reviewBase+"/reviews", "", authTestOrigin, "registry.example", cookies, "")
+	if listedReviews.Code != http.StatusOK || !strings.Contains(listedReviews.Body.String(), reservation.ID) {
+		t.Fatalf("pending Pub review missing: %d", listedReviews.Code)
+	}
+	approve := reviewBase + "/reviews/" + reservation.ID + "/approve"
+	if response := authHTTPRequestWithCookies(handler, http.MethodPost, approve, "", authTestOrigin, "registry.example", cookies, ""); response.Code == http.StatusNoContent {
+		t.Fatal("Pub review approved without CSRF")
+	}
+	if response := authHTTPRequestWithCookies(handler, http.MethodPost, approve, "", authTestOrigin, "registry.example", cookies, cookies[csrfCookieName].Value); response.Code != http.StatusNoContent {
+		t.Fatalf("Pub review approval failed: %d", response.Code)
+	}
+	if _, err := reservations.PublishReceipt(ctx, publisherToken.Bearer, workspace.ID, repository, reservation.ID); err != nil {
+		t.Fatalf("approved Pub receipt failed publication: %v", err)
+	}
 	if response := authHTTPRequestWithCookies(handler, http.MethodPost, path, `{}`, authTestOrigin, "registry.example", cookies, ""); response.Code == http.StatusCreated {
 		t.Fatal("Pub token issued without CSRF")
 	}
