@@ -12,3 +12,9 @@ Esta fatia não disponibiliza rotas ou serving, não move dist-tags e não resol
 ## Evidência parcial
 
 Em SQLite, PostgreSQL e Floci isolado, testes focalizados repetidos três vezes com race cobriram revisão pendente, publicação concorrente idempotente, quota de repositório sem contagem dupla, imutabilidade do vínculo e recusa de retry após revogação do publisher. Em SQLite, falha de auditoria reverteu o vínculo. Na fixture PostgreSQL, recovery invalidou tanto o recibo publicado quanto reservas adicionais; isso não constitui restore completo. A migration v31 passou em upgrade e rollback injetado nos dois bancos, três vezes com race. Build, formatação, lint e unitários passaram neste worktree; falta gate integral integrado e permanecem pendentes adapter, dist-tags, serving, recovery integral e jornadas reais.
+
+## Composição experimental no servidor
+
+`REGISTRY_EXPERIMENTAL_NPM=true` habilita explicitamente as rotas npm no `serve`, com filesystem local e staging privado em `npm-staging`; o padrão é `false`, e valores diferentes de `true` ou `false` são recusados. O arquivo comprimido é limitado pelo menor entre `REGISTRY_MAX_UPLOAD_BYTES` e 64 MiB; a concorrência usa o menor entre `REGISTRY_MAX_CONCURRENT_UPLOADS` e 16. O documento de publicação tem limite de 128 MiB; conteúdo descomprimido tem limite de 512 MiB, com até 10.000 entradas e manifesto de 1 MiB. O `serve` não executa migrations.
+
+Uma prova do processo `serve` passou três vezes com race, verificando rota ausente por padrão e recusa sem credencial quando habilitada. Passaram build, formatação, lint, unitários, integrações com `-count=3` e integrações com `-race -count=1`, usando `-timeout=40m` por pacote. Não prova publicação pelo processo real, recuperação integral ou cleanup após crash.

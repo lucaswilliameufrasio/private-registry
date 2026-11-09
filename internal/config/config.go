@@ -38,6 +38,7 @@ type Config struct {
 	MaxConcurrentUploads    int
 	ExperimentalPub         bool
 	ExperimentalCargo       bool
+	ExperimentalNPM         bool
 }
 
 type MasterKeySettings struct {
@@ -249,6 +250,16 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 			return Config{}, errors.New("REGISTRY_EXPERIMENTAL_CARGO must be true or false")
 		}
 	}
+	npmEnabled := false
+	if raw, ok := lookup("REGISTRY_EXPERIMENTAL_NPM"); ok {
+		switch raw {
+		case "true":
+			npmEnabled = true
+		case "false":
+		default:
+			return Config{}, errors.New("REGISTRY_EXPERIMENTAL_NPM must be true or false")
+		}
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -267,6 +278,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		MaxConcurrentUploads:    maxConcurrentUploads,
 		ExperimentalPub:         pubEnabled,
 		ExperimentalCargo:       cargoEnabled,
+		ExperimentalNPM:         npmEnabled,
 	}, nil
 }
 

@@ -44,7 +44,7 @@ func newNPMWriteProtocol(cfg *NPMWriteProtocolConfig) (*npmWriteProtocol, error)
 	return &npmWriteProtocol{staging: cfg.StagingDirectory, maxDocument: cfg.MaxDocumentBytes, maxArchive: cfg.MaxArchiveBytes, slots: make(chan struct{}, cfg.MaxConcurrent)}, nil
 }
 
-// npmPublish is opt-in and is not wired into the production server. A native
+// npmPublish is experimental and opt-in. A native
 // success means both publication and the requested initial tags committed.
 func (h *authHTTP) npmPublish(response http.ResponseWriter, request *http.Request) {
 	workspace, repository, ok := h.npmReadScope(response, request)

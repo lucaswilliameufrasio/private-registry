@@ -28,6 +28,7 @@ import (
 	"private-registry/internal/jobs"
 	"private-registry/internal/maintenance"
 	"private-registry/internal/migrations"
+	"private-registry/internal/npm"
 	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
@@ -200,6 +201,33 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		httpConfig.CargoReservations = cargoReservations
 		httpConfig.CargoReceipts = cargoReceipts
 		httpConfig.CargoProtocol = &server.CargoProtocolConfig{StagingDirectory: cargoStaging, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent}
+	}
+	if cfg.ExperimentalNPM {
+		npmStaging := filepath.Join(cfg.DataDir, "npm-staging")
+		if err := os.MkdirAll(npmStaging, 0o700); err != nil {
+			return errors.New("npm staging directory could not be created")
+		}
+		maxArchive := cfg.MaxUploadBytes
+		if maxArchive > 64<<20 {
+			maxArchive = 64 << 20
+		}
+		concurrent := cfg.MaxConcurrentUploads
+		if concurrent > 16 {
+			concurrent = 16
+		}
+		limits := npm.ArchiveLimits{MaxCompressedBytes: maxArchive, MaxUncompressedBytes: 512 << 20, MaxEntries: 10000, MaxManifestBytes: 1 << 20}
+		npmReservations, err := npm.NewReservationService(db, repositoryService, cfg.DatabaseDriver)
+		if err != nil {
+			return err
+		}
+		npmReceipts, err := npm.NewReceiptService(db, repositoryService, cfg.DatabaseDriver, objectStore, npm.ReceiptOptions{StagingDirectory: npmStaging, MaxConcurrent: concurrent, Limits: limits})
+		if err != nil {
+			return err
+		}
+		httpConfig.NPMReservations = npmReservations
+		httpConfig.NPMReceipts = npmReceipts
+		httpConfig.NPMReadProtocol = true
+		httpConfig.NPMWriteProtocol = &server.NPMWriteProtocolConfig{StagingDirectory: npmStaging, MaxDocumentBytes: 128 << 20, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent}
 	}
 	if cfg.ExperimentalPub {
 		pubStaging := filepath.Join(cfg.DataDir, "pub-staging")
