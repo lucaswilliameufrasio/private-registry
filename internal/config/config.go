@@ -36,6 +36,7 @@ type Config struct {
 	DatabaseMaxOpenConns    int
 	MaxUploadBytes          int64
 	MaxConcurrentUploads    int
+	ExperimentalPub         bool
 }
 
 type MasterKeySettings struct {
@@ -227,6 +228,16 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if err != nil || maxConcurrentUploads < 1 || maxConcurrentUploads > 128 {
 		return Config{}, errors.New("maximum concurrent uploads must be between 1 and 128")
 	}
+	pubEnabled := false
+	if raw, ok := lookup("REGISTRY_EXPERIMENTAL_PUB"); ok {
+		switch raw {
+		case "true":
+			pubEnabled = true
+		case "false":
+		default:
+			return Config{}, errors.New("REGISTRY_EXPERIMENTAL_PUB must be true or false")
+		}
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -243,6 +254,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		DatabaseMaxOpenConns:    maxOpenConns,
 		MaxUploadBytes:          maxUploadBytes,
 		MaxConcurrentUploads:    maxConcurrentUploads,
+		ExperimentalPub:         pubEnabled,
 	}, nil
 }
 

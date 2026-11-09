@@ -38,6 +38,26 @@ func TestLoadFromDefaultsToLoopbackAndPersistentSQLite(t *testing.T) {
 	}
 }
 
+func TestExperimentalPubRequiresExplicitBoolean(t *testing.T) {
+	for _, item := range []struct {
+		value   string
+		enabled bool
+		valid   bool
+	}{{"true", true, true}, {"false", false, true}, {"", false, false}, {"1", false, false}, {"TRUE", false, false}} {
+		cfg, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_EXPERIMENTAL_PUB": item.value}))
+		if item.valid && (err != nil || cfg.ExperimentalPub != item.enabled) {
+			t.Fatalf("Pub setting %q: enabled=%v err=%v", item.value, cfg.ExperimentalPub, err)
+		}
+		if !item.valid && err == nil {
+			t.Fatalf("invalid Pub setting %q was accepted", item.value)
+		}
+	}
+	cfg, err := LoadFrom(lookupMap(nil))
+	if err != nil || cfg.ExperimentalPub {
+		t.Fatalf("Pub should be disabled by default: %v", err)
+	}
+}
+
 func TestPublicAssetCORSOriginListIsBounded(t *testing.T) {
 	cfg, err := LoadFrom(lookupMap(map[string]string{"REGISTRY_PUBLIC_ASSET_CORS_ORIGINS": " https://app.example,https://docs.example "}))
 	if err != nil || len(cfg.PublicAssetCORSOrigins) != 2 || cfg.PublicAssetCORSOrigins[0] != "https://app.example" || cfg.PublicAssetCORSOrigins[1] != "https://docs.example" {

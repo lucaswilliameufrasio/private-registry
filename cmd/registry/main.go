@@ -28,6 +28,7 @@ import (
 	"private-registry/internal/jobs"
 	"private-registry/internal/maintenance"
 	"private-registry/internal/migrations"
+	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
 	"private-registry/internal/server"
@@ -171,13 +172,41 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		return err
 	}
 	health := server.NewHealth(db)
-	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, server.AuthHTTPConfig{
+	httpConfig := server.AuthHTTPConfig{
 		CanonicalOrigin:        cfg.CanonicalOrigin,
 		AssetOrigin:            cfg.AssetOrigin,
 		PublicAssetCORSOrigins: cfg.PublicAssetCORSOrigins,
 		TrustedProxies:         cfg.TrustedProxies,
 		GoModules:              goModules,
-	})
+	}
+	if cfg.ExperimentalPub {
+		pubStaging := filepath.Join(cfg.DataDir, "pub-staging")
+		if err := os.MkdirAll(pubStaging, 0o700); err != nil {
+			return errors.New("Pub staging directory could not be created")
+		}
+		maxArchive := cfg.MaxUploadBytes
+		if maxArchive > 64<<20 {
+			maxArchive = 64 << 20
+		}
+		concurrent := cfg.MaxConcurrentUploads
+		if concurrent > 16 {
+			concurrent = 16
+		}
+		limits := pub.ArchiveLimits{MaxCompressedBytes: maxArchive, MaxUncompressedBytes: 512 << 20, MaxEntries: 10000, MaxManifestBytes: 1 << 20}
+		pubReservations, err := pub.NewReservationService(db, repositoryService, cfg.DatabaseDriver)
+		if err != nil {
+			return err
+		}
+		pubReceipts, err := pub.NewReceiptService(db, repositoryService, cfg.DatabaseDriver, objectStore, pub.ReceiptOptions{StagingDirectory: pubStaging, MaxConcurrent: concurrent, Limits: limits})
+		if err != nil {
+			return err
+		}
+		httpConfig.PubReservations = pubReservations
+		httpConfig.PubReceipts = pubReceipts
+		httpConfig.PubReadProtocol = true
+		httpConfig.PubWriteProtocol = &server.PubWriteProtocolConfig{StagingDirectory: pubStaging, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent, Limits: limits}
+	}
+	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, httpConfig)
 	if err != nil {
 		return err
 	}

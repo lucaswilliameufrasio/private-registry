@@ -43,7 +43,7 @@ func newPubWriteProtocol(cfg *PubWriteProtocolConfig) (*pubWriteProtocol, error)
 	return &pubWriteProtocol{staging: cfg.StagingDirectory, maxArchive: cfg.MaxArchiveBytes, limits: cfg.Limits, slots: make(chan struct{}, cfg.MaxConcurrent)}, nil
 }
 
-// Native writes are opt-in and are not connected to the production server.
+// Native writes are experimental and require explicit opt-in.
 func (h *authHTTP) registerPubWriteRoutes(router chi.Router) {
 	base := "/pub/{workspaceID}/{repositoryID}"
 	router.Get(base+"/api/packages/versions/new", h.pubStartUpload)
