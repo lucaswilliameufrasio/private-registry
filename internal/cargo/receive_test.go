@@ -140,7 +140,7 @@ func exerciseCargoReceipt(t *testing.T, ctx context.Context, db *sql.DB, driver 
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	options := cargo.ReceiptOptions{StagingDirectory: staging, Limits: cargo.ArchiveLimits{MaxCompressedBytes: 1 << 20, MaxUncompressedBytes: 1 << 20, MaxFiles: 100, MaxManifestBytes: 4096}, MaxConcurrent: 1, CurrentIndex: "sparse+https://registry.example/index/", DefaultIndex: "https://github.com/rust-lang/crates.io-index"}
+	options := cargo.ReceiptOptions{StagingDirectory: staging, Limits: cargo.ArchiveLimits{MaxCompressedBytes: 1 << 20, MaxUncompressedBytes: 1 << 20, MaxFiles: 100, MaxManifestBytes: 4096}, MaxConcurrent: 1, IndexOrigin: "https://registry.example", DefaultIndex: "https://github.com/rust-lang/crates.io-index"}
 	receipts, err := cargo.NewReceiptService(db, repos, driver, store, options)
 	if err != nil {
 		t.Fatal(err)

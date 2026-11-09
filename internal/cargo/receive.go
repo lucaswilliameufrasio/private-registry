@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,7 @@ type ReceiptOptions struct {
 	Limits           ArchiveLimits
 	MaxConcurrent    int
 	CurrentIndex     string
+	IndexOrigin      string
 	DefaultIndex     string
 }
 
@@ -41,14 +43,33 @@ type ReceiptService struct {
 }
 
 func NewReceiptService(db *sql.DB, repos *repositories.Service, driver config.DatabaseDriver, objects storage.Driver, options ReceiptOptions) (*ReceiptService, error) {
-	if db == nil || repos == nil || objects == nil || (driver != config.SQLite && driver != config.Postgres) || !filepath.IsAbs(options.StagingDirectory) || options.MaxConcurrent < 1 || options.MaxConcurrent > 128 || options.Limits.MaxCompressedBytes < 1 || options.Limits.MaxCompressedBytes > 500<<20 || options.Limits.MaxUncompressedBytes < 1 || options.Limits.MaxFiles < 1 || options.Limits.MaxManifestBytes < 1 || options.CurrentIndex == "" || options.DefaultIndex == "" {
+	if db == nil || repos == nil || objects == nil || (driver != config.SQLite && driver != config.Postgres) || !filepath.IsAbs(options.StagingDirectory) || options.MaxConcurrent < 1 || options.MaxConcurrent > 128 || options.Limits.MaxCompressedBytes < 1 || options.Limits.MaxCompressedBytes > 500<<20 || options.Limits.MaxUncompressedBytes < 1 || options.Limits.MaxFiles < 1 || options.Limits.MaxManifestBytes < 1 || (options.CurrentIndex == "") == (options.IndexOrigin == "") || options.DefaultIndex == "" {
 		return nil, errors.New("Cargo receipt service configuration is invalid")
+	}
+	if options.IndexOrigin != "" {
+		if _, err := repositoryIndex(options.IndexOrigin, "018f0000-0000-7000-8000-000000000001", "018f0000-0000-7000-8000-000000000002"); err != nil {
+			return nil, errors.New("Cargo receipt index origin is invalid")
+		}
 	}
 	info, err := os.Lstat(options.StagingDirectory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("Cargo receipt staging must be an existing private directory")
 	}
 	return &ReceiptService{db: db, repositories: repos, driver: driver, objects: objects, options: options, slots: make(chan struct{}, options.MaxConcurrent)}, nil
+}
+
+func repositoryIndex(origin, workspace, repository string) (string, error) {
+	parsed, err := url.Parse(origin)
+	if err != nil || len(origin) > 2048 || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.String() != origin {
+		return "", errors.New("Cargo index origin is invalid")
+	}
+	for _, value := range []string{workspace, repository} {
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return "", errors.New("Cargo index scope is invalid")
+		}
+	}
+	return "sparse+" + origin + "/cargo/" + workspace + "/" + repository + "/index/", nil
 }
 
 func (s *ReceiptService) bind(n int) string {
@@ -145,7 +166,15 @@ func (s *ReceiptService) Receive(ctx context.Context, bearer, workspace, reposit
 	if err != nil {
 		return errors.New("Cargo receipt staging could not be opened")
 	}
-	entry, validateErr := ValidateStagedPublication(ctx, frame, file, s.options.Limits, s.options.CurrentIndex, s.options.DefaultIndex)
+	currentIndex := s.options.CurrentIndex
+	if s.options.IndexOrigin != "" {
+		currentIndex, err = repositoryIndex(s.options.IndexOrigin, workspace, repository)
+		if err != nil {
+			_ = file.Close()
+			return err
+		}
+	}
+	entry, validateErr := ValidateStagedPublication(ctx, frame, file, s.options.Limits, currentIndex, s.options.DefaultIndex)
 	closeErr = file.Close()
 	if validateErr != nil || closeErr != nil {
 		return errors.New("Cargo staged publication is invalid")
