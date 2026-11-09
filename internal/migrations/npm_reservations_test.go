@@ -58,12 +58,14 @@ func exerciseNPMReservationMigration(t *testing.T, ctx context.Context, db *sql.
 	delete(old, "sql/postgres/000037_pub_receipts.sql")
 	delete(old, "sql/sqlite/000038_pub_review.sql")
 	delete(old, "sql/postgres/000038_pub_review.sql")
+	delete(old, "sql/sqlite/000039_pub_publications.sql")
+	delete(old, "sql/postgres/000039_pub_publications.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 27 {
 		t.Fatalf("prepare v27 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 38 || len(report.AppliedVersions) != 11 || report.AppliedVersions[0] != 28 || report.AppliedVersions[1] != 29 || report.AppliedVersions[2] != 30 || report.AppliedVersions[3] != 31 || report.AppliedVersions[4] != 32 || report.AppliedVersions[5] != 33 || report.AppliedVersions[6] != 34 || report.AppliedVersions[7] != 35 || report.AppliedVersions[8] != 36 || report.AppliedVersions[9] != 37 || report.AppliedVersions[10] != 38 {
+		if err != nil || report.CurrentVersion != 39 || len(report.AppliedVersions) != 12 || report.AppliedVersions[0] != 28 || report.AppliedVersions[1] != 29 || report.AppliedVersions[2] != 30 || report.AppliedVersions[3] != 31 || report.AppliedVersions[4] != 32 || report.AppliedVersions[5] != 33 || report.AppliedVersions[6] != 34 || report.AppliedVersions[7] != 35 || report.AppliedVersions[8] != 36 || report.AppliedVersions[9] != 37 || report.AppliedVersions[10] != 38 || report.AppliedVersions[11] != 39 {
 			t.Fatalf("v28–v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

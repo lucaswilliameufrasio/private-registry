@@ -347,6 +347,9 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	if _, err := reservations.DecideReview(ctx, owner, workspace, repository, reservation.ID, "approved", ""); !errors.Is(err, pub.ErrReviewUnavailable) {
 		t.Fatalf("rejected Pub receipt was approved afterward: %v", err)
 	}
+	if _, err := reservations.PublishReceipt(ctx, token.Bearer, workspace, repository, reservation.ID); !errors.Is(err, repositories.ErrReviewRequired) {
+		t.Fatalf("rejected Pub receipt was published: %v", err)
+	}
 	beforeReviewOpen = countedObjects.opens.Load()
 	if reader, _, err := receiver.OpenReviewArchive(ctx, owner, workspace, repository, reservation.ID); !errors.Is(err, pub.ErrReviewUnavailable) || reader != nil || countedObjects.opens.Load() != beforeReviewOpen {
 		if reader != nil {
@@ -430,6 +433,23 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, concurrentRepository, owner, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	readToken, err := repos.IssuePersonalReadToken(ctx, owner, workspace, concurrentRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforePendingOpen := countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name, request.Version); !errors.Is(err, pub.ErrPackageUnavailable) || reader != nil || countedObjects.opens.Load() != beforePendingOpen {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("pending Pub reservation was readable: %v", err)
+	}
+	if _, err := reservations.ReadPublishedVersionsWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name); !errors.Is(err, pub.ErrPackageUnavailable) {
+		t.Fatalf("pending Pub reservation appeared in metadata: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET logical_quota_bytes = `+p(1)+` WHERE repository_id = `+p(2), request.TarballSize, concurrentRepository); err != nil {
 		t.Fatal(err)
 	}
@@ -465,6 +485,122 @@ func exercisePubReceiptBoundaryV37(t *testing.T, db *sql.DB, driver config.Datab
 	}
 	if !errors.Is(quotaErr, pub.ErrReservationQuota) {
 		t.Fatalf("uploading Pub reservation did not consume quota: %v", quotaErr)
+	}
+	if driver == config.Postgres {
+		if _, err := db.ExecContext(ctx, `CREATE FUNCTION fixture_reject_pub_publication_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'pub.publication.created' THEN RAISE EXCEPTION 'synthetic audit failure'; END IF; RETURN NEW; END $$`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER fixture_reject_pub_publication_audit BEFORE INSERT ON registry_audit_events FOR EACH ROW EXECUTE FUNCTION fixture_reject_pub_publication_audit()`); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := db.ExecContext(ctx, `CREATE TRIGGER fixture_reject_pub_publication_audit BEFORE INSERT ON registry_audit_events WHEN NEW.action = 'pub.publication.created' BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.PublishReceipt(ctx, concurrentToken.Bearer, workspace, concurrentRepository, concurrentReservation.ID); err == nil {
+		t.Fatal("Pub publication succeeded without audit")
+	}
+	var publicationCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_pub_publications WHERE reservation_id = `+p(1), concurrentReservation.ID).Scan(&publicationCount); err != nil || publicationCount != 0 {
+		t.Fatalf("failed publication audit left a link: count=%d err=%v", publicationCount, err)
+	}
+	if driver == config.Postgres {
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER fixture_reject_pub_publication_audit ON registry_audit_events`); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := db.ExecContext(ctx, `DROP TRIGGER fixture_reject_pub_publication_audit`); err != nil {
+		t.Fatal(err)
+	}
+	type publishResult struct {
+		id  string
+		err error
+	}
+	publications := make(chan publishResult, 2)
+	for range 2 {
+		go func() {
+			id, err := reservations.PublishReceipt(ctx, concurrentToken.Bearer, workspace, concurrentRepository, concurrentReservation.ID)
+			publications <- publishResult{id: id, err: err}
+		}()
+	}
+	first, second := <-publications, <-publications
+	if first.err != nil || second.err != nil || first.id == "" || first.id != second.id {
+		t.Fatalf("concurrent Pub publication was not idempotent: %v %v", first.err, second.err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_pub_publications WHERE reservation_id = `+p(1), concurrentReservation.ID).Scan(&publicationCount); err != nil || publicationCount != 1 {
+		t.Fatalf("Pub publication link count differs: count=%d err=%v", publicationCount, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM registry_audit_events WHERE action = 'pub.publication.created' AND target_id = `+p(1), first.id).Scan(&publicationCount); err != nil || publicationCount != 1 {
+		t.Fatalf("Pub publication audit count differs: count=%d err=%v", publicationCount, err)
+	}
+	versions, err := reservations.ReadPublishedVersionsWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name)
+	if err != nil || len(versions) != 1 || versions[0].Version != request.Version || versions[0].SHA256 != request.TarballSHA256 || !bytes.Equal(versions[0].Manifest, manifest) {
+		t.Fatalf("published Pub metadata differs: %v", err)
+	}
+	if _, err := reservations.ReadPublishedVersionsWithToken(ctx, concurrentToken.Bearer, workspace, concurrentRepository, request.Name); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("publisher token without reader grant accessed Pub metadata: %v", err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, concurrentRepository, publisher, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.ReadPublishedVersionsWithToken(ctx, concurrentToken.Bearer, workspace, concurrentRepository, request.Name); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("reader grant retroactively expanded Pub token: %v", err)
+	}
+	readWriteToken, err := repos.IssuePubWriteToken(ctx, publisher, workspace, concurrentRepository, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reservations.ReadPublishedVersionsWithToken(ctx, readWriteToken.Bearer, workspace, concurrentRepository, request.Name); err != nil || len(got) != 1 {
+		t.Fatalf("Pub token bound to reader grant could not read metadata: %v", err)
+	}
+	if err := repos.RevokeRepositoryRole(ctx, owner, workspace, concurrentRepository, publisher, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, concurrentRepository, publisher, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservations.ReadPublishedVersionsWithToken(ctx, readWriteToken.Bearer, workspace, concurrentRepository, request.Name); !errors.Is(err, repositories.ErrForbidden) {
+		t.Fatalf("reader grant regrant revived Pub token metadata access: %v", err)
+	}
+	publishedReader, publishedSize, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name, request.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedBytes, readErr := io.ReadAll(publishedReader)
+	closeErr = publishedReader.Close()
+	if readErr != nil || closeErr != nil || publishedSize != int64(len(content)) || !bytes.Equal(publishedBytes, content) {
+		t.Fatalf("published Pub archive differs: read=%v close=%v", readErr, closeErr)
+	}
+	beforeCrossRepository := countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, uuid.NewString(), request.Name, request.Version); err == nil || reader != nil || countedObjects.opens.Load() != beforeCrossRepository {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("cross-repository Pub read reached storage: %v", err)
+	}
+	if err := repos.RevokeRepositoryRole(ctx, owner, workspace, concurrentRepository, owner, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repos.GrantRepositoryRole(ctx, owner, workspace, concurrentRepository, owner, repositories.GrantReader); err != nil {
+		t.Fatal(err)
+	}
+	beforeRevokedOpen := countedObjects.opens.Load()
+	if reader, _, err := receiver.OpenPublishedArchiveWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name, request.Version); err == nil || reader != nil || countedObjects.opens.Load() != beforeRevokedOpen {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("revoked reader token reached Pub storage after regrant: %v", err)
+	}
+	if _, err := reservations.ReadPublishedVersionsWithToken(ctx, readToken.Bearer, workspace, concurrentRepository, request.Name); err == nil {
+		t.Fatal("revoked reader token accessed Pub metadata after regrant")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE registry_repositories SET logical_quota_bytes = `+p(1)+` WHERE repository_id = `+p(2), request.TarballSize+1, concurrentRepository); err != nil {
+		t.Fatal(err)
+	}
+	remainingReservation, err := reservations.Reserve(ctx, concurrentToken.Bearer, workspace, concurrentRepository, uploadingQuotaRequest)
+	if err != nil {
+		t.Fatalf("published Pub receipt was counted twice: %v", err)
+	}
+	if err := reservations.Cancel(ctx, concurrentToken.Bearer, workspace, concurrentRepository, remainingReservation.ID); err != nil {
+		t.Fatal(err)
 	}
 	cancelRepository := uuid.NewString()
 	query = `INSERT INTO registry_repositories (repository_id, workspace_id, slug, display_name, created_by, created_at, updated_at, format) VALUES (` + p(1) + `, ` + p(2) + `, 'pub-cancel-v37', 'Pub', ` + p(3) + `, 'now', 'now', 'pub')`

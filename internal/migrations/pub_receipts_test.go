@@ -41,6 +41,8 @@ func exercisePubReceiptMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 	delete(old, "sql/postgres/000037_pub_receipts.sql")
 	delete(old, "sql/sqlite/000038_pub_review.sql")
 	delete(old, "sql/postgres/000038_pub_review.sql")
+	delete(old, "sql/sqlite/000039_pub_publications.sql")
+	delete(old, "sql/postgres/000039_pub_publications.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 36 {
 		t.Fatalf("prepare v36 fixture: %+v err=%v", report, err)
 	}
@@ -82,7 +84,7 @@ func exercisePubReceiptMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 38 || len(report.AppliedVersions) != 2 || report.AppliedVersions[0] != 37 || report.AppliedVersions[1] != 38 {
+		if err != nil || report.CurrentVersion != 39 || len(report.AppliedVersions) != 3 || report.AppliedVersions[0] != 37 || report.AppliedVersions[1] != 38 || report.AppliedVersions[2] != 39 {
 			t.Fatalf("v37 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
