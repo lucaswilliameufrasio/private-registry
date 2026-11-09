@@ -37,6 +37,7 @@ type Config struct {
 	MaxUploadBytes          int64
 	MaxConcurrentUploads    int
 	ExperimentalPub         bool
+	ExperimentalCargo       bool
 }
 
 type MasterKeySettings struct {
@@ -238,6 +239,16 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 			return Config{}, errors.New("REGISTRY_EXPERIMENTAL_PUB must be true or false")
 		}
 	}
+	cargoEnabled := false
+	if raw, ok := lookup("REGISTRY_EXPERIMENTAL_CARGO"); ok {
+		switch raw {
+		case "true":
+			cargoEnabled = true
+		case "false":
+		default:
+			return Config{}, errors.New("REGISTRY_EXPERIMENTAL_CARGO must be true or false")
+		}
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -255,6 +266,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		MaxUploadBytes:          maxUploadBytes,
 		MaxConcurrentUploads:    maxConcurrentUploads,
 		ExperimentalPub:         pubEnabled,
+		ExperimentalCargo:       cargoEnabled,
 	}, nil
 }
 

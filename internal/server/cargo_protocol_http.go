@@ -20,8 +20,7 @@ import (
 	"private-registry/internal/repositories"
 )
 
-// CargoProtocolConfig is explicitly opt-in. Production wiring remains closed
-// until the full protocol, recovery and client acceptance gates are satisfied.
+// CargoProtocolConfig is experimental and requires explicit opt-in.
 type CargoProtocolConfig struct {
 	StagingDirectory string
 	MaxArchiveBytes  int64

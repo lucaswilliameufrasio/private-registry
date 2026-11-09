@@ -179,6 +179,28 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		TrustedProxies:         cfg.TrustedProxies,
 		GoModules:              goModules,
 	}
+	if cfg.ExperimentalCargo {
+		cargoStaging := filepath.Join(cfg.DataDir, "cargo-staging")
+		if err := os.MkdirAll(cargoStaging, 0o700); err != nil {
+			return errors.New("Cargo staging directory could not be created")
+		}
+		maxArchive := cfg.MaxUploadBytes
+		if maxArchive > 500<<20 {
+			maxArchive = 500 << 20
+		}
+		concurrent := cfg.MaxConcurrentUploads
+		if concurrent > 16 {
+			concurrent = 16
+		}
+		limits := cargo.ArchiveLimits{MaxCompressedBytes: maxArchive, MaxUncompressedBytes: 1 << 30, MaxFiles: 10000, MaxManifestBytes: 1 << 20}
+		cargoReceipts, err := cargo.NewReceiptService(db, repositoryService, cfg.DatabaseDriver, objectStore, cargo.ReceiptOptions{StagingDirectory: cargoStaging, Limits: limits, MaxConcurrent: concurrent, IndexOrigin: cfg.CanonicalOrigin, DefaultIndex: "https://github.com/rust-lang/crates.io-index"})
+		if err != nil {
+			return err
+		}
+		httpConfig.CargoReservations = cargoReservations
+		httpConfig.CargoReceipts = cargoReceipts
+		httpConfig.CargoProtocol = &server.CargoProtocolConfig{StagingDirectory: cargoStaging, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent}
+	}
 	if cfg.ExperimentalPub {
 		pubStaging := filepath.Join(cfg.DataDir, "pub-staging")
 		if err := os.MkdirAll(pubStaging, 0o700); err != nil {

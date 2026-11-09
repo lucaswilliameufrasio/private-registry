@@ -23,4 +23,10 @@ O inventário Cargo e seu conjunto assinado em domínio próprio foram exercitad
 
 O validador de recibos pode receber uma origem HTTPS explícita e derivar o índice sparse a partir dos UUIDs canônicos de workspace e repositório. Isso evita tratar um único índice fixo como atual para todos os repositórios. O índice fixo preexistente continua disponível para fixtures; as duas opções são mutuamente exclusivas. Não há descoberta de rede nem confiança no cabeçalho da requisição para construir o índice.
 
-As provas focadas passaram três vezes com race: o índice de outro repositório não é aceito como atual e os fluxos de recibo SQLite/PostgreSQL usam a origem explícita. Passaram build, formatação, lint, unitários, integrações com `-count=3` e integrações com `-race -count=1`, usando `-timeout=40m` por pacote. Cargo ainda não foi habilitado no `serve` e o provider seguro para leitura/escrita continua pendente.
+As provas focadas passaram três vezes com race: o índice de outro repositório não é aceito como atual e os fluxos de recibo SQLite/PostgreSQL usam a origem explícita. Passaram build, formatação, lint, unitários, integrações com `-count=3` e integrações com `-race -count=1`, usando `-timeout=40m` por pacote. A habilitação opcional posterior está descrita abaixo; o provider seguro para leitura/escrita continua pendente.
+
+## Composição experimental no servidor
+
+`REGISTRY_EXPERIMENTAL_CARGO=true` habilita explicitamente o protocolo Cargo no `serve`, com filesystem local e staging privado em `cargo-staging`; o padrão é `false`, e valores diferentes de `true` ou `false` são recusados. O arquivo comprimido é limitado pelo menor entre `REGISTRY_MAX_UPLOAD_BYTES` e 500 MiB; a concorrência usa o menor entre `REGISTRY_MAX_CONCURRENT_UPLOADS` e 16. O limite descomprimido é 1 GiB, com até 10.000 arquivos e manifesto de 1 MiB. O `serve` não executa migrations.
+
+Uma prova do processo `serve` passou três vezes com race, verificando rota ausente por padrão e recusa sem credencial quando habilitada. Passaram build, formatação, lint, unitários, integrações com `-count=3` e integrações com `-race -count=1`, usando `-timeout=40m` por pacote. Isso não prova publicação pelo processo real, provider operacional para tokens separados, recuperação integral ou cleanup após crash.
