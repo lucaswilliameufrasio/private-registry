@@ -75,6 +75,19 @@ func TestPostgresAuthenticationEnforcesEnrollmentRecoveryAndAttemptLimits(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	muiraSubject, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_external_identities (external_identity_id, user_id, provider_id, issuer, subject, created_at) VALUES ($1, $2, 'muira', $3, $4, 'now')`, uuid.NewString(), userID, "https://identity.example", muiraSubject.String()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := service.resolveMuiraIdentity(ctx, "https://identity.example", muiraSubject.String()); err != nil || got != userID {
+		t.Fatalf("PostgreSQL Muira identity lookup failed: %v", err)
+	}
+	if _, err := service.resolveMuiraIdentity(ctx, "https://other.example", muiraSubject.String()); !errors.Is(err, ErrRejected) {
+		t.Fatalf("PostgreSQL Muira identity accepted wrong issuer: %v", err)
+	}
 
 	const sourceAddress = "192.0.2.90:443"
 	enrollmentLogin, err := service.Login(ctx, "mfa.postgres", loginPassword, sourceAddress)
