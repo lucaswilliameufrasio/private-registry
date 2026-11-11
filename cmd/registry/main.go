@@ -27,6 +27,7 @@ import (
 	"private-registry/internal/cargo"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/egress"
 	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 	"private-registry/internal/maintenance"
@@ -127,6 +128,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	authentication, err := auth.New(db, cfg.DatabaseDriver, &masterKey)
 	if err != nil {
 		return err
+	}
+	if cfg.Muira.Enabled {
+		if err := enableMuira(ctx, authentication, cfg); err != nil {
+			return err
+		}
 	}
 	workspaceService, err := workspaces.New(db, cfg.DatabaseDriver)
 	if err != nil {
@@ -332,6 +338,39 @@ func openObjectStore(cfg config.Config) (storage.Driver, error) {
 	default:
 		return nil, errors.New("storage driver is not supported")
 	}
+}
+
+// enableMuira turns on the optional Muira sign-in. Discovery runs once at
+// startup through a client restricted to the issuer origin and the configured
+// networks, so a misconfigured or unreachable provider fails the start instead
+// of silently leaving only part of the sign-in methods available.
+func enableMuira(ctx context.Context, authentication *auth.Service, cfg config.Config) error {
+	clientSecret, err := secrets.LoadSecretFile(cfg.Muira.ClientSecretFile)
+	if err != nil {
+		return errors.New("Muira client secret file is missing, unsafe or malformed")
+	}
+	roots, err := loadCertificatePool(cfg.Muira.CAFile)
+	if err != nil {
+		return errors.New("Muira CA file is missing or contains no certificates")
+	}
+	destinations := []egress.Destination{{Origin: cfg.Muira.Issuer, CIDRs: cfg.Muira.AllowedNetworks}}
+	client, err := egress.NewHTTPSClient(destinations, roots)
+	if cfg.Muira.DNSServer.IsValid() {
+		client, err = egress.NewHTTPSClientWithDNS(destinations, roots, cfg.Muira.DNSServer)
+	}
+	if err != nil {
+		return errors.New("Muira network policy is invalid")
+	}
+	client.Timeout = 15 * time.Second
+	discoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return authentication.EnableMuira(discoveryCtx, auth.MuiraOptions{
+		Issuer:       cfg.Muira.Issuer,
+		ClientID:     cfg.Muira.ClientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  strings.TrimSuffix(cfg.CanonicalOrigin, "/") + "/api/v1/auth/muira/callback",
+		HTTPClient:   client,
+	})
 }
 
 // loadCertificatePool returns nil (system roots) when no bundle is configured.

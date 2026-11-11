@@ -10,6 +10,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
+	"golang.org/x/oauth2"
 )
 
 // muiraVerifier is only an identity-token verification primitive. Its caller
@@ -19,6 +20,7 @@ import (
 type muiraVerifier struct {
 	verifier *oidc.IDTokenVerifier
 	clientID string
+	endpoint oauth2.Endpoint
 }
 
 func newMuiraVerifier(ctx context.Context, issuer, clientID string, client *http.Client) (*muiraVerifier, error) {
@@ -36,7 +38,16 @@ func newMuiraVerifier(ctx context.Context, issuer, clientID string, client *http
 	if err != nil {
 		return nil, errors.New("Muira discovery failed")
 	}
-	return &muiraVerifier{verifier: provider.VerifierContext(oidc.ClientContext(context.Background(), client), &oidc.Config{ClientID: clientID, SupportedSigningAlgs: []string{oidc.RS256}}), clientID: clientID}, nil
+	endpoint := provider.Endpoint()
+	// The restricted client only reaches the issuer origin; advertised
+	// endpoints elsewhere would fail later, so refuse them at startup.
+	for _, raw := range []string{endpoint.AuthURL, endpoint.TokenURL} {
+		advertised, err := url.Parse(raw)
+		if err != nil || advertised.Scheme != "https" || !strings.EqualFold(advertised.Host, parsed.Host) || advertised.User != nil || advertised.Fragment != "" {
+			return nil, errors.New("Muira discovery advertised an endpoint outside the issuer origin")
+		}
+	}
+	return &muiraVerifier{verifier: provider.VerifierContext(oidc.ClientContext(context.Background(), client), &oidc.Config{ClientID: clientID, SupportedSigningAlgs: []string{oidc.RS256}}), clientID: clientID, endpoint: endpoint}, nil
 }
 
 func (v *muiraVerifier) verify(ctx context.Context, rawToken, expectedNonce string) (string, error) {

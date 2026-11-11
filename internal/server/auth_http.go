@@ -330,6 +330,9 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Post("/api/v1/auth/mfa/enrollment/complete", h.completeMFAEnrollment)
 	router.Post("/api/v1/auth/mfa/challenge", h.completeMFAChallenge)
 	router.Post("/api/v1/auth/logout", h.logout)
+	if h.service.MuiraEnabled() {
+		h.registerMuiraRoutes(router)
+	}
 	router.Get("/api/v1/workspaces", h.listWorkspaces)
 	router.Post("/api/v1/workspaces", h.createWorkspace)
 	router.Put("/api/v1/workspaces/{workspaceID}/members/{userID}", h.setWorkspaceMembership)

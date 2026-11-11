@@ -68,6 +68,8 @@ type Service struct {
 	sessions *sessions.Store
 	attempts *authattempts.Limiter
 	verify   func(string, []byte) bool
+	key      *secrets.MasterKey
+	muira    *muiraLogin
 }
 
 var passwordHashAdmission = make(chan struct{}, maxConcurrentPasswordChecks)
@@ -95,6 +97,7 @@ func New(db *sql.DB, driver config.DatabaseDriver, key *secrets.MasterKey) (*Ser
 		sessions: sessionStore,
 		attempts: attemptLimiter,
 		verify:   password.Verify,
+		key:      key,
 	}, nil
 }
 
@@ -165,24 +168,31 @@ func (s *Service) Login(ctx context.Context, loginName string, passwordValue []b
 		return Result{}, ErrUnavailable
 	}
 
-	hasFactor, err := s.mfa.HasActiveFactor(ctx, account.userID)
+	return s.issuePrimarySession(ctx, account.userID, account.requiresMFA)
+}
+
+// issuePrimarySession applies the local MFA policy after a primary factor
+// (local password or a verified external identity) succeeded. An external
+// provider never satisfies or bypasses the local second factor.
+func (s *Service) issuePrimarySession(ctx context.Context, userID string, requiresMFA bool) (Result, error) {
+	hasFactor, err := s.mfa.HasActiveFactor(ctx, userID)
 	if err != nil {
 		return Result{}, ErrUnavailable
 	}
-	if account.requiresMFA || hasFactor {
+	if requiresMFA || hasFactor {
 		level := sessions.LevelMFAChallenge
 		stage := StageMFAChallenge
 		if !hasFactor {
 			level = sessions.LevelEnrollmentOnly
 			stage = StageMFAEnrollment
 		}
-		credentials, err := s.sessions.Create(ctx, account.userID, level)
+		credentials, err := s.sessions.Create(ctx, userID, level)
 		if err != nil {
 			return Result{}, ErrUnavailable
 		}
 		return Result{Stage: stage, Credentials: credentials}, nil
 	}
-	credentials, err := s.sessions.Create(ctx, account.userID, sessions.LevelStandard)
+	credentials, err := s.sessions.Create(ctx, userID, sessions.LevelStandard)
 	if err != nil {
 		return Result{}, ErrUnavailable
 	}
