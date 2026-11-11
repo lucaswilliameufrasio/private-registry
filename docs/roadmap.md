@@ -1,5 +1,7 @@
 # Roadmap — recursos adiados e gaps conhecidos
 
+**Entrega utilizável (11/11/2026):** por decisão do proprietário, a prioridade passou a ser uma entrega reduzida com Cargo, npm, Pub e OCI, storage S3 compatível e login opcional via Muira ([guia e limites](usable-delivery.md)). Ela está implementada e validada localmente como experimental. Isso **não** move para "adiado" nenhum requisito obrigatório da v1 listado na seção 4: backup/recovery completo (inclusive OCI, hoje recusado), revisão/quota/GC de OCI, Hex, passkeys, SCIM contínuo, verificador externo, egress global e matriz de plataformas continuam pendentes. A integração do `sqlite-replication` para disaster recovery foi avaliada e não realizada; o motivo está no guia. O ADR 0005 segue válido para motores externos; o OCI entregue é o adapter próprio do [ADR 0044](adr/0044-own-oci-adapter.md).
+
 **Atualização de serving público:** arquivos genéricos publicados em repositórios explicitamente públicos têm rota inicial na origem de assets e allowlist CORS global opcional ([ADR 0020](adr/0020-public-generic-assets.md)). O estado histórico abaixo que afirma ausência total desse serving precede a fatia; CORS granular, cache público e demais formatos continuam pendentes.
 
 **Atualizado:** 22/10/2026

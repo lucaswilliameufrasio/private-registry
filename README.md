@@ -2,6 +2,8 @@
 
 Registry privado self-hosted em desenvolvimento. A fundação contém migrations explícitas de identidade/tenancy/MFA/sessões, autenticação local e rotas HTTP protegidas para workspaces, memberships, metadados/configuração de repositórios e gestão de grants explícitos. **Ainda não há UI, passkeys, convites ou adapters produtivos. O serving genérico privado e público é parcial; não há suporte anunciado aos sete formatos.** Fase 1 permanece incompleta e não há servidor utilizável, release ou suporte anunciado a protocolos. O repositório permanece privado, sem licença definida.
 
+**Entrega utilizável (11/11/2026):** Cargo, npm, Pub e OCI podem ser habilitados no `serve` por opt-in, com storage em filesystem ou S3 compatível e login local ou, opcionalmente, via Muira. O guia de operação, as provas com clientes reais e os limites (sem backup/recovery operacional, OCI só comprovado com ORAS, R2/B2 e Muira reais não validados) estão em [docs/usable-delivery.md](docs/usable-delivery.md). O schema atual é a v42. Isso não é a v1 do plano; os parágrafos abaixo são histórico anterior a esta entrega e prevalece o guia onde houver divergência.
+
 **Atualização de schema:** a migration atual é a v32. Ela inclui fundações experimentais de catálogo, credencial, reservas, recibos, revisão e publicação Cargo, além de catálogo, credenciais, reservas, recebimento, revisão, publicação e dist-tags npm ainda não expostos; os adapters Cargo e npm continuam opt-in e a API recusa a criação de repositórios Cargo e npm. O comando `serve` verifica o histórico e os checksums das migrations antes de abrir o listener, mas não executa migrations. Referências históricas abaixo a versões anteriores precedem essa atualização.
 
 **PostgreSQL e rede:** conexões TCP exigem `REGISTRY_DATABASE_ALLOWED_NETWORKS` com CIDRs canônicos explícitos e DSN com `sslmode=verify-full` e trust TLS adequado; sem redes, TCP é negado. Para hostname, `REGISTRY_DATABASE_DNS_SERVER` deve conter IP e porta explícitos do resolvedor autorizado; sem ele, somente IP literal é aceito. Fallbacks PostgreSQL TCP não são permitidos. Um DSN de socket Unix local permanece disponível, limitado ao socket configurado e sem fallback de rede. Essa proteção não é uma política global de saída: outros clientes, DNS e subprocessos exigem controles próprios ([ADR 0032](docs/adr/0032-outbound-http-boundary.md)).
@@ -52,6 +54,10 @@ Registry privado self-hosted em desenvolvimento. A fundação contém migrations
 - [ADR 0015: storage filesystem imutável](docs/adr/0015-content-addressed-filesystem-storage.md)
 - [ADR 0016: publicação de artefatos genéricos](docs/adr/0016-generic-artifact-publication.md)
 - [ADR 0022: fronteira experimental de módulos Go](docs/adr/0022-go-module-boundary.md)
+- [ADR 0019: storage S3 compatível](docs/adr/0019-s3-content-driver.md)
+- [ADR 0043: login opcional via Muira](docs/adr/0043-muira-identity-boundary.md)
+- [ADR 0044: adapter OCI próprio](docs/adr/0044-own-oci-adapter.md)
+- [Entrega utilizável: guia de operação e limites](docs/usable-delivery.md)
 
 O plano, o roadmap e o progresso de implementação também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md`, `plans/roadmap.md` e `plans/implementation-progress.md`.
 
