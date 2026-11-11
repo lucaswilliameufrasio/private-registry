@@ -1,6 +1,6 @@
 # ADR 0005 — Seleção do motor OCI
 
-- **Status:** Bloqueado — nenhum motor aceito para produção
+- **Status:** Bloqueado para motor externo — nenhum motor aceito; adapter próprio experimental no [ADR 0044](0044-own-oci-adapter.md)
 - **Data:** 2026-10-12
 
 ## Contexto

@@ -33,6 +33,7 @@ import (
 	"private-registry/internal/maintenance"
 	"private-registry/internal/migrations"
 	"private-registry/internal/npm"
+	"private-registry/internal/oci"
 	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
@@ -189,7 +190,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		TrustedProxies:         cfg.TrustedProxies,
 		GoModules:              goModules,
 	}
+	// A repository of an opt-in format can only be created while its
+	// protocol adapter is served by this process.
+	var enabledFormats []repositories.Format
 	if cfg.ExperimentalCargo {
+		enabledFormats = append(enabledFormats, repositories.FormatCargo)
 		cargoStaging := filepath.Join(cfg.DataDir, "cargo-staging")
 		if err := os.MkdirAll(cargoStaging, 0o700); err != nil {
 			return errors.New("Cargo staging directory could not be created")
@@ -212,6 +217,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		httpConfig.CargoProtocol = &server.CargoProtocolConfig{StagingDirectory: cargoStaging, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent}
 	}
 	if cfg.ExperimentalNPM {
+		enabledFormats = append(enabledFormats, repositories.FormatNPM)
 		npmStaging := filepath.Join(cfg.DataDir, "npm-staging")
 		if err := os.MkdirAll(npmStaging, 0o700); err != nil {
 			return errors.New("npm staging directory could not be created")
@@ -238,7 +244,20 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		httpConfig.NPMReadProtocol = true
 		httpConfig.NPMWriteProtocol = &server.NPMWriteProtocolConfig{StagingDirectory: npmStaging, MaxDocumentBytes: 128 << 20, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent}
 	}
+	if cfg.ExperimentalOCI {
+		concurrent := cfg.MaxConcurrentUploads * 4
+		if concurrent > 64 {
+			concurrent = 64
+		}
+		ociService, err := oci.New(db, cfg.DatabaseDriver, repositoryService, objectStore, oci.Options{StagingDirectory: filepath.Join(cfg.DataDir, "oci-staging"), MaxBlobBytes: cfg.MaxUploadBytes, MaxUploads: concurrent})
+		if err != nil {
+			return err
+		}
+		httpConfig.OCI = ociService
+		enabledFormats = append(enabledFormats, repositories.FormatOCI)
+	}
 	if cfg.ExperimentalPub {
+		enabledFormats = append(enabledFormats, repositories.FormatPub)
 		pubStaging := filepath.Join(cfg.DataDir, "pub-staging")
 		if err := os.MkdirAll(pubStaging, 0o700); err != nil {
 			return errors.New("Pub staging directory could not be created")
@@ -264,6 +283,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		httpConfig.PubReceipts = pubReceipts
 		httpConfig.PubReadProtocol = true
 		httpConfig.PubWriteProtocol = &server.PubWriteProtocolConfig{StagingDirectory: pubStaging, MaxArchiveBytes: maxArchive, MaxConcurrent: concurrent, Limits: limits}
+	}
+	if err := repositoryService.EnableFormatCreation(enabledFormats...); err != nil {
+		return err
 	}
 	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, httpConfig)
 	if err != nil {

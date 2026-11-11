@@ -29,15 +29,15 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.AppliedVersions) != 40 {
+	if len(first.AppliedVersions) != 42 {
 		t.Fatalf("unexpected first migration report: %+v", first)
 	}
 	for index, version := range first.AppliedVersions {
 		if version != int64(index+1) {
-			t.Fatalf("migration %d at position %d; want sequential versions 1–40", version, index)
+			t.Fatalf("migration %d at position %d; want sequential versions 1–42", version, index)
 		}
 	}
-	if first.CurrentVersion != 40 || first.TargetVersion != 40 {
+	if first.CurrentVersion != 42 || first.TargetVersion != 42 {
 		t.Fatalf("unexpected migrated version: %+v", first)
 	}
 	parsedID, err := uuid.Parse(first.InstallationID)
@@ -60,14 +60,14 @@ func TestMigrateSQLiteIsRepeatableAndPersistsInstallationIdentity(t *testing.T) 
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 40 {
+	if succeeded != 42 {
 		t.Fatalf("unexpected successful migration attempts: %d", succeeded)
 	}
 	var checksumCount int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 40 {
+	if checksumCount != 42 {
 		t.Fatalf("unexpected migration checksum count: %d", checksumCount)
 	}
 	var credentialTableExists bool
@@ -300,6 +300,10 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 	delete(old, "sql/postgres/000039_pub_publications.sql")
 	delete(old, "sql/sqlite/000040_pub_native_uploads.sql")
 	delete(old, "sql/postgres/000040_pub_native_uploads.sql")
+	delete(old, "sql/sqlite/000041_oci_repository_format.sql")
+	delete(old, "sql/postgres/000041_oci_repository_format.sql")
+	delete(old, "sql/sqlite/000042_oci_registry.sql")
+	delete(old, "sql/postgres/000042_oci_registry.sql")
 	report, err := migrateWithFS(ctx, db, cfg, old)
 	if err != nil || report.CurrentVersion != 16 {
 		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
@@ -323,7 +327,7 @@ func TestSQLiteUpgradePreservesExistingGenericRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err = Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 40 || len(report.AppliedVersions) != 24 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 || report.AppliedVersions[7] != 24 || report.AppliedVersions[8] != 25 || report.AppliedVersions[9] != 26 || report.AppliedVersions[10] != 27 || report.AppliedVersions[11] != 28 || report.AppliedVersions[12] != 29 || report.AppliedVersions[13] != 30 || report.AppliedVersions[14] != 31 || report.AppliedVersions[15] != 32 || report.AppliedVersions[16] != 33 || report.AppliedVersions[17] != 34 || report.AppliedVersions[18] != 35 || report.AppliedVersions[19] != 36 || report.AppliedVersions[20] != 37 || report.AppliedVersions[21] != 38 || report.AppliedVersions[22] != 39 || report.AppliedVersions[23] != 40 {
+	if err != nil || report.CurrentVersion != 42 || len(report.AppliedVersions) != 26 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 || report.AppliedVersions[7] != 24 || report.AppliedVersions[8] != 25 || report.AppliedVersions[9] != 26 || report.AppliedVersions[10] != 27 || report.AppliedVersions[11] != 28 || report.AppliedVersions[12] != 29 || report.AppliedVersions[13] != 30 || report.AppliedVersions[14] != 31 || report.AppliedVersions[15] != 32 || report.AppliedVersions[16] != 33 || report.AppliedVersions[17] != 34 || report.AppliedVersions[18] != 35 || report.AppliedVersions[19] != 36 || report.AppliedVersions[20] != 37 || report.AppliedVersions[21] != 38 || report.AppliedVersions[22] != 39 || report.AppliedVersions[23] != 40 || report.AppliedVersions[24] != 41 || report.AppliedVersions[25] != 42 {
 		t.Fatalf("upgrade to v30: report=%+v err=%v", report, err)
 	}
 	var format, retained, status, publishedAt string
@@ -391,6 +395,8 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/sqlite/000038_pub_review.sql",
 		"sql/sqlite/000039_pub_publications.sql",
 		"sql/sqlite/000040_pub_native_uploads.sql",
+		"sql/sqlite/000041_oci_repository_format.sql",
+		"sql/sqlite/000042_oci_registry.sql",
 		"sql/postgres/000001_installation.sql",
 		"sql/postgres/000002_identity_workspaces.sql",
 		"sql/postgres/000003_local_bootstrap.sql",
@@ -431,6 +437,8 @@ func migrationFS(t *testing.T, path, contents string) fs.FS {
 		"sql/postgres/000038_pub_review.sql",
 		"sql/postgres/000039_pub_publications.sql",
 		"sql/postgres/000040_pub_native_uploads.sql",
+		"sql/postgres/000041_oci_repository_format.sql",
+		"sql/postgres/000042_oci_registry.sql",
 	} {
 		data, err := fs.ReadFile(embeddedMigrations, filename)
 		if err != nil {

@@ -34,6 +34,7 @@ const (
 	FormatCargo   Format = "cargo"
 	FormatNPM     Format = "npm"
 	FormatPub     Format = "pub"
+	FormatOCI     Format = "oci"
 )
 
 const (
@@ -80,6 +81,47 @@ type Repository struct {
 type Service struct {
 	db     *sql.DB
 	driver config.DatabaseDriver
+	// creatable holds the opt-in formats whose protocol adapter is enabled in
+	// this process. Generic and Go repositories can always be created.
+	creatable map[Format]struct{}
+}
+
+// EnableFormatCreation allows creating repositories of opt-in formats. It must
+// be called during startup, before the service handles requests, and only for
+// formats whose protocol adapter is actually served; otherwise a repository
+// would exist that nothing can publish to or read from.
+func (s *Service) EnableFormatCreation(formats ...Format) error {
+	if s == nil {
+		return errors.New("repository service is required")
+	}
+	for _, format := range formats {
+		if format != FormatCargo && format != FormatNPM && format != FormatPub && format != FormatOCI {
+			return ErrInvalidFormat
+		}
+	}
+	if s.creatable == nil {
+		s.creatable = make(map[Format]struct{}, len(formats))
+	}
+	for _, format := range formats {
+		s.creatable[format] = struct{}{}
+	}
+	return nil
+}
+
+func (s *Service) formatCreatable(format Format) bool {
+	if format == FormatGeneric || format == FormatGo {
+		return true
+	}
+	_, enabled := s.creatable[format]
+	return enabled
+}
+
+func knownFormat(format Format) bool {
+	switch format {
+	case FormatGeneric, FormatGo, FormatCargo, FormatNPM, FormatPub, FormatOCI:
+		return true
+	}
+	return false
 }
 
 func New(db *sql.DB, driver config.DatabaseDriver) (*Service, error) {
@@ -129,7 +171,7 @@ func (s *Service) CreateWithFormat(
 	if err != nil {
 		return Repository{}, err
 	}
-	if format != FormatGeneric && format != FormatGo {
+	if !s.formatCreatable(format) {
 		return Repository{}, ErrInvalidFormat
 	}
 
@@ -337,7 +379,7 @@ func (s *Service) ListForWorkspace(
 		if _, err := parseUUID(repository.WorkspaceID, ErrInvalidWorkspaceID); err != nil {
 			return nil, false, errors.New("repository workspace identity is invalid")
 		}
-		if !validVisibility(repository.Visibility) || repository.Status != "active" || (repository.Format != FormatGeneric && repository.Format != FormatGo) {
+		if !validVisibility(repository.Visibility) || repository.Status != "active" || !knownFormat(repository.Format) {
 			return nil, false, errors.New("repository state is invalid")
 		}
 		parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)

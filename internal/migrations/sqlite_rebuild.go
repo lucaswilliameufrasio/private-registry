@@ -17,7 +17,7 @@ import (
 // commit. The migration lock and the requirement to stop the server remain in
 // force. Closing this private pool destroys the pragma-bearing connection.
 func runSQLiteRepositoryRebuild(ctx context.Context, cfg config.Config, engineFS fs.FS, expectedVersion int64) (retErr error) {
-	if expectedVersion != 18 && expectedVersion != 25 && expectedVersion != 33 {
+	if expectedVersion != 18 && expectedVersion != 25 && expectedVersion != 33 && expectedVersion != 41 {
 		return errors.New("dedicated SQLite migration version is unsupported")
 	}
 	db, err := database.Open(ctx, cfg)

@@ -22,6 +22,7 @@ import (
 	"private-registry/internal/cargo"
 	"private-registry/internal/gomod"
 	"private-registry/internal/npm"
+	"private-registry/internal/oci"
 	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
@@ -54,6 +55,8 @@ type AuthHTTPConfig struct {
 	PubReceipts            *pub.ReceiptService
 	PubReadProtocol        bool
 	PubWriteProtocol       *PubWriteProtocolConfig
+	// OCI enables the experimental /v2/ distribution routes when set.
+	OCI *oci.Service
 }
 
 type authHTTP struct {
@@ -75,6 +78,7 @@ type authHTTP struct {
 	pubReadProtocol        bool
 	pubWriteProtocol       *pubWriteProtocol
 	pubMetadataSlots       chan struct{}
+	oci                    *oci.Service
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -311,6 +315,7 @@ func NewHandler(
 		pubReadProtocol:        cfg.PubReadProtocol,
 		pubWriteProtocol:       pubWrite,
 		pubMetadataSlots:       make(chan struct{}, 4),
+		oci:                    cfg.OCI,
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -390,6 +395,12 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	}
 	if h.npmWriteProtocol != nil {
 		router.Put("/npm/{workspaceID}/{repositoryID}/*", h.npmPublish)
+	}
+	if h.oci != nil {
+		router.HandleFunc("/v2/*", h.ociDispatch)
+		router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/oci-write-tokens", h.issueOCIWriteToken)
+		router.Get("/api/v1/oci-write-tokens", h.listOCIWriteTokens)
+		router.Delete("/api/v1/oci-write-tokens/{tokenID}", h.revokeOCIWriteToken)
 	}
 	if h.pubReadProtocol {
 		h.registerPubReadRoutes(router)
@@ -1368,7 +1379,7 @@ func writeRepositoryError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusForbidden, "visibility_not_permitted")
 	case errors.Is(err, repositories.ErrPublicConfirmation):
 		writeAPIError(response, http.StatusPreconditionFailed, "public_visibility_confirmation_required")
-	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable), errors.Is(err, repositories.ErrNPMWriteTokenUnavailable), errors.Is(err, repositories.ErrPubWriteTokenUnavailable):
+	case errors.Is(err, repositories.ErrRepositoryUnavailable), errors.Is(err, repositories.ErrUserUnavailable), errors.Is(err, repositories.ErrPersonalTokenUnavailable), errors.Is(err, repositories.ErrCargoWriteTokenUnavailable), errors.Is(err, repositories.ErrNPMWriteTokenUnavailable), errors.Is(err, repositories.ErrPubWriteTokenUnavailable), errors.Is(err, repositories.ErrOCIWriteTokenUnavailable):
 		writeAPIError(response, http.StatusNotFound, "resource_unavailable")
 	case errors.Is(err, repositories.ErrMembershipUnavailable):
 		writeAPIError(response, http.StatusNotFound, "membership_unavailable")

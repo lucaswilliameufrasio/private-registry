@@ -119,7 +119,7 @@ func migrateWithFS(
 			return Report{}, errors.New("database migration attempt could not be recorded")
 		}
 		var migrationErr error
-		if driver == config.SQLite && (version == 18 || version == 25 || version == 33) {
+		if driver == config.SQLite && (version == 18 || version == 25 || version == 33 || version == 41) {
 			migrationErr = runSQLiteRepositoryRebuild(ctx, cfg, engineFS, version)
 		} else {
 			_, migrationErr = provider.UpByOne(ctx)
