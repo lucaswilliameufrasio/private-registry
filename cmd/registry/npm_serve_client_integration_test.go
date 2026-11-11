@@ -29,7 +29,14 @@ import (
 )
 
 func TestExperimentalNPMServeRealClientJourney(t *testing.T) {
-	root := t.TempDir()
+	exerciseNPMServeJourney(t, t.TempDir())
+}
+
+// exerciseNPMServeJourney publishes and installs with the real npm client
+// through the real serve command. Callers may select the storage backend
+// through the environment before calling it.
+func exerciseNPMServeJourney(t *testing.T, root string) {
+	t.Helper()
 	keys := filepath.Join(root, "keys")
 	if err := os.Mkdir(keys, 0o700); err != nil {
 		t.Fatal(err)

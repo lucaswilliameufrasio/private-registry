@@ -792,6 +792,11 @@ func TestPublicAssetCORSRejectsUnsafeOrigins(t *testing.T) {
 
 func TestAuthHTTPGenericArtifactPublicationRequiresCurrentPublisherGrant(t *testing.T) {
 	fixture := newAuthHTTPFixtureWithConfig(t, AuthHTTPConfig{CanonicalOrigin: authTestOrigin, AssetOrigin: authTestAssetOrigin, PublicAssetCORSOrigins: []string{"https://consumer.example"}})
+	exerciseAuthHTTPGenericArtifactPublication(t, fixture)
+}
+
+func exerciseAuthHTTPGenericArtifactPublication(t *testing.T, fixture authHTTPFixture) {
+	t.Helper()
 	root := t.TempDir()
 	staging := filepath.Join(root, "cargo-staging")
 	if err := os.Mkdir(staging, 0o700); err != nil {

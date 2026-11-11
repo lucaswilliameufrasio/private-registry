@@ -194,7 +194,12 @@ func (s *S3) openVerified(ctx context.Context, key ObjectKey) (*s3StagedFile, Ob
 	if result.Body == nil {
 		return nil, ObjectInfo{}, ErrObjectIntegrity
 	}
-	defer result.Body.Close()
+	bodyClosed := false
+	defer func() {
+		if !bodyClosed {
+			_ = result.Body.Close()
+		}
+	}()
 	if result.ContentLength == nil || *result.ContentLength < 0 || *result.ContentLength > s.maxObject {
 		return nil, ObjectInfo{}, ErrObjectIntegrity
 	}
@@ -204,11 +209,13 @@ func (s *S3) openVerified(ctx context.Context, key ObjectKey) (*s3StagedFile, Ob
 	}
 	hasher := sha256.New()
 	size, err := io.Copy(io.MultiWriter(file, hasher), &io.LimitedReader{R: contextReader{ctx: ctx, reader: result.Body}, N: s.maxObject + 1})
+	closeErr := result.Body.Close()
+	bodyClosed = true
 	if ctx.Err() != nil {
 		_ = file.Close()
 		return nil, ObjectInfo{}, ctx.Err()
 	}
-	if err != nil || size != *result.ContentLength || size > s.maxObject || hex.EncodeToString(hasher.Sum(nil)) != key.SHA256 {
+	if err != nil || closeErr != nil || size != *result.ContentLength || size > s.maxObject || hex.EncodeToString(hasher.Sum(nil)) != key.SHA256 {
 		_ = file.Close()
 		return nil, ObjectInfo{}, ErrObjectIntegrity
 	}

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"golang.org/x/term"
 
 	"private-registry/internal/artifacts"
@@ -133,7 +136,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err != nil {
 		return err
 	}
-	objectStore, err := storage.NewFileSystem(filepath.Join(cfg.DataDir, "object-store"))
+	objectStore, err := openObjectStore(cfg)
 	if err != nil {
 		return err
 	}
@@ -279,7 +282,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		defer close(workerDone)
 		workers.Wait()
 	}()
-	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver)
+	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver, "storage_driver", cfg.Storage.Driver)
 	serveErr := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout)
 	stopWorker()
 	select {
@@ -292,6 +295,65 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	}
 	logger.Info("registry HTTP server stopped")
 	return nil
+}
+
+// openObjectStore selects the package object backend. The S3-compatible
+// driver only reaches the configured HTTPS endpoint on the configured
+// networks, reads its credentials from private files and keeps a bounded
+// private staging directory under the data directory.
+func openObjectStore(cfg config.Config) (storage.Driver, error) {
+	switch cfg.Storage.Driver {
+	case config.StorageFileSystem:
+		return storage.NewFileSystem(filepath.Join(cfg.DataDir, "object-store"))
+	case config.StorageS3:
+		accessKeyID, err := secrets.LoadSecretFile(cfg.Storage.S3AccessKeyIDFile)
+		if err != nil {
+			return nil, errors.New("S3 access key ID file is missing, unsafe or malformed")
+		}
+		secretAccessKey, err := secrets.LoadSecretFile(cfg.Storage.S3SecretKeyFile)
+		if err != nil {
+			return nil, errors.New("S3 secret access key file is missing, unsafe or malformed")
+		}
+		credentials := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, Source: "registry-secret-files"}, nil
+		})
+		roots, err := loadCertificatePool(cfg.Storage.S3CAFile)
+		if err != nil {
+			return nil, errors.New("S3 CA file is missing or contains no certificates")
+		}
+		return storage.NewRestrictedS3Storage(storage.S3ClientSettings{
+			RootCAs:     roots,
+			Origin:      cfg.Storage.S3Endpoint,
+			Region:      cfg.Storage.S3Region,
+			Networks:    cfg.Storage.S3AllowedNetworks,
+			DNSServer:   cfg.Storage.S3DNSServer,
+			Credentials: credentials,
+		}, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix, filepath.Join(cfg.DataDir, "s3-staging"), config.MaxConfiguredUploadBytes, cfg.Storage.S3MaxConcurrent, cfg.Storage.S3OperationTimeout)
+	default:
+		return nil, errors.New("storage driver is not supported")
+	}
+}
+
+// loadCertificatePool returns nil (system roots) when no bundle is configured.
+// A configured bundle replaces the system roots for that single integration.
+func loadCertificatePool(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	bundle, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
+	if err != nil || len(bundle) > 1<<20 {
+		return nil, errors.New("certificate bundle is unreadable or too large")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(bundle) {
+		return nil, errors.New("certificate bundle contains no certificates")
+	}
+	return pool, nil
 }
 
 func verifyServeSchema(ctx context.Context, db *sql.DB, driver config.DatabaseDriver) error {

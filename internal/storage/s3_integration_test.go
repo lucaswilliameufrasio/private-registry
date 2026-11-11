@@ -69,6 +69,28 @@ func TestS3DriverAgainstIsolatedFloci(t *testing.T) {
 	if err != nil {
 		t.Fatal("put verified object:", err)
 	}
+	bounded, err := NewBoundedDriver(driver, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, _, err := bounded.Open(ctx, info.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := bounded.OpenRange(ctx, info.Key, 0, 1); !errors.Is(err, ErrCapacity) {
+		_ = held.Close()
+		t.Fatalf("held S3 reader did not bound range staging: %v", err)
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verifiedRange, _, err := bounded.OpenRange(ctx, info.Key, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifiedRange.Close(); err != nil {
+		t.Fatal(err)
+	}
 	duplicate, err := driver.Put(ctx, workspace, bytes.NewReader(payload), int64(len(payload)))
 	if err != nil || duplicate != info {
 		t.Fatalf("deduplicate object = %+v, %v", duplicate, err)

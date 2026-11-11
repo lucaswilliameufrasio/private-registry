@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadFromDefaultsToLoopbackAndPersistentSQLite(t *testing.T) {
@@ -329,6 +330,130 @@ func TestLoadFromDoesNotEchoInvalidDSN(t *testing.T) {
 }
 
 func lookupMap(values map[string]string) LookupEnv {
+	return func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	}
+}
+
+func TestStorageDefaultsToFilesystemAndRejectsStrayS3Settings(t *testing.T) {
+	cfg, err := LoadFrom(func(string) (string, bool) { return "", false })
+	if err != nil || cfg.Storage.Driver != StorageFileSystem {
+		t.Fatalf("default storage = %#v, %v", cfg.Storage, err)
+	}
+	if _, err := LoadFrom(mapLookup(map[string]string{"REGISTRY_S3_BUCKET": "packages"})); err == nil {
+		t.Fatal("S3 setting without the S3 driver was accepted")
+	}
+	if _, err := LoadFrom(mapLookup(map[string]string{"REGISTRY_STORAGE_DRIVER": "gcs"})); err == nil {
+		t.Fatal("unknown storage driver was accepted")
+	}
+}
+
+func validS3Environment() map[string]string {
+	return map[string]string{
+		"REGISTRY_STORAGE_DRIVER":            "s3",
+		"REGISTRY_S3_ENDPOINT":               "https://account.r2.cloudflarestorage.com",
+		"REGISTRY_S3_REGION":                 "auto",
+		"REGISTRY_S3_BUCKET":                 "registry-packages",
+		"REGISTRY_S3_ACCESS_KEY_ID_FILE":     "/run/secrets/s3-access-key-id",
+		"REGISTRY_S3_SECRET_ACCESS_KEY_FILE": "/run/secrets/s3-secret-access-key",
+		"REGISTRY_S3_ALLOWED_NETWORKS":       "104.16.0.0/13, 2606:4700::/32",
+		"REGISTRY_S3_DNS_SERVER":             "1.1.1.1:53",
+	}
+}
+
+func TestStorageS3RequiresExplicitEndpointCredentialsAndNetworks(t *testing.T) {
+	cfg, err := LoadFrom(mapLookup(validS3Environment()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := cfg.Storage
+	if storage.Driver != StorageS3 || storage.S3Endpoint != "https://account.r2.cloudflarestorage.com" || storage.S3Region != "auto" || storage.S3Bucket != "registry-packages" || storage.S3Prefix != "" || len(storage.S3AllowedNetworks) != 2 || !storage.S3DNSServer.IsValid() || storage.S3MaxConcurrent != 8 || storage.S3OperationTimeout != 10*time.Minute {
+		t.Fatalf("S3 storage configuration = %#v", storage)
+	}
+	for _, key := range []string{"REGISTRY_S3_ENDPOINT", "REGISTRY_S3_REGION", "REGISTRY_S3_BUCKET", "REGISTRY_S3_ACCESS_KEY_ID_FILE", "REGISTRY_S3_SECRET_ACCESS_KEY_FILE", "REGISTRY_S3_ALLOWED_NETWORKS"} {
+		environment := validS3Environment()
+		delete(environment, key)
+		if _, err := LoadFrom(mapLookup(environment)); err == nil {
+			t.Errorf("S3 storage without %s was accepted", key)
+		}
+	}
+	for key, invalid := range map[string]string{
+		"REGISTRY_S3_ENDPOINT":                  "http://plaintext.example",
+		"REGISTRY_S3_BUCKET":                    "Upper_Case",
+		"REGISTRY_S3_PREFIX":                    "../escape",
+		"REGISTRY_S3_ALLOWED_NETWORKS":          "10.0.0.1/8",
+		"REGISTRY_S3_DNS_SERVER":                "0.0.0.0:53",
+		"REGISTRY_S3_MAX_CONCURRENT":            "0",
+		"REGISTRY_S3_OPERATION_TIMEOUT_SECONDS": "7200",
+		"REGISTRY_S3_REGION":                    "us east",
+	} {
+		environment := validS3Environment()
+		environment[key] = invalid
+		if _, err := LoadFrom(mapLookup(environment)); err == nil {
+			t.Errorf("S3 storage accepted %s=%q", key, invalid)
+		}
+	}
+	environment := validS3Environment()
+	environment["REGISTRY_S3_ENDPOINT"] = "https://user:secret@account.example/path"
+	if _, err := LoadFrom(mapLookup(environment)); err == nil || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("endpoint with credentials was accepted or echoed: %v", err)
+	}
+}
+
+func TestMuiraIsOptionalAndRequiresCompleteConfiguration(t *testing.T) {
+	cfg, err := LoadFrom(func(string) (string, bool) { return "", false })
+	if err != nil || cfg.Muira.Enabled {
+		t.Fatalf("Muira enabled by default: %#v, %v", cfg.Muira, err)
+	}
+	if _, err := LoadFrom(mapLookup(map[string]string{"REGISTRY_MUIRA_ISSUER": "https://auth.example"})); err == nil {
+		t.Fatal("Muira setting without explicit enablement was accepted")
+	}
+	valid := func() map[string]string {
+		return map[string]string{
+			"REGISTRY_MUIRA_ENABLED":            "true",
+			"REGISTRY_MUIRA_ISSUER":             "https://auth.example",
+			"REGISTRY_MUIRA_CLIENT_ID":          "private-registry",
+			"REGISTRY_MUIRA_CLIENT_SECRET_FILE": "/run/secrets/muira-client-secret",
+			"REGISTRY_MUIRA_ALLOWED_NETWORKS":   "203.0.113.0/24",
+		}
+	}
+	cfg, err = LoadFrom(mapLookup(valid()))
+	if err != nil || !cfg.Muira.Enabled || cfg.Muira.Issuer != "https://auth.example" || cfg.Muira.ClientID != "private-registry" || len(cfg.Muira.AllowedNetworks) != 1 {
+		t.Fatalf("Muira configuration = %#v, %v", cfg.Muira, err)
+	}
+	for _, key := range []string{"REGISTRY_MUIRA_ISSUER", "REGISTRY_MUIRA_CLIENT_ID", "REGISTRY_MUIRA_CLIENT_SECRET_FILE", "REGISTRY_MUIRA_ALLOWED_NETWORKS"} {
+		environment := valid()
+		delete(environment, key)
+		if _, err := LoadFrom(mapLookup(environment)); err == nil {
+			t.Errorf("Muira without %s was accepted", key)
+		}
+	}
+	environment := valid()
+	environment["REGISTRY_MUIRA_ISSUER"] = "http://auth.example"
+	if _, err := LoadFrom(mapLookup(environment)); err == nil {
+		t.Error("plaintext Muira issuer was accepted")
+	}
+	environment = valid()
+	environment["REGISTRY_MUIRA_ENABLED"] = "yes"
+	if _, err := LoadFrom(mapLookup(environment)); err == nil {
+		t.Error("non-boolean Muira enablement was accepted")
+	}
+}
+
+func TestExperimentalOCIRequiresExplicitBoolean(t *testing.T) {
+	for raw, want := range map[string]bool{"true": true, "false": false} {
+		cfg, err := LoadFrom(mapLookup(map[string]string{"REGISTRY_EXPERIMENTAL_OCI": raw}))
+		if err != nil || cfg.ExperimentalOCI != want {
+			t.Fatalf("OCI %q = %v, %v", raw, cfg.ExperimentalOCI, err)
+		}
+	}
+	if _, err := LoadFrom(mapLookup(map[string]string{"REGISTRY_EXPERIMENTAL_OCI": "1"})); err == nil {
+		t.Fatal("non-boolean OCI enablement was accepted")
+	}
+}
+
+func mapLookup(values map[string]string) LookupEnv {
 	return func(key string) (string, bool) {
 		value, ok := values[key]
 		return value, ok
