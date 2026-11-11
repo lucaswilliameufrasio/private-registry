@@ -156,4 +156,6 @@ A sugestão foi avaliada e não integrada nesta entrega. O próprio projeto decl
 - `internal/oci`: mesma bateria em SQLite e PostgreSQL real.
 - `internal/config`, `internal/secrets`, `internal/storage`, `cmd/registryctl`: configuração, arquivos de segredo, composição S3 e provider do Cargo.
 
-Cada fatia passou três repetições com race nos testes focados. O resultado do `make verify` integral está registrado no commit que fecha a entrega.
+Cada fatia passou três repetições com race nos testes focados.
+
+Gate integral em 11/11/2026, sobre o commit `cbb8462`: build sem CGO, `format-check`, `go vet` (normal e integração), sintaxe dos scripts, unitários, integração com `-count=3` e integração com `-race -count=1` em todo o repositório, com `-timeout=40m` por pacote (o `Makefile` usa 20m) e cache Go dedicado. Na primeira execução o spike `internal/spikes/npmregistry` falhou por ambiente (o `PATH` tinha Node 26.13.0 e o spike exige 24.21.0), o que interrompeu a cadeia antes do estágio race; com Node 24.21.0 no `PATH`, esse pacote e `cmd/registry` passaram em três repetições e o estágio race passou inteiro. Não foi um único `make verify` contínuo. A jornada Docker ficou pulada (opt-in).
