@@ -38,4 +38,6 @@ Implementar o protocolo OCI Distribution dentro do registry (`internal/oci`, rot
 - `internal/server`: jornada HTTP (upload em chunks e monolítico, chunk fora de ordem, digest divergente, manifest com layer ausente/estrangeira, media type, tags e paginação, tokens trocados entre repositórios, revogação durante push, publisher sem reader, rotas e criação de repositório ausentes sem opt-in); três repetições com race.
 - `cmd/registry`: `serve` real atrás de TLS local com **ORAS 1.3.4**: push recusado com token de leitura e com token desconhecido, push, pull com conferência de bytes, listagem de tags, retag e pull anônimo recusado; três repetições com race.
 
+Existe uma jornada com Docker CLI + daemon (`TestExperimentalOCIServeDockerJourney`: `docker import`, login, push recusado com token de leitura, push, `rmi`, pull e conferência do conteúdo), mas ela só roda com `OCI_TEST_DOCKER=1` e **não passou neste ambiente**: o daemon rootless não alcança o loopback do host (`connection refused` em `/v2/`), então o resultado diz respeito à fixture, não ao adapter. Ela precisa ser executada com um daemon que alcance o registry e confie no certificado.
+
 Não comprovado: Docker, containerd, Podman, Buildx ou imagens reais multi-arquitetura por cliente; layers grandes; S3 real; crash no meio de upload ou commit; concorrência de push da mesma tag.
