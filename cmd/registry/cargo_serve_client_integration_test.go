@@ -149,23 +149,21 @@ func TestExperimentalCargoServeRealClientJourney(t *testing.T) {
 	if err := os.Mkdir(cargoHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	providerPath := filepath.Join(root, "credential-provider.py")
-	provider := `#!/usr/bin/python3
-import json, os, sys
-print(json.dumps({"v": [1]}), flush=True)
-for line in sys.stdin:
-    request = json.loads(line)
-    operation = request.get("operation")
-    if request.get("v") != 1 or request.get("kind") != "get" or request.get("registry", {}).get("index-url") != os.environ["TEST_CARGO_INDEX"] or operation not in ("read", "publish", "yank", "unyank"):
-        print(json.dumps({"Err": {"kind": "operation-not-supported"}}), flush=True)
-        continue
-    token = os.environ["TEST_CARGO_READ_TOKEN"] if operation == "read" else os.environ["TEST_CARGO_WRITE_TOKEN"]
-    print(json.dumps({"Ok": {"kind": "get", "token": token, "cache": "never", "operation_independent": False}}), flush=True)
-`
-	if err := os.WriteFile(providerPath, []byte(provider), 0o700); err != nil {
-		t.Fatal(err)
+	// The real registryctl provider, built from this checkout, hands Cargo the
+	// read token for index access and the write token for publication.
+	providerPath := filepath.Join(root, "registryctl")
+	if output, err := exec.CommandContext(ctx, "go", "build", "-o", providerPath, "private-registry/cmd/registryctl").CombinedOutput(); err != nil {
+		t.Fatalf("build registryctl: %v %s", err, output)
 	}
-	configuration := fmt.Sprintf("[credential-alias]\nfixture = [%q]\n[registries.private]\nindex = %q\ncredential-provider = \"fixture\"\n", providerPath, "sparse+"+registry+"/index/")
+	readTokenFile := filepath.Join(root, "cargo-read-token")
+	writeTokenFile := filepath.Join(root, "cargo-write-token")
+	for path, token := range map[string]string{readTokenFile: readToken.Bearer, writeTokenFile: writeToken.Bearer} {
+		if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index := "sparse+" + registry + "/index/"
+	configuration := fmt.Sprintf("[credential-alias]\nfixture = [%q, \"-index\", %q, \"-read-token-file\", %q, \"-write-token-file\", %q]\n[registries.private]\nindex = %q\ncredential-provider = \"fixture\"\n", providerPath, index, readTokenFile, writeTokenFile, index)
 	if err := os.WriteFile(filepath.Join(cargoHome, "config.toml"), []byte(configuration), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +187,7 @@ for line in sys.stdin:
 		t.Helper()
 		command := exec.CommandContext(ctx, filepath.Join(bin, "cargo"), args...)
 		command.Dir = root
-		command.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + root, "CARGO_HOME=" + cargoHome, "CARGO_TARGET_DIR=" + filepath.Join(root, "target"), "TEST_CARGO_INDEX=sparse+" + registry + "/index/", "TEST_CARGO_READ_TOKEN=" + readToken.Bearer, "TEST_CARGO_WRITE_TOKEN=" + writeToken.Bearer, "CARGO_HTTP_CAINFO=" + caPath, "CARGO_HTTP_TIMEOUT=20", "CARGO_HTTP_MULTIPLEXING=false", "CARGO_NET_RETRY=0", "CARGO_TERM_COLOR=never", "HTTP_PROXY=http://127.0.0.1:9", "HTTPS_PROXY=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9", "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost"}
+		command.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + root, "CARGO_HOME=" + cargoHome, "CARGO_TARGET_DIR=" + filepath.Join(root, "target"), "CARGO_HTTP_CAINFO=" + caPath, "CARGO_HTTP_TIMEOUT=20", "CARGO_HTTP_MULTIPLEXING=false", "CARGO_NET_RETRY=0", "CARGO_TERM_COLOR=never", "HTTP_PROXY=http://127.0.0.1:9", "HTTPS_PROXY=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9", "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost"}
 		if output, err := command.CombinedOutput(); err != nil {
 			safe := strings.ReplaceAll(string(output), writeToken.Bearer, "[redacted]")
 			safe = strings.ReplaceAll(safe, readToken.Bearer, "[redacted]")

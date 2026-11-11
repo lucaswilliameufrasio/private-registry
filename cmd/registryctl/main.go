@@ -25,6 +25,11 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, out io.Writer) error {
+	// Cargo starts a credential provider with only --cargo-plugin; the
+	// arguments configured in credential-alias arrive inside each request.
+	if len(args) == 1 && args[0] == "--cargo-plugin" {
+		return runCargoCredential(os.Stdin, out)
+	}
 	if len(args) >= 2 && args[0] == "publish" && args[1] == "go" {
 		return runPublishGo(ctx, args[2:], out)
 	}
@@ -32,7 +37,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return runPublicationAction(ctx, args[1], args[2:], out)
 	}
 	if len(args) < 2 || args[0] != "pack" || args[1] != "go" || out == nil {
-		return errors.New("usage: registryctl {pack go|publish go} [options]")
+		return errors.New("usage: registryctl {pack go|publish go} [options]; Cargo runs the credential provider as registryctl --cargo-plugin")
 	}
 	flags := flag.NewFlagSet("pack go", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
