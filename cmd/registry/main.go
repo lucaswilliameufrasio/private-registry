@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/lucaswilliameufrasio/sqlite-replication-go/storages3"
 	"golang.org/x/term"
 
 	"private-registry/internal/artifacts"
@@ -35,6 +36,7 @@ import (
 	"private-registry/internal/npm"
 	"private-registry/internal/oci"
 	"private-registry/internal/pub"
+	"private-registry/internal/replication"
 	"private-registry/internal/repositories"
 	"private-registry/internal/secrets"
 	"private-registry/internal/server"
@@ -42,7 +44,10 @@ import (
 	"private-registry/internal/workspaces"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout            = 10 * time.Second
+	replicationShutdownTimeout = 45 * time.Second
+)
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -56,8 +61,8 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
-	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key") {
-		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key}")
+	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key" && args[0] != "restore-database") {
+		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database}")
 	}
 	if logger == nil {
 		return errors.New("logger is required")
@@ -82,6 +87,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 				return err
 			}
 		}
+	}
+
+	if args[0] == "restore-database" {
+		// Must run before anything opens the database: opening creates it.
+		return runRestoreDatabase(ctx, cfg, logger)
 	}
 
 	db, err := database.Open(ctx, cfg)
@@ -310,13 +320,51 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		defer close(workerDone)
 		workers.Wait()
 	}()
-	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver, "storage_driver", cfg.Storage.Driver)
+	replicationDone := make(chan struct{})
+	if cfg.Replication.Enabled {
+		store, err := openReplicationStore(cfg)
+		if err != nil {
+			_ = listener.Close()
+			stopWorker()
+			return err
+		}
+		replicator, err := replication.New(replication.Options{
+			DatabasePath:        cfg.DatabaseDSN,
+			Directory:           filepath.Join(cfg.DataDir, "replication"),
+			Store:               store,
+			Prefix:              cfg.Replication.Target.Prefix,
+			RemoteID:            cfg.Replication.Target.Endpoint + "/" + cfg.Replication.Target.Bucket,
+			Interval:            cfg.Replication.Interval,
+			RotateAfterCaptures: cfg.Replication.RotateAfterCaptures,
+			RetainGenerations:   cfg.Replication.RetainGenerations,
+			Logger:              logger,
+		})
+		if err != nil {
+			_ = listener.Close()
+			stopWorker()
+			return err
+		}
+		go func() {
+			defer close(replicationDone)
+			replicator.Run(workerCtx)
+		}()
+	} else {
+		close(replicationDone)
+	}
+	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver, "storage_driver", cfg.Storage.Driver, "sqlite_replication", cfg.Replication.Enabled)
 	serveErr := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout)
 	stopWorker()
 	select {
 	case <-workerDone:
 	case <-time.After(shutdownTimeout):
 		return errors.Join(serveErr, errors.New("upload expiration worker did not stop before shutdown deadline"))
+	}
+	// Replication ships the last transactions after the HTTP server has
+	// stopped accepting writes; it bounds that final attempt itself.
+	select {
+	case <-replicationDone:
+	case <-time.After(replicationShutdownTimeout):
+		return errors.Join(serveErr, errors.New("SQLite replication did not finish its final upload before the shutdown deadline"))
 	}
 	if serveErr != nil {
 		return errors.Join(errors.New("HTTP server failed"), serveErr)
@@ -334,29 +382,11 @@ func openObjectStore(cfg config.Config) (storage.Driver, error) {
 	case config.StorageFileSystem:
 		return storage.NewFileSystem(filepath.Join(cfg.DataDir, "object-store"))
 	case config.StorageS3:
-		accessKeyID, err := secrets.LoadSecretFile(cfg.Storage.S3AccessKeyIDFile)
+		settings, err := s3ClientSettings(config.S3Target{Endpoint: cfg.Storage.S3Endpoint, Region: cfg.Storage.S3Region, AccessKeyIDFile: cfg.Storage.S3AccessKeyIDFile, SecretKeyFile: cfg.Storage.S3SecretKeyFile, CAFile: cfg.Storage.S3CAFile, AllowedNetworks: cfg.Storage.S3AllowedNetworks, DNSServer: cfg.Storage.S3DNSServer})
 		if err != nil {
-			return nil, errors.New("S3 access key ID file is missing, unsafe or malformed")
+			return nil, err
 		}
-		secretAccessKey, err := secrets.LoadSecretFile(cfg.Storage.S3SecretKeyFile)
-		if err != nil {
-			return nil, errors.New("S3 secret access key file is missing, unsafe or malformed")
-		}
-		credentials := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
-			return aws.Credentials{AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, Source: "registry-secret-files"}, nil
-		})
-		roots, err := loadCertificatePool(cfg.Storage.S3CAFile)
-		if err != nil {
-			return nil, errors.New("S3 CA file is missing or contains no certificates")
-		}
-		return storage.NewRestrictedS3Storage(storage.S3ClientSettings{
-			RootCAs:     roots,
-			Origin:      cfg.Storage.S3Endpoint,
-			Region:      cfg.Storage.S3Region,
-			Networks:    cfg.Storage.S3AllowedNetworks,
-			DNSServer:   cfg.Storage.S3DNSServer,
-			Credentials: credentials,
-		}, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix, filepath.Join(cfg.DataDir, "s3-staging"), config.MaxConfiguredUploadBytes, cfg.Storage.S3MaxConcurrent, cfg.Storage.S3OperationTimeout)
+		return storage.NewRestrictedS3Storage(settings, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix, filepath.Join(cfg.DataDir, "s3-staging"), config.MaxConfiguredUploadBytes, cfg.Storage.S3MaxConcurrent, cfg.Storage.S3OperationTimeout)
 	default:
 		return nil, errors.New("storage driver is not supported")
 	}
@@ -393,6 +423,79 @@ func enableMuira(ctx context.Context, authentication *auth.Service, cfg config.C
 		RedirectURL:  strings.TrimSuffix(cfg.CanonicalOrigin, "/") + "/api/v1/auth/muira/callback",
 		HTTPClient:   client,
 	})
+}
+
+// s3ClientSettings resolves one S3-compatible destination into an explicit
+// network policy and credentials read from private files. Nothing is taken
+// from the environment's AWS variables or shared configuration.
+func s3ClientSettings(target config.S3Target) (storage.S3ClientSettings, error) {
+	accessKeyID, err := secrets.LoadSecretFile(target.AccessKeyIDFile)
+	if err != nil {
+		return storage.S3ClientSettings{}, errors.New("S3 access key ID file is missing, unsafe or malformed")
+	}
+	secretAccessKey, err := secrets.LoadSecretFile(target.SecretKeyFile)
+	if err != nil {
+		return storage.S3ClientSettings{}, errors.New("S3 secret access key file is missing, unsafe or malformed")
+	}
+	roots, err := loadCertificatePool(target.CAFile)
+	if err != nil {
+		return storage.S3ClientSettings{}, errors.New("S3 CA file is missing or contains no certificates")
+	}
+	credentials := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, Source: "registry-secret-files"}, nil
+	})
+	return storage.S3ClientSettings{Origin: target.Endpoint, Region: target.Region, Networks: target.AllowedNetworks, DNSServer: target.DNSServer, RootCAs: roots, Credentials: credentials}, nil
+}
+
+// openReplicationStore reaches the disaster-recovery bucket, which is
+// configured independently of the package object store.
+func openReplicationStore(cfg config.Config) (*storages3.Store, error) {
+	settings, err := s3ClientSettings(cfg.Replication.Target)
+	if err != nil {
+		return nil, err
+	}
+	client, err := storage.NewRestrictedS3Client(settings)
+	if err != nil {
+		return nil, err
+	}
+	store, err := storages3.New(client, cfg.Replication.Target.Bucket)
+	if err != nil {
+		return nil, errors.New("SQLite replication destination is invalid")
+	}
+	return store, nil
+}
+
+// runRestoreDatabase rebuilds the SQLite database from the replication bucket
+// on a host where it does not exist. It restores the database only: package
+// objects, the master key and configuration must be provided by the operator.
+// Tokens and sessions come back exactly as they were at the restored point,
+// so anything revoked after that point must be revoked again.
+func runRestoreDatabase(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	if cfg.DatabaseDriver != config.SQLite || !cfg.Replication.Enabled {
+		return errors.New("restore-database requires the sqlite driver and REGISTRY_REPLICATION_ENABLED=true with its destination")
+	}
+	if _, err := os.Lstat(cfg.DatabaseDSN); err == nil {
+		return errors.New("a database already exists at the configured path; restore-database never overwrites one")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("database path could not be checked")
+	}
+	directory := filepath.Dir(cfg.DatabaseDSN)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return errors.New("database directory could not be created")
+	}
+	if info, err := os.Stat(directory); err != nil || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("database directory must be private to its owner")
+	}
+	store, err := openReplicationStore(cfg)
+	if err != nil {
+		return err
+	}
+	restored, err := replication.Restore(ctx, store, cfg.Replication.Target.Prefix, cfg.DatabaseDSN)
+	if err != nil {
+		return err
+	}
+	logger.Info("database restored from replication", "generation", restored.Generation, "skipped_generations", restored.Skipped)
+	return nil
 }
 
 // loadCertificatePool returns nil (system roots) when no bundle is configured.

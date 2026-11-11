@@ -459,3 +459,57 @@ func mapLookup(values map[string]string) LookupEnv {
 		return value, ok
 	}
 }
+
+func TestReplicationRequiresSQLiteAndExplicitDestination(t *testing.T) {
+	cfg, err := LoadFrom(func(string) (string, bool) { return "", false })
+	if err != nil || cfg.Replication.Enabled {
+		t.Fatalf("replication enabled by default: %#v, %v", cfg.Replication, err)
+	}
+	if _, err := LoadFrom(mapLookup(map[string]string{"REGISTRY_REPLICATION_S3_BUCKET": "registry-dr"})); err == nil {
+		t.Fatal("replication setting without explicit enablement was accepted")
+	}
+	valid := func() map[string]string {
+		return map[string]string{
+			"REGISTRY_REPLICATION_ENABLED":                   "true",
+			"REGISTRY_REPLICATION_S3_ENDPOINT":               "https://account.r2.cloudflarestorage.com",
+			"REGISTRY_REPLICATION_S3_REGION":                 "auto",
+			"REGISTRY_REPLICATION_S3_BUCKET":                 "registry-dr",
+			"REGISTRY_REPLICATION_S3_ACCESS_KEY_ID_FILE":     "/run/secrets/dr-access-key-id",
+			"REGISTRY_REPLICATION_S3_SECRET_ACCESS_KEY_FILE": "/run/secrets/dr-secret-access-key",
+			"REGISTRY_REPLICATION_S3_ALLOWED_NETWORKS":       "104.16.0.0/13",
+		}
+	}
+	cfg, err = LoadFrom(mapLookup(valid()))
+	if err != nil || !cfg.Replication.Enabled || cfg.Replication.Target.Bucket != "registry-dr" || cfg.Replication.Interval != 30*time.Second || cfg.Replication.RotateAfterCaptures != 100 || cfg.Replication.RetainGenerations != 3 {
+		t.Fatalf("replication configuration = %#v, %v", cfg.Replication, err)
+	}
+	// Replication is configured independently of the package object store.
+	if cfg.Storage.Driver != StorageFileSystem {
+		t.Fatalf("replication changed the object store: %#v", cfg.Storage)
+	}
+	for _, key := range []string{"REGISTRY_REPLICATION_S3_ENDPOINT", "REGISTRY_REPLICATION_S3_BUCKET", "REGISTRY_REPLICATION_S3_ACCESS_KEY_ID_FILE", "REGISTRY_REPLICATION_S3_SECRET_ACCESS_KEY_FILE", "REGISTRY_REPLICATION_S3_ALLOWED_NETWORKS"} {
+		environment := valid()
+		delete(environment, key)
+		if _, err := LoadFrom(mapLookup(environment)); err == nil {
+			t.Errorf("replication without %s was accepted", key)
+		}
+	}
+	for key, invalid := range map[string]string{
+		"REGISTRY_REPLICATION_INTERVAL_SECONDS":      "0",
+		"REGISTRY_REPLICATION_ROTATE_AFTER_CAPTURES": "0",
+		"REGISTRY_REPLICATION_RETAIN_GENERATIONS":    "1",
+		"REGISTRY_REPLICATION_S3_ENDPOINT":           "http://plaintext.example",
+	} {
+		environment := valid()
+		environment[key] = invalid
+		if _, err := LoadFrom(mapLookup(environment)); err == nil {
+			t.Errorf("replication accepted %s=%q", key, invalid)
+		}
+	}
+	environment := valid()
+	environment["REGISTRY_DATABASE_DRIVER"] = "postgres"
+	environment["REGISTRY_DATABASE_DSN"] = "postgres://registry@/registry?host=/run/postgresql"
+	if _, err := LoadFrom(mapLookup(environment)); err == nil {
+		t.Error("SQLite replication was accepted with PostgreSQL")
+	}
+}

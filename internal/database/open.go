@@ -33,7 +33,7 @@ func Open(ctx context.Context, cfg config.Config) (*sql.DB, error) {
 		if err := prepareSQLiteFile(cfg.DatabaseDSN); err != nil {
 			return nil, err
 		}
-		dsn, err := sqliteDSN(cfg.DatabaseDSN)
+		dsn, err := sqliteDSN(cfg.DatabaseDSN, cfg.Replication.Enabled)
 		if err != nil {
 			return nil, errors.New("SQLite database path is invalid")
 		}
@@ -105,7 +105,10 @@ func prepareSQLiteFile(path string) error {
 	return nil
 }
 
-func sqliteDSN(path string) (string, error) {
+// sqliteDSN configures every pooled connection. With replication enabled a
+// capture holds SQLite's write lock while it copies the database, so writers
+// are given longer to wait before failing with SQLITE_BUSY.
+func sqliteDSN(path string, replicated bool) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
@@ -115,7 +118,11 @@ func sqliteDSN(path string) (string, error) {
 	query.Add("_pragma", "journal_mode(WAL)")
 	query.Add("_pragma", "foreign_keys(ON)")
 	query.Add("_pragma", "synchronous(FULL)")
-	query.Add("_pragma", "busy_timeout(5000)")
+	busyTimeout := "busy_timeout(5000)"
+	if replicated {
+		busyTimeout = "busy_timeout(30000)"
+	}
+	query.Add("_pragma", busyTimeout)
 	u.RawQuery = query.Encode()
 	return u.String(), nil
 }

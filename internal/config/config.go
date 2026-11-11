@@ -44,6 +44,7 @@ type Config struct {
 	ExperimentalOCI         bool
 	Storage                 StorageConfig
 	Muira                   MuiraConfig
+	Replication             ReplicationConfig
 }
 
 type StorageDriver string
@@ -320,6 +321,10 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	replicationConfig, err := loadReplication(lookup, driver)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -342,6 +347,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		ExperimentalOCI:         ociEnabled,
 		Storage:                 storageConfig,
 		Muira:                   muiraConfig,
+		Replication:             replicationConfig,
 	}, nil
 }
 
@@ -350,7 +356,10 @@ func loadStorage(lookup LookupEnv) (StorageConfig, error) {
 	if err != nil {
 		return StorageConfig{}, err
 	}
-	s3Keys := []string{"REGISTRY_S3_ENDPOINT", "REGISTRY_S3_REGION", "REGISTRY_S3_BUCKET", "REGISTRY_S3_PREFIX", "REGISTRY_S3_ACCESS_KEY_ID_FILE", "REGISTRY_S3_SECRET_ACCESS_KEY_FILE", "REGISTRY_S3_CA_FILE", "REGISTRY_S3_ALLOWED_NETWORKS", "REGISTRY_S3_DNS_SERVER", "REGISTRY_S3_MAX_CONCURRENT", "REGISTRY_S3_OPERATION_TIMEOUT_SECONDS"}
+	s3Keys := []string{"REGISTRY_S3_MAX_CONCURRENT", "REGISTRY_S3_OPERATION_TIMEOUT_SECONDS"}
+	for _, key := range s3TargetKeys {
+		s3Keys = append(s3Keys, "REGISTRY_S3_"+key)
+	}
 	switch StorageDriver(driverValue) {
 	case StorageFileSystem:
 		for _, key := range s3Keys {
@@ -363,61 +372,7 @@ func loadStorage(lookup LookupEnv) (StorageConfig, error) {
 	default:
 		return StorageConfig{}, errors.New("storage driver must be filesystem or s3")
 	}
-	endpoint, err := requiredHTTPSOrigin(lookup, "REGISTRY_S3_ENDPOINT")
-	if err != nil {
-		return StorageConfig{}, err
-	}
-	region, err := required(lookup, "REGISTRY_S3_REGION")
-	if err != nil {
-		return StorageConfig{}, err
-	}
-	if len(region) > 128 || strings.ContainsAny(region, "\x00\r\n\t /\\") {
-		return StorageConfig{}, errors.New("REGISTRY_S3_REGION is invalid")
-	}
-	bucket, err := required(lookup, "REGISTRY_S3_BUCKET")
-	if err != nil {
-		return StorageConfig{}, err
-	}
-	if len(bucket) < 3 || len(bucket) > 63 {
-		return StorageConfig{}, errors.New("REGISTRY_S3_BUCKET is invalid")
-	}
-	for _, ch := range bucket {
-		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.') {
-			return StorageConfig{}, errors.New("REGISTRY_S3_BUCKET is invalid")
-		}
-	}
-	prefix := ""
-	if raw, exists := lookup("REGISTRY_S3_PREFIX"); exists {
-		prefix = raw
-		if prefix == "" || len(prefix) > 256 || strings.Trim(prefix, "/") != prefix || strings.TrimSpace(prefix) != prefix || strings.ContainsAny(prefix, "\\\x00") {
-			return StorageConfig{}, errors.New("REGISTRY_S3_PREFIX is invalid")
-		}
-		for _, part := range strings.Split(prefix, "/") {
-			if part == "" || part == "." || part == ".." {
-				return StorageConfig{}, errors.New("REGISTRY_S3_PREFIX is invalid")
-			}
-		}
-	}
-	accessKeyFile, err := requiredFilePath(lookup, "REGISTRY_S3_ACCESS_KEY_ID_FILE")
-	if err != nil {
-		return StorageConfig{}, err
-	}
-	secretKeyFile, err := requiredFilePath(lookup, "REGISTRY_S3_SECRET_ACCESS_KEY_FILE")
-	if err != nil {
-		return StorageConfig{}, err
-	}
-	caFile := ""
-	if _, exists := lookup("REGISTRY_S3_CA_FILE"); exists {
-		caFile, err = requiredFilePath(lookup, "REGISTRY_S3_CA_FILE")
-		if err != nil {
-			return StorageConfig{}, err
-		}
-	}
-	networks, err := requiredNetworks(lookup, "REGISTRY_S3_ALLOWED_NETWORKS")
-	if err != nil {
-		return StorageConfig{}, err
-	}
-	dns, err := optionalDNSServer(lookup, "REGISTRY_S3_DNS_SERVER")
+	target, err := loadS3Target(lookup, "REGISTRY_S3_")
 	if err != nil {
 		return StorageConfig{}, err
 	}
@@ -439,18 +394,170 @@ func loadStorage(lookup LookupEnv) (StorageConfig, error) {
 	}
 	return StorageConfig{
 		Driver:             StorageS3,
-		S3Endpoint:         endpoint,
-		S3Region:           region,
-		S3Bucket:           bucket,
-		S3Prefix:           prefix,
-		S3AccessKeyIDFile:  accessKeyFile,
-		S3SecretKeyFile:    secretKeyFile,
-		S3CAFile:           caFile,
-		S3AllowedNetworks:  networks,
-		S3DNSServer:        dns,
+		S3Endpoint:         target.Endpoint,
+		S3Region:           target.Region,
+		S3Bucket:           target.Bucket,
+		S3Prefix:           target.Prefix,
+		S3AccessKeyIDFile:  target.AccessKeyIDFile,
+		S3SecretKeyFile:    target.SecretKeyFile,
+		S3CAFile:           target.CAFile,
+		S3AllowedNetworks:  target.AllowedNetworks,
+		S3DNSServer:        target.DNSServer,
 		S3MaxConcurrent:    concurrent,
 		S3OperationTimeout: time.Duration(timeoutSeconds) * time.Second,
 	}, nil
+}
+
+// S3Target is one S3-compatible destination reached only through an explicit
+// HTTPS endpoint, explicit networks and file-based credentials.
+type S3Target struct {
+	Endpoint        string
+	Region          string
+	Bucket          string
+	Prefix          string
+	AccessKeyIDFile string
+	SecretKeyFile   string
+	CAFile          string
+	AllowedNetworks []netip.Prefix
+	DNSServer       netip.AddrPort
+}
+
+var s3TargetKeys = []string{"ENDPOINT", "REGION", "BUCKET", "PREFIX", "ACCESS_KEY_ID_FILE", "SECRET_ACCESS_KEY_FILE", "CA_FILE", "ALLOWED_NETWORKS", "DNS_SERVER"}
+
+// loadS3Target reads <keyPrefix>ENDPOINT, REGION, BUCKET, ACCESS_KEY_ID_FILE,
+// SECRET_ACCESS_KEY_FILE and ALLOWED_NETWORKS (required) plus PREFIX, CA_FILE
+// and DNS_SERVER (optional).
+func loadS3Target(lookup LookupEnv, keyPrefix string) (S3Target, error) {
+	endpoint, err := requiredHTTPSOrigin(lookup, keyPrefix+"ENDPOINT")
+	if err != nil {
+		return S3Target{}, err
+	}
+	region, err := required(lookup, keyPrefix+"REGION")
+	if err != nil {
+		return S3Target{}, err
+	}
+	if len(region) > 128 || strings.ContainsAny(region, "\x00\r\n\t /\\") {
+		return S3Target{}, fmt.Errorf("%sREGION is invalid", keyPrefix)
+	}
+	bucket, err := required(lookup, keyPrefix+"BUCKET")
+	if err != nil {
+		return S3Target{}, err
+	}
+	if len(bucket) < 3 || len(bucket) > 63 {
+		return S3Target{}, fmt.Errorf("%sBUCKET is invalid", keyPrefix)
+	}
+	for _, ch := range bucket {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.') {
+			return S3Target{}, fmt.Errorf("%sBUCKET is invalid", keyPrefix)
+		}
+	}
+	prefix := ""
+	if raw, exists := lookup(keyPrefix + "PREFIX"); exists {
+		prefix = raw
+		invalid := prefix == "" || len(prefix) > 256 || strings.Trim(prefix, "/") != prefix || strings.TrimSpace(prefix) != prefix || strings.ContainsAny(prefix, "\\\x00")
+		for _, part := range strings.Split(prefix, "/") {
+			if part == "" || part == "." || part == ".." {
+				invalid = true
+			}
+		}
+		if invalid {
+			return S3Target{}, fmt.Errorf("%sPREFIX is invalid", keyPrefix)
+		}
+	}
+	accessKeyFile, err := requiredFilePath(lookup, keyPrefix+"ACCESS_KEY_ID_FILE")
+	if err != nil {
+		return S3Target{}, err
+	}
+	secretKeyFile, err := requiredFilePath(lookup, keyPrefix+"SECRET_ACCESS_KEY_FILE")
+	if err != nil {
+		return S3Target{}, err
+	}
+	caFile := ""
+	if _, exists := lookup(keyPrefix + "CA_FILE"); exists {
+		caFile, err = requiredFilePath(lookup, keyPrefix+"CA_FILE")
+		if err != nil {
+			return S3Target{}, err
+		}
+	}
+	networks, err := requiredNetworks(lookup, keyPrefix+"ALLOWED_NETWORKS")
+	if err != nil {
+		return S3Target{}, err
+	}
+	dns, err := optionalDNSServer(lookup, keyPrefix+"DNS_SERVER")
+	if err != nil {
+		return S3Target{}, err
+	}
+	return S3Target{Endpoint: endpoint, Region: region, Bucket: bucket, Prefix: prefix, AccessKeyIDFile: accessKeyFile, SecretKeyFile: secretKeyFile, CAFile: caFile, AllowedNetworks: networks, DNSServer: dns}, nil
+}
+
+// ReplicationConfig enables continuous SQLite replication to an S3-compatible
+// bucket for disaster recovery. It is independent of the package object store.
+type ReplicationConfig struct {
+	Enabled bool
+	Target  S3Target
+	// Interval is the pause between capture cycles: the recovery point
+	// objective when the destination is reachable.
+	Interval time.Duration
+	// RotateAfterCaptures bounds the incremental chain of one generation.
+	RotateAfterCaptures int
+	// RetainGenerations is how many complete generations stay in the bucket.
+	RetainGenerations int
+}
+
+func loadReplication(lookup LookupEnv, driver DatabaseDriver) (ReplicationConfig, error) {
+	enabled := false
+	if raw, ok := lookup("REGISTRY_REPLICATION_ENABLED"); ok {
+		switch raw {
+		case "true":
+			enabled = true
+		case "false":
+		default:
+			return ReplicationConfig{}, errors.New("REGISTRY_REPLICATION_ENABLED must be true or false")
+		}
+	}
+	keys := []string{"REGISTRY_REPLICATION_INTERVAL_SECONDS", "REGISTRY_REPLICATION_ROTATE_AFTER_CAPTURES", "REGISTRY_REPLICATION_RETAIN_GENERATIONS"}
+	for _, key := range s3TargetKeys {
+		keys = append(keys, "REGISTRY_REPLICATION_S3_"+key)
+	}
+	if !enabled {
+		for _, key := range keys {
+			if _, exists := lookup(key); exists {
+				return ReplicationConfig{}, fmt.Errorf("%s requires REGISTRY_REPLICATION_ENABLED=true", key)
+			}
+		}
+		return ReplicationConfig{}, nil
+	}
+	if driver != SQLite {
+		return ReplicationConfig{}, errors.New("REGISTRY_REPLICATION_ENABLED requires the sqlite database driver; PostgreSQL needs its own backup")
+	}
+	target, err := loadS3Target(lookup, "REGISTRY_REPLICATION_S3_")
+	if err != nil {
+		return ReplicationConfig{}, err
+	}
+	number := func(key, fallback string, minimum, maximum int) (int, error) {
+		raw, err := value(lookup, key, fallback)
+		if err != nil {
+			return 0, err
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < minimum || parsed > maximum {
+			return 0, fmt.Errorf("%s must be between %d and %d", key, minimum, maximum)
+		}
+		return parsed, nil
+	}
+	interval, err := number("REGISTRY_REPLICATION_INTERVAL_SECONDS", "30", 1, 3600)
+	if err != nil {
+		return ReplicationConfig{}, err
+	}
+	rotate, err := number("REGISTRY_REPLICATION_ROTATE_AFTER_CAPTURES", "100", 1, 10000)
+	if err != nil {
+		return ReplicationConfig{}, err
+	}
+	retain, err := number("REGISTRY_REPLICATION_RETAIN_GENERATIONS", "3", 2, 100)
+	if err != nil {
+		return ReplicationConfig{}, err
+	}
+	return ReplicationConfig{Enabled: true, Target: target, Interval: time.Duration(interval) * time.Second, RotateAfterCaptures: rotate, RetainGenerations: retain}, nil
 }
 
 func loadMuira(lookup LookupEnv) (MuiraConfig, error) {

@@ -4,7 +4,7 @@
 
 Esta é a primeira entrega pensada para uso experimental de ponta a ponta. Ela **não é a v1** descrita em [development-plan.md](development-plan.md): o escopo foi reduzido por decisão do proprietário para quatro formatos, storage em objeto e login opcional via Muira. O que continua faltando para a v1 está em [O que esta entrega não cobre](#o-que-esta-entrega-não-cobre) e no [roadmap](roadmap.md).
 
-Tudo aqui é opt-in e experimental. Não use com dados que você não possa perder: não existe backup/restore operacional (ver limites).
+Tudo aqui é opt-in e experimental. Há disaster recovery do banco SQLite por replicação, mas não um backup completo e independente; leia os limites antes de guardar dados que você não possa perder.
 
 ## O que está disponível
 
@@ -15,6 +15,7 @@ Tudo aqui é opt-in e experimental. Não use com dados que você não possa perd
 | Pub (Dart) | `REGISTRY_EXPERIMENTAL_PUB=true` | Dart: publish e `pub get` | [ADR 0042](adr/0042-pub-catalog-boundary.md) |
 | OCI | `REGISTRY_EXPERIMENTAL_OCI=true` | ORAS 1.3.4: push, pull, tags, retag. **Docker não comprovado** | [ADR 0044](adr/0044-own-oci-adapter.md) |
 | Storage S3 compatível | `REGISTRY_STORAGE_DRIVER=s3` | npm pelo `serve` com bucket Floci. **R2/B2/S3 reais não comprovados** | [ADR 0019](adr/0019-s3-content-driver.md) |
+| DR do banco | `REGISTRY_REPLICATION_ENABLED=true` | Ensaio de desastre pelos comandos reais, bucket Floci. **Provedor real não comprovado** | [ADR 0045](adr/0045-sqlite-replication-disaster-recovery.md) |
 | Login Muira | `REGISTRY_MUIRA_ENABLED=true` | Provedor OIDC sintético. **Muira real não comprovado** | [ADR 0043](adr/0043-muira-identity-boundary.md) |
 
 Arquivos genéricos e módulos Go continuam disponíveis como antes. Hex não faz parte desta entrega.
@@ -84,6 +85,29 @@ O login local continua funcionando. O Muira substitui apenas a senha: quem admin
 
 Este é hoje o único caminho para ter mais de um usuário: não existem convites nem cadastro local.
 
+### Disaster recovery do banco (SQLite)
+
+```sh
+export REGISTRY_REPLICATION_ENABLED=true
+export REGISTRY_REPLICATION_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+export REGISTRY_REPLICATION_S3_REGION=auto
+export REGISTRY_REPLICATION_S3_BUCKET=registry-dr
+export REGISTRY_REPLICATION_S3_ACCESS_KEY_ID_FILE=/etc/registry/dr-access-key-id
+export REGISTRY_REPLICATION_S3_SECRET_ACCESS_KEY_FILE=/etc/registry/dr-secret-access-key
+export REGISTRY_REPLICATION_S3_ALLOWED_NETWORKS=<CIDRs do endpoint>
+export REGISTRY_REPLICATION_S3_DNS_SERVER=1.1.1.1:53
+```
+
+O `serve` passa a enviar o banco para o bucket a cada 30 s quando há mudanças (`REGISTRY_REPLICATION_INTERVAL_SECONDS`), e mais uma vez ao encerrar. Use credenciais e, de preferência, bucket diferentes dos do object store. Só Linux amd64 e só SQLite. Detalhes e limites no [ADR 0045](adr/0045-sqlite-replication-disaster-recovery.md).
+
+Para reconstruir um host perdido:
+
+1. Restaure a chave mestra e os arquivos de credenciais a partir da **sua** cópia (o registry não os replica) e reconfigure as mesmas variáveis.
+2. Com o diretório de dados vazio, rode `registry restore-database`. Ele nunca sobrescreve um banco existente.
+3. Rode `registry serve`. Os pacotes voltam a ser servidos se o storage for S3; com storage em filesystem os bytes se perderam com o host.
+
+Perde-se o que foi escrito depois do último envio, e o que foi revogado depois desse ponto precisa ser revogado de novo. Acompanhe os logs: cada ciclo que falha gera um `WARN`.
+
 ## Usando cada formato
 
 Em todos os casos: crie o repositório com o formato certo (`POST /api/v1/workspaces/{workspace}/repositories` com `"format": "cargo" | "npm" | "pub" | "oci"`, só aceito com o adapter habilitado), conceda `reader`/`publisher` explicitamente (membership não dá acesso) e emita os tokens. Leitura usa o **token pessoal de leitura** (`…/personal-read-tokens`); publicação usa o **token de escrita do formato** (`…/cargo-write-tokens`, `…/npm-write-tokens`, `…/pub-write-tokens`, `…/oci-write-tokens`). Tokens são por repositório, expiram em até 30 dias e aparecem uma única vez.
@@ -137,17 +161,13 @@ O usuário é ignorado; a senha é o token. Para pull, use o token pessoal de le
 
 Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 
-- **Backup e recuperação.** Existem peças internas (inventários, conjuntos cifrados e recovery isolado para genéricos, Go, Cargo, npm e Pub), mas nenhum comando de operador, e todo caminho marca o resultado como `RECOVERY_INCOMPLETE`. Para OCI não há nem inventário: a preparação de recovery recusa instalações com conteúdo OCI. O `sqlite-replication` sugerido para disaster recovery **não foi integrado** (ver abaixo).
+- **Backup além do disaster recovery.** O banco SQLite tem replicação contínua e restore (seção acima), mas não há backup cifrado independente, retenção longa, verificador externo nem cobertura para PostgreSQL. As peças internas de inventário e recovery isolado continuam sem comando de operador e marcam o resultado como `RECOVERY_INCOMPLETE`; para OCI elas recusam a instalação.
 - **OCI:** sem revisão humana, quota, exclusão, GC, mount, referrers; tags mutáveis; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real, sem multipart, sem GC de órfãos, sem migração entre drivers.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
 - **Sem UI, convites, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
-
-### Sobre `sqlite-replication`
-
-A sugestão foi avaliada e não integrada nesta entrega. O próprio projeto declara que a implementação Go ainda não tem fechamento operacional, que R2 não está homologado, que ARM64 está fora da garantia e que a captura exige um write-gate explícito com um único escritor lógico coordenado. Integrar exigiria colocar esse gate em volta de todas as escritas SQLite do registry (uma dúzia de pacotes abrem transações próprias) e comprovar o conjunto com o driver `modernc.org/sqlite`. É trabalho de uma entrega própria, e replicar o banco não cobre objetos, chave mestra nem configuração.
 
 ## Evidência desta entrega
 
