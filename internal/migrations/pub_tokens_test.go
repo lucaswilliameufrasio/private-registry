@@ -52,12 +52,14 @@ func exercisePubWriteTokenMigration(t *testing.T, ctx context.Context, db *sql.D
 	delete(old, "sql/postgres/000041_oci_repository_format.sql")
 	delete(old, "sql/sqlite/000042_oci_registry.sql")
 	delete(old, "sql/postgres/000042_oci_registry.sql")
+	delete(old, "sql/sqlite/000043_oci_policies.sql")
+	delete(old, "sql/postgres/000043_oci_policies.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 34 {
 		t.Fatalf("prepare v34 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 42 || len(report.AppliedVersions) != 8 || report.AppliedVersions[0] != 35 || report.AppliedVersions[1] != 36 || report.AppliedVersions[2] != 37 || report.AppliedVersions[3] != 38 || report.AppliedVersions[4] != 39 || report.AppliedVersions[5] != 40 || report.AppliedVersions[6] != 41 || report.AppliedVersions[7] != 42 {
+		if err != nil || report.CurrentVersion != 43 || len(report.AppliedVersions) != 9 || report.AppliedVersions[0] != 35 || report.AppliedVersions[1] != 36 || report.AppliedVersions[2] != 37 || report.AppliedVersions[3] != 38 || report.AppliedVersions[4] != 39 || report.AppliedVersions[5] != 40 || report.AppliedVersions[6] != 41 || report.AppliedVersions[7] != 42 || report.AppliedVersions[8] != 43 {
 			t.Fatalf("v35 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

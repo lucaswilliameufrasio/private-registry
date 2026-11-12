@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"private-registry/internal/config"
+	"private-registry/internal/workspaces"
 )
 
 var ErrReviewRequired = errors.New("publication requires human review")
@@ -46,4 +47,49 @@ func RequireNoReview(ctx context.Context, tx *sql.Tx, driver config.DatabaseDriv
 		return ErrReviewRequired
 	}
 	return nil
+}
+
+// WithRepositoryManagerTransaction runs operation for an active owner or
+// administrator of the repository's workspace, after checking the
+// repository's format, under the shared authorization lock. It is for
+// management actions that repository grants alone must not allow, such as
+// removing published content or changing a repository's publication rules.
+func (s *Service) WithRepositoryManagerTransaction(ctx context.Context, actorUserID, workspaceID, repositoryID string, format Format, operation func(*sql.Tx, string) error) error {
+	if s == nil || s.db == nil || ctx == nil || operation == nil {
+		return errors.New("repository management transaction is unavailable")
+	}
+	actorID, err := parseUUID(actorUserID, ErrUnauthenticated)
+	if err != nil {
+		return ErrUnauthenticated
+	}
+	workspaceID, err = parseUUID(workspaceID, ErrInvalidWorkspaceID)
+	if err != nil {
+		return ErrInvalidWorkspaceID
+	}
+	repositoryID, err = parseUUID(repositoryID, ErrInvalidRepositoryID)
+	if err != nil {
+		return ErrInvalidRepositoryID
+	}
+	return s.withWriteTransaction(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveUser(ctx, tx, s.driver, actorID); err != nil {
+			return err
+		}
+		role, err := activeWorkspaceRole(ctx, tx, s.driver, workspaceID, actorID)
+		if err != nil {
+			return err
+		}
+		if role != workspaces.RoleOwner && role != workspaces.RoleAdministrator {
+			return ErrForbidden
+		}
+		if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, format); err != nil {
+			return err
+		}
+		return operation(tx, actorID)
+	})
+}
+
+// RecordAudit appends one succeeded audit event inside the caller's
+// transaction.
+func RecordAudit(ctx context.Context, tx *sql.Tx, driver config.DatabaseDriver, actorUserID, action, targetType, targetID string) error {
+	return recordAudit(ctx, tx, driver, actorUserID, action, targetType, targetID)
 }

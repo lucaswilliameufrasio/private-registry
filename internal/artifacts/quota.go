@@ -10,8 +10,8 @@ import (
 // installation lock. Upload-session insertion is the reservation; rejected or
 // expired sessions release it, while uploaded and published sessions retain it.
 // Workspace accounting also includes the implemented Go, Cargo, npm and Pub
-// catalog entries and their applicable reservations. Other formats are not yet
-// covered.
+// catalog entries and their applicable reservations, and OCI blobs and
+// manifests.
 func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID, repositoryID string, size int64) error {
 	if size == 0 {
 		return nil
@@ -25,7 +25,7 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 	}
 	// Each published Go version owns its ZIP and separately served go.mod.
 	// Count both logical references, even when physical objects are shared.
-	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved, pubUsage, pubReserved int64
+	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved, pubUsage, pubReserved, ociUsage int64
 	if workspaceLimit.Valid {
 		query = `SELECT COALESCE(SUM(zip_size + LENGTH(mod_bytes)), 0) FROM registry_go_module_versions WHERE workspace_id = ` + bind(s.driver, 1)
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&goUsage); err != nil || goUsage < 0 {
@@ -59,6 +59,16 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubReserved); err != nil || pubReserved < 0 {
 			return errors.New("workspace Pub quota reservations could not be checked")
 		}
+		var ociBlobs, ociManifests int64
+		query = `SELECT COALESCE(SUM(size_bytes), 0) FROM registry_oci_blobs WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&ociBlobs); err != nil || ociBlobs < 0 {
+			return errors.New("workspace OCI quota usage could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(LENGTH(content)), 0) FROM registry_oci_manifests WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&ociManifests); err != nil || ociManifests < 0 || ociManifests > (1<<62)-ociBlobs {
+			return errors.New("workspace OCI quota usage could not be checked")
+		}
+		ociUsage = ociBlobs + ociManifests
 	}
 	for _, limit := range []struct {
 		value      sql.NullInt64
@@ -106,6 +116,9 @@ func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID
 			return ErrLogicalQuotaExceeded
 		}
 		if !limit.repository && pubReserved > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved-pubUsage {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && ociUsage > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved-pubUsage-pubReserved {
 			return ErrLogicalQuotaExceeded
 		}
 	}

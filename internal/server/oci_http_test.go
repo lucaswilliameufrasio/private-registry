@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"private-registry/internal/artifacts"
 	"private-registry/internal/config"
 	"private-registry/internal/oci"
 	"private-registry/internal/repositories"
@@ -483,5 +485,135 @@ func TestOCIRoutesAndRepositoriesRequireOptIn(t *testing.T) {
 		if _, err := fixture.repositoryService.CreateWithFormat(context.Background(), owner, workspace.ID, "r-"+string(format), "r", format); err == nil {
 			t.Errorf("%s repository created while its adapter is disabled", format)
 		}
+	}
+}
+
+func TestOCIManagementRequiresWorkspaceManager(t *testing.T) {
+	f := newOCIHTTPFixture(t)
+	image := f.name(f.repository, "team/app")
+	configBlob := []byte(`{"os":"linux"}`)
+	f.pushBlob(t, f.repository, f.write, configBlob)
+	manifest := ociImageManifest(configBlob)
+	digest := ociDigest(manifest)
+	if response := f.do(http.MethodPut, image+"/manifests/v1", f.write, oci.MediaTypeOCIManifest, manifest); response.Code != http.StatusCreated {
+		t.Fatalf("manifest push: %d", response.Code)
+	}
+	base := "/api/v1/workspaces/" + f.workspace + "/repositories/" + f.repository
+	admin := muiraAdminMFACookies(t, f.handler)
+	manage := func(cookies map[string]*http.Cookie, method, path, body string) *httptest.ResponseRecorder {
+		csrf := ""
+		if cookies[csrfCookieName] != nil {
+			csrf = cookies[csrfCookieName].Value
+		}
+		return authHTTPRequestWithCookies(f.handler, method, path, body, authTestOrigin, "registry.example", cookies, csrf)
+	}
+
+	// A member with publisher and reader grants cannot manage the repository.
+	memberID := seedHTTPUser(t, f.authHTTPFixture, "oci.publisher")
+	if err := f.workspaceService.SetMembershipRole(context.Background(), f.owner, f.workspace, memberID, "member"); err != nil {
+		t.Fatal(err)
+	}
+	f.tokens(t, memberID, f.repository)
+	login := authHTTPRequest(f.handler, http.MethodPost, "/api/v1/auth/login", `{"login_name":"oci.publisher","password":"synthetic-http-member-password"}`, authTestOrigin, "registry.example")
+	member := assertSessionCookies(t, login)
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"read policy":     manage(member, http.MethodGet, base+"/oci-policy", ""),
+		"delete tag":      manage(member, http.MethodDelete, base+"/oci-tags/v1?image=team/app", ""),
+		"delete manifest": manage(member, http.MethodDelete, base+"/oci-manifests/"+digest, ""),
+	} {
+		if response.Code != http.StatusForbidden {
+			t.Errorf("publisher %s: %d %s", name, response.Code, response.Body.String())
+		}
+	}
+	if response := authHTTPRequestWithCookies(f.handler, http.MethodPut, base+"/oci-policy", `{"immutable_tags":true,"expected_revision":0}`, authTestOrigin, "registry.example", admin, ""); response.Code != http.StatusForbidden {
+		t.Fatalf("policy change without CSRF: %d", response.Code)
+	}
+	if response := manage(admin, http.MethodPut, base+"/oci-policy", `{"immutable_tags":true}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("policy change without revision: %d", response.Code)
+	}
+	if response := manage(admin, http.MethodPut, base+"/oci-policy", `{"immutable_tags":true,"expected_revision":0}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"revision":1`) {
+		t.Fatalf("enable immutable tags: %d %s", response.Code, response.Body.String())
+	}
+	if response := manage(admin, http.MethodPut, base+"/oci-policy", `{"immutable_tags":false,"expected_revision":0}`); response.Code != http.StatusConflict {
+		t.Fatalf("stale policy change: %d", response.Code)
+	}
+
+	// Through the protocol, the immutable tag cannot move.
+	f.pushBlob(t, f.repository, f.write, []byte(`{"os":"windows"}`))
+	moved := ociImageManifest([]byte(`{"os":"windows"}`))
+	if response := f.do(http.MethodPut, image+"/manifests/v1", f.write, oci.MediaTypeOCIManifest, moved); response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "immutable") {
+		t.Fatalf("immutable tag moved through the protocol: %d %s", response.Code, response.Body.String())
+	}
+
+	// Retiring the tag is an explicit management action.
+	if response := manage(admin, http.MethodDelete, base+"/oci-tags/v1?image=team/app", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("delete tag: %d %s", response.Code, response.Body.String())
+	}
+	if response := f.do(http.MethodGet, image+"/manifests/v1", f.read, "", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("deleted tag still resolves: %d", response.Code)
+	}
+	if response := manage(admin, http.MethodDelete, base+"/oci-manifests/"+digest, ""); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"removed_tags":0`) {
+		t.Fatalf("delete manifest: %d %s", response.Code, response.Body.String())
+	}
+	if response := f.do(http.MethodGet, image+"/manifests/"+digest, f.read, "", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("deleted manifest still resolves: %d", response.Code)
+	}
+	if response := manage(admin, http.MethodDelete, base+"/oci-manifests/sha256:nothex", ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid digest: %d", response.Code)
+	}
+	// Protocol DELETE stays unsupported: tokens never remove content.
+	if response := f.do(http.MethodDelete, image+"/manifests/"+digest, f.write, "", nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("protocol delete: %d", response.Code)
+	}
+}
+
+func TestOCIProtocolReportsQuota(t *testing.T) {
+	f := newOCIHTTPFixture(t)
+	limit := int64(64)
+	if _, err := f.repositoryService.SetLogicalQuotaPolicy(context.Background(), f.owner, f.workspace, f.repository, 0, &limit); err != nil {
+		t.Fatal(err)
+	}
+	image := f.name(f.repository, "app")
+	content := bytes.Repeat([]byte("q"), 128)
+	response := f.do(http.MethodPost, image+"/blobs/uploads/?digest="+ociDigest(content), f.write, "application/octet-stream", content)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "quota") {
+		t.Fatalf("over-quota blob: %d %s", response.Code, response.Body.String())
+	}
+	if response := f.do(http.MethodHead, image+"/blobs/"+ociDigest(content), f.read, "", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("over-quota blob visible: %d", response.Code)
+	}
+}
+
+// OCI bytes count against the workspace quota shared with every format.
+func TestOCIUsageCountsAgainstTheWorkspaceQuota(t *testing.T) {
+	f := newOCIHTTPFixture(t)
+	ctx := context.Background()
+	limit := int64(300)
+	if _, err := f.repositoryService.SetLogicalQuotaPolicy(ctx, f.owner, f.workspace, "", 0, &limit); err != nil {
+		t.Fatal(err)
+	}
+	f.pushBlob(t, f.repository, f.write, bytes.Repeat([]byte("o"), 200))
+	generic, err := f.repositoryService.Create(ctx, f.owner, f.workspace, "files", "Files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repositoryService.GrantRepositoryRole(ctx, f.owner, f.workspace, generic.ID, f.owner, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	upload := func(size int64) error {
+		content := bytes.Repeat([]byte("g"), int(size))
+		_, err := f.artifactService.StartUpload(ctx, f.owner, f.workspace, generic.ID, artifacts.StartUploadRequest{Collection: "tools", Version: fmt.Sprintf("1.0.%d", size), Path: "tool.bin", ContentType: "application/octet-stream", Size: size, SHA256: strings.TrimPrefix(ociDigest(content), "sha256:")})
+		return err
+	}
+	if err := upload(150); !errors.Is(err, artifacts.ErrLogicalQuotaExceeded) {
+		t.Fatalf("generic upload ignored OCI usage: %v", err)
+	}
+	if err := upload(50); err != nil {
+		t.Fatalf("generic upload within the remaining quota: %v", err)
+	}
+	// And the reverse: generic reservations count against OCI pushes.
+	response := f.do(http.MethodPost, f.name(f.repository, "app")+"/blobs/uploads/?digest="+ociDigest(bytes.Repeat([]byte("p"), 100)), f.write, "application/octet-stream", bytes.Repeat([]byte("p"), 100))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("OCI push ignored generic usage: %d", response.Code)
 	}
 }

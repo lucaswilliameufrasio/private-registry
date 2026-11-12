@@ -200,6 +200,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		TrustedProxies:         cfg.TrustedProxies,
 		GoModules:              goModules,
 	}
+	var ociCollector *oci.Service
 	// A repository of an opt-in format can only be created while its
 	// protocol adapter is served by this process.
 	var enabledFormats []repositories.Format
@@ -264,6 +265,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 			return err
 		}
 		httpConfig.OCI = ociService
+		ociCollector = ociService
 		enabledFormats = append(enabledFormats, repositories.FormatOCI)
 	}
 	if cfg.ExperimentalPub {
@@ -338,6 +340,13 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 			worker.Run(workerCtx, logger)
 		}()
 	}
+	if ociCollector != nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			runOCICollection(workerCtx, ociCollector, logger)
+		}()
+	}
 	go func() {
 		defer close(workerDone)
 		workers.Wait()
@@ -371,6 +380,36 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	}
 	logger.Info("registry HTTP server stopped")
 	return nil
+}
+
+const (
+	ociCollectionInterval = time.Hour
+	// ociCollectionGrace keeps blobs of a push that has not uploaded its
+	// manifest yet. Clients finish pushes in minutes; a day is generous.
+	ociCollectionGrace = 24 * time.Hour
+)
+
+// runOCICollection drops OCI blob membership no manifest references. It runs
+// hourly and once shortly after start.
+func runOCICollection(ctx context.Context, service *oci.Service, logger *slog.Logger) {
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			removed, err := service.CollectUnreferencedBlobs(runCtx, time.Now(), ociCollectionGrace)
+			cancel()
+			if err != nil {
+				logger.Warn("OCI blob collection failed", "error", err)
+			} else if removed > 0 {
+				logger.Info("OCI blob collection released unreferenced blobs", "blobs", removed)
+			}
+			timer.Reset(ociCollectionInterval)
+		}
+	}
 }
 
 // openObjectStore selects the package object backend. The S3-compatible

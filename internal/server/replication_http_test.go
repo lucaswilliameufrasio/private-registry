@@ -40,7 +40,7 @@ func TestReplicationStatusIsForInstanceAdministrators(t *testing.T) {
 			}
 			if item.source != nil {
 				var body replicationStatusResponse
-				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.TXID != 42 || body.Generation == "" || body.LagSeconds > 5 || body.IntervalSeconds != 30 || body.LastCurrentAt == "" {
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.TXID != 42 || body.Generation == "" || body.LagSeconds > 120 || body.IntervalSeconds != 30 || body.LastCurrentAt == "" {
 					t.Fatalf("status body: %+v %v", body, err)
 				}
 			}

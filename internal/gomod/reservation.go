@@ -197,8 +197,8 @@ func (s *Service) checkReservationQuota(ctx context.Context, tx *sql.Tx, workspa
 			return ErrQuotaExceeded
 		}
 		remaining -= size
-		for _, table := range []string{"registry_generic_upload_sessions", "registry_go_module_versions", "registry_go_upload_sessions", "registry_cargo_versions", "registry_cargo_reservations", "registry_npm_versions", "registry_npm_reservations", "registry_pub_versions", "registry_pub_reservations"} {
-			if limit.repository && (table == "registry_generic_upload_sessions" || table == "registry_cargo_versions" || table == "registry_cargo_reservations" || table == "registry_npm_versions" || table == "registry_npm_reservations" || table == "registry_pub_versions" || table == "registry_pub_reservations") {
+		for _, table := range []string{"registry_generic_upload_sessions", "registry_go_module_versions", "registry_go_upload_sessions", "registry_cargo_versions", "registry_cargo_reservations", "registry_npm_versions", "registry_npm_reservations", "registry_pub_versions", "registry_pub_reservations", "registry_oci_blobs", "registry_oci_manifests"} {
+			if limit.repository && (table == "registry_oci_blobs" || table == "registry_oci_manifests" || table == "registry_generic_upload_sessions" || table == "registry_cargo_versions" || table == "registry_cargo_reservations" || table == "registry_npm_versions" || table == "registry_npm_reservations" || table == "registry_pub_versions" || table == "registry_pub_reservations") {
 				continue
 			}
 			expression, condition := "zip_size + LENGTH(mod_bytes)", ""
@@ -216,6 +216,10 @@ func (s *Service) checkReservationQuota(ctx context.Context, tx *sql.Tx, workspa
 				expression = "tarball_size"
 			} else if table == "registry_pub_reservations" {
 				expression, condition = "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_pub_publications p WHERE p.reservation_id = registry_pub_reservations.reservation_id)"
+			} else if table == "registry_oci_blobs" {
+				expression = "size_bytes"
+			} else if table == "registry_oci_manifests" {
+				expression = "LENGTH(content)"
 			} else if table == "registry_npm_reservations" {
 				expression, condition = "tarball_size", " AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)"
 			}

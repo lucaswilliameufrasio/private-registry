@@ -390,7 +390,23 @@ func uploadError(err error) error {
 
 func (s *Service) recordBlob(ctx context.Context, principal Principal, workspace, repository, digest string, size int64) error {
 	err := s.repos.WithOCIWriteTokenTransaction(ctx, principal.bearer, workspace, repository, func(tx *sql.Tx, user string) error {
-		query := `INSERT INTO registry_oci_blobs (repository_id, workspace_id, digest, size_bytes, created_by, created_at_ms) VALUES (` + s.binds(6) + `) ON CONFLICT (repository_id, digest) DO NOTHING`
+		var present bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_blobs WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, digest).Scan(&present); err != nil {
+			return ErrUnavailable
+		}
+		if present {
+			// Re-uploading a blob the repository holds costs nothing, and
+			// resets its collection clock so a slow push keeps it.
+			_, err := tx.ExecContext(ctx, `UPDATE registry_oci_blobs SET created_at_ms = `+s.bind(1)+` WHERE repository_id = `+s.bind(2)+` AND digest = `+s.bind(3), time.Now().UTC().UnixMilli(), repository, digest)
+			if err != nil {
+				return ErrUnavailable
+			}
+			return nil
+		}
+		if err := s.checkQuota(ctx, tx, workspace, repository, size); err != nil {
+			return err
+		}
+		query := `INSERT INTO registry_oci_blobs (repository_id, workspace_id, digest, size_bytes, created_by, created_at_ms) VALUES (` + s.binds(6) + `)`
 		if _, err := tx.ExecContext(ctx, query, repository, workspace, digest, size, user, time.Now().UTC().UnixMilli()); err != nil {
 			return ErrUnavailable
 		}
@@ -405,7 +421,7 @@ func writeError(err error) error {
 		return nil
 	case errors.Is(err, repositories.ErrOCIWriteTokenUnavailable):
 		return ErrUnauthorized
-	case errors.Is(err, ErrManifestBlob), errors.Is(err, ErrManifestInvalid), errors.Is(err, ErrDigestInvalid):
+	case errors.Is(err, ErrManifestBlob), errors.Is(err, ErrManifestInvalid), errors.Is(err, ErrDigestInvalid), errors.Is(err, ErrQuota), errors.Is(err, ErrTagImmutable):
 		return err
 	default:
 		return ErrUnavailable
@@ -543,9 +559,34 @@ func (s *Service) PutManifest(ctx context.Context, principal Principal, workspac
 			}
 		}
 		now := time.Now().UTC().UnixMilli()
-		query := `INSERT INTO registry_oci_manifests (repository_id, workspace_id, digest, media_type, content, created_by, created_at_ms) VALUES (` + s.binds(7) + `) ON CONFLICT (repository_id, digest) DO NOTHING`
-		if _, err := tx.ExecContext(ctx, query, repository, workspace, digest, mediaType, body, user, now); err != nil {
+		var known bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_manifests WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, digest).Scan(&known); err != nil {
 			return ErrUnavailable
+		}
+		if !known {
+			if err := s.checkQuota(ctx, tx, workspace, repository, int64(len(body))); err != nil {
+				return err
+			}
+			query := `INSERT INTO registry_oci_manifests (repository_id, workspace_id, digest, media_type, content, created_by, created_at_ms) VALUES (` + s.binds(7) + `)`
+			if _, err := tx.ExecContext(ctx, query, repository, workspace, digest, mediaType, body, user, now); err != nil {
+				return ErrUnavailable
+			}
+		}
+		if tag != "" {
+			policy, err := s.readPolicy(ctx, tx, repository)
+			if err != nil {
+				return err
+			}
+			if policy.ImmutableTags {
+				var current string
+				err := tx.QueryRowContext(ctx, `SELECT manifest_digest FROM registry_oci_tags WHERE repository_id = `+s.bind(1)+` AND image_name = `+s.bind(2)+` AND tag = `+s.bind(3), repository, image, tag).Scan(&current)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return ErrUnavailable
+				}
+				if err == nil && current != digest {
+					return ErrTagImmutable
+				}
+			}
 		}
 		for kind, targets := range map[string][]string{"blob": blobs, "manifest": children} {
 			for _, target := range targets {

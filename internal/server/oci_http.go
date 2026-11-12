@@ -118,6 +118,10 @@ func writeOCIServiceError(response http.ResponseWriter, err error) {
 		ociError(response, http.StatusRequestedRangeNotSatisfiable, "BLOB_UPLOAD_INVALID", "upload chunk is out of order")
 	case errors.Is(err, oci.ErrTooLarge):
 		ociError(response, http.StatusRequestEntityTooLarge, "SIZE_INVALID", "content exceeds the size limit")
+	case errors.Is(err, oci.ErrQuota):
+		ociError(response, http.StatusForbidden, "DENIED", "logical quota exceeded")
+	case errors.Is(err, oci.ErrTagImmutable):
+		ociError(response, http.StatusForbidden, "DENIED", "tag is immutable in this repository")
 	case errors.Is(err, oci.ErrBusy):
 		ociError(response, http.StatusTooManyRequests, "TOOMANYREQUESTS", "upload capacity temporarily full")
 	default:

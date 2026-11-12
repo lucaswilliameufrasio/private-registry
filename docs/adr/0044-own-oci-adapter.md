@@ -21,10 +21,17 @@ Implementar o protocolo OCI Distribution dentro do registry (`internal/oci`, rot
 - **Formato `oci`** entra no CHECK de `registry_repositories` (migration v41, rebuild dedicado no SQLite) e as tabelas na v42.
 - Repositórios de formatos opt-in (`cargo`, `npm`, `pub`, `oci`) agora podem ser criados pela API **somente** quando o adapter correspondente está habilitado no processo.
 
+## Ciclo de vida (2026-11-12, migration v43)
+
+- **Quota lógica.** Blobs (uma vez por repositório em que aparecem) e documentos de manifest contam contra os tetos de repositório e workspace do ADR 0018, na mesma transação que revalida o token. Os demais formatos também passam a contar o uso OCI no teto do workspace. Reenviar um blob que o repositório já tem não é cobrado de novo. Bytes em staging de upload não são reservados: o teto é aplicado ao concluir o blob. Excesso responde `403 DENIED` pelo protocolo.
+- **Tags imutáveis**, por repositório: `GET`/`PUT /api/v1/workspaces/{w}/repositories/{r}/oci-policy` com `immutable_tags` e `expected_revision` (revisão otimista; 0 é "nunca configurado"). Com a opção ligada, mover uma tag para outro digest responde `403 DENIED`; reenviar o mesmo digest e criar tags novas continuam permitidos. Ligar a opção não altera tags existentes.
+- **Exclusão** pela API de gestão, nunca pelo protocolo (`DELETE` de `/v2/` segue 405, porque token de escrita não remove conteúdo): `DELETE .../oci-tags/{tag}?image=<nome>` e `DELETE .../oci-manifests/{digest}`, que remove também as tags do repositório que apontam para ele e recusa (`409 manifest_in_use`) um manifest listado por um índice. Exige owner ou administrador do workspace, CSRF e MFA recente, e é auditado. Uma tag imutável pode ser retirada assim.
+- **Coleta.** A cada hora o `serve` remove a pertença de blobs que nenhum manifest do repositório referencia e que têm mais de 24 h (carência para pushes em andamento, que enviam blobs antes do manifest; reenviar um blob reinicia a carência). Isso libera quota e acesso. **O objeto armazenado não é apagado**: ele pode ser compartilhado com outros formatos do workspace pela deduplicação, e apagar com segurança exige leases que ainda não existem.
+
 ## Limites conhecidos
 
-- **Sem revisão humana, quota lógica, reserva de identidade ou imutabilidade de tag** para OCI: tags são mutáveis; digests são imutáveis. O plano da v1 exige esses controles; esta entrega não os cumpre.
-- **Sem exclusão e sem GC:** `DELETE` responde 405; blobs não referenciados e objetos de uploads cujo commit falhou ficam órfãos no object store.
+- **Sem revisão humana nem reserva de identidade** para OCI. O plano da v1 exige esses controles.
+- **Espaço físico não é recuperado:** a coleta só remove a pertença lógica; os objetos ficam no object store.
 - **Sem backup/recovery:** nenhum conjunto de recuperação captura blobs OCI; toda preparação de recovery recusa uma instalação que tenha conteúdo OCI.
 - **Sem mount entre repositórios** (o cliente recebe uma sessão de upload comum) e **sem API de referrers** (404; clientes usam o esquema de tag de fallback). `_catalog` não existe.
 - **Tamanho de blob** limitado por `REGISTRY_MAX_UPLOAD_BYTES` (teto 1 GiB); layers maiores são recusadas. O staging pode ocupar até `sessões × limite` (sessões = 4 × `REGISTRY_MAX_CONCURRENT_UPLOADS`, máximo 64).

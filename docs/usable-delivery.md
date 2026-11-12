@@ -1,6 +1,6 @@
 # Entrega utilizável — Cargo, npm, Pub e OCI
 
-**Atualizado:** 11/11/2026 · **Schema:** v42
+**Atualizado:** 12/11/2026 · **Schema:** v43
 
 Esta é a primeira entrega pensada para uso experimental de ponta a ponta. Ela **não é a v1** descrita em [development-plan.md](development-plan.md): o escopo foi reduzido por decisão do proprietário para quatro formatos, storage em objeto e login opcional via Muira. O que continua faltando para a v1 está em [O que esta entrega não cobre](#o-que-esta-entrega-não-cobre) e no [roadmap](roadmap.md).
 
@@ -155,14 +155,16 @@ oras login registry.example.com -u token --password-stdin <<< "$OCI_WRITE_TOKEN"
 oras push registry.example.com/<workspace>/<repository>/time/app:v1 ./arquivo
 ```
 
-O usuário é ignorado; a senha é o token. Para pull, use o token pessoal de leitura. `docker login` aceita qualquer senha (o `/v2/` não tem como validar token por repositório); o erro aparece no primeiro push/pull.
+O usuário é ignorado; a senha é o token. Para pull, use o token pessoal de leitura.
+
+Owners e administradores do workspace gerenciam o repositório pela API (CSRF e MFA recente): `PUT .../oci-policy` liga tags imutáveis, `DELETE .../oci-tags/{tag}?image=<nome>` remove uma tag e `DELETE .../oci-manifests/{digest}` remove um manifest e suas tags. A quota lógica do repositório e do workspace também vale para OCI. Blobs sem manifest são liberados depois de 24 h. `docker login` aceita qualquer senha (o `/v2/` não tem como validar token por repositório); o erro aparece no primeiro push/pull.
 
 ## O que esta entrega não cobre
 
 Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 
 - **Backup além do disaster recovery.** O banco SQLite tem replicação contínua e restore (seção acima), mas não há backup cifrado independente, retenção longa, verificador externo nem cobertura para PostgreSQL. As peças internas de inventário e recovery isolado continuam sem comando de operador e marcam o resultado como `RECOVERY_INCOMPLETE`; para OCI elas recusam a instalação.
-- **OCI:** sem revisão humana, quota, exclusão, GC, mount, referrers; tags mutáveis; Docker/containerd não comprovados; blob limitado a 1 GiB.
+- **OCI:** sem revisão humana, mount e referrers; a coleta libera quota mas não apaga objetos armazenados; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real, sem multipart, sem GC de órfãos, sem migração entre drivers.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
 - **Sem UI, convites, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**

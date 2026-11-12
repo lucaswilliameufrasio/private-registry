@@ -406,6 +406,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 		router.Post("/api/v1/workspaces/{workspaceID}/repositories/{repositoryID}/oci-write-tokens", h.issueOCIWriteToken)
 		router.Get("/api/v1/oci-write-tokens", h.listOCIWriteTokens)
 		router.Delete("/api/v1/oci-write-tokens/{tokenID}", h.revokeOCIWriteToken)
+		h.registerOCIManagementRoutes(router)
 	}
 	if h.pubReadProtocol {
 		h.registerPubReadRoutes(router)
