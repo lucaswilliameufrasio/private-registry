@@ -63,6 +63,7 @@ Registry privado self-hosted em desenvolvimento. A fundação contém migrations
 - [ADR 0048: backups completos cifrados](docs/adr/0048-encrypted-installation-backups.md)
 - [ADR 0049: contas de serviço e trusted publishing](docs/adr/0049-service-accounts-and-trusted-publishing.md)
 - [ADR 0050: recuperação de conta](docs/adr/0050-account-recovery.md)
+- [ADR 0051: passkeys](docs/adr/0051-passkeys.md)
 - [Entrega utilizável: guia de operação e limites](docs/usable-delivery.md)
 
 O plano, o roadmap e o progresso de implementação também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md`, `plans/roadmap.md` e `plans/implementation-progress.md`.

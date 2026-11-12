@@ -140,6 +140,10 @@ Para reconstruir um host perdido:
 
 Perde-se o que foi escrito depois do último envio, e o que foi revogado depois desse ponto precisa ser revogado de novo. Acompanhe `GET /api/v1/admin/replication` (campo `health` diferente de `current` pede atenção) ou os logs: cada ciclo que falha gera `WARN`, e a partir da terceira falha seguida, `ERROR`.
 
+### Passkeys
+
+Com uma sessão (e MFA recente, se a conta já tiver segundo fator), `POST /api/v1/auth/passkeys/registration/start` com `{"name":"..."}` devolve as opções para `navigator.credentials.create`; o resultado vai para `.../registration/finish`. Para entrar sem senha: `.../login/start` e `.../login/finish` com o resultado de `navigator.credentials.get`. A verificação do usuário (PIN/biometria) é obrigatória e a sessão já sai com MFA. Detalhes no [ADR 0051](adr/0051-passkeys.md).
+
 ### Quando alguém perde o acesso
 
 - Primeiro, os códigos de recuperação de MFA.
@@ -225,7 +229,7 @@ Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 - **OCI:** sem mount e referrers; objetos armazenados só são apagados pela coleta offline; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real e sem multipart; migração e coleta de órfãos só offline.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
-- **Sem UI, email, passkeys e SCIM contínuo;** trusted publishing só para GitHub Actions.
+- **Sem UI, email e SCIM contínuo;** trusted publishing só para GitHub Actions; passkeys não testadas em navegador real.
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
 

@@ -129,6 +129,42 @@ func (s *Store) Create(ctx context.Context, userID string, level Level) (credent
 	return credentials, nil
 }
 
+// CreateVerified opens a fully authenticated session for a sign-in that
+// proved both factors at once, such as a passkey with user verification. It is
+// never for a password alone.
+func (s *Store) CreateVerified(ctx context.Context, userID string) (credentials Credentials, retErr error) {
+	if err := s.validate(); err != nil {
+		return Credentials{}, err
+	}
+	if ctx == nil {
+		return Credentials{}, ErrServiceUnavailable
+	}
+	normalizedUserID, err := normalizeUserID(userID)
+	if err != nil {
+		return Credentials{}, err
+	}
+	now := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Credentials{}, ErrSessionStorage
+	}
+	defer rollbackTransaction(tx, &retErr)
+	if err := lockActiveUser(ctx, tx, s.driver, normalizedUserID); err != nil {
+		return Credentials{}, err
+	}
+	credentials, err = s.createInTransaction(ctx, tx, normalizedUserID, LevelMFA, now)
+	if err != nil {
+		return Credentials{}, err
+	}
+	if err := recordAudit(ctx, tx, s.driver, normalizedUserID, "session.created.verified", "session", credentials.Session.ID, now); err != nil {
+		return Credentials{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Credentials{}, ErrSessionStorage
+	}
+	return credentials, nil
+}
+
 // Validate checks that the bearer is active, the account is active, and the
 // session is within both expiry limits. Successful requests extend only the
 // inactivity deadline, never the absolute deadline.

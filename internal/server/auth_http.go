@@ -302,6 +302,12 @@ func NewHandler(
 		return nil, errors.New("Pub write protocol requires Pub read protocol services")
 	}
 
+	// Passkeys are bound to the canonical origin, the relying party.
+	if !service.PasskeysEnabled() {
+		if err := service.EnablePasskeys(canonicalOrigin); err != nil && !errors.Is(err, auth.ErrPasskeysDisabled) {
+			return nil, err
+		}
+	}
 	router := chi.NewRouter()
 	health.registerRoutes(router)
 	authentication := &authHTTP{
@@ -376,6 +382,9 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	h.registerInvitationRoutes(router)
 	h.registerServiceAccountRoutes(router)
 	h.registerRecoveryRoutes(router)
+	if h.service.PasskeysEnabled() {
+		h.registerPasskeyRoutes(router)
+	}
 	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
 	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
 	router.Get("/api/v1/admin/jobs/recovery", h.listRecoveryJobs)

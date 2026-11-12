@@ -15,6 +15,8 @@ import (
 	"private-registry/internal/password"
 	"private-registry/internal/secrets"
 	"private-registry/internal/sessions"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 const (
@@ -70,6 +72,7 @@ type Service struct {
 	verify   func(string, []byte) bool
 	key      *secrets.MasterKey
 	muira    *muiraLogin
+	passkeys *webauthn.WebAuthn
 }
 
 var passwordHashAdmission = make(chan struct{}, maxConcurrentPasswordChecks)
