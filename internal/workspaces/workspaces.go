@@ -340,6 +340,18 @@ func (s *Service) SetMembershipRole(
 		if err := requireActiveUser(ctx, tx, s.driver, targetID); err != nil {
 			return ErrUserUnavailable
 		}
+		// A service account belongs to one workspace and never manages it.
+		if service, err := isServiceAccount(ctx, tx, s, targetID); err != nil {
+			return errors.New("service account could not be checked")
+		} else if service {
+			var home string
+			if err := tx.QueryRowContext(ctx, `SELECT workspace_id FROM registry_service_accounts WHERE user_id = `+bind(s.driver, 1), targetID).Scan(&home); err != nil {
+				return errors.New("service account could not be checked")
+			}
+			if home != workspaceID || targetRole != RoleMember {
+				return ErrServiceAccountRole
+			}
+		}
 
 		currentRole, currentStatus, membershipExists, err := readMembership(ctx, tx, s.driver, workspaceID, targetID)
 		if err != nil {

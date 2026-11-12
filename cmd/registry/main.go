@@ -45,6 +45,7 @@ import (
 	"private-registry/internal/secrets"
 	"private-registry/internal/server"
 	"private-registry/internal/storage"
+	"private-registry/internal/trustedpub"
 	"private-registry/internal/workspaces"
 )
 
@@ -319,6 +320,28 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	}
 	if err := repositoryService.EnableFormatCreation(enabledFormats...); err != nil {
 		return err
+	}
+	if cfg.TrustedPublishing.Enabled {
+		roots, err := loadCertificatePool(cfg.TrustedPublishing.CAFile)
+		if err != nil {
+			return errors.New("trusted publishing CA file is missing or contains no certificates")
+		}
+		destinations := []egress.Destination{{Origin: cfg.TrustedPublishing.Issuer, CIDRs: cfg.TrustedPublishing.AllowedNetworks}}
+		client, err := egress.NewHTTPSClient(destinations, roots)
+		if cfg.TrustedPublishing.DNSServer.IsValid() {
+			client, err = egress.NewHTTPSClientWithDNS(destinations, roots, cfg.TrustedPublishing.DNSServer)
+		}
+		if err != nil {
+			return errors.New("trusted publishing network policy is invalid")
+		}
+		client.Timeout = 15 * time.Second
+		// The audience is this registry, so a token minted for another
+		// service cannot be replayed here.
+		trusted, err := trustedpub.New(db, cfg.DatabaseDriver, repositoryService, cfg.TrustedPublishing.Issuer, strings.TrimSuffix(cfg.CanonicalOrigin, "/"), client)
+		if err != nil {
+			return err
+		}
+		httpConfig.TrustedPublishing = trusted
 	}
 	var replicator *replication.Replicator
 	if cfg.Replication.Enabled {

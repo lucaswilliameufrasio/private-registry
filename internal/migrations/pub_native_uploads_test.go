@@ -46,12 +46,14 @@ func exercisePubNativeUploadMigration(t *testing.T, ctx context.Context, db *sql
 	delete(old, "sql/postgres/000043_oci_policies.sql")
 	delete(old, "sql/sqlite/000044_invitations_and_oci_review.sql")
 	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
+	delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
+	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 39 {
 		t.Fatalf("prepare v39 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 44 || len(report.AppliedVersions) != 5 || report.AppliedVersions[0] != 40 || report.AppliedVersions[1] != 41 || report.AppliedVersions[2] != 42 || report.AppliedVersions[3] != 43 || report.AppliedVersions[4] != 44 {
+		if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 6 || report.AppliedVersions[0] != 40 || report.AppliedVersions[1] != 41 || report.AppliedVersions[2] != 42 || report.AppliedVersions[3] != 43 || report.AppliedVersions[4] != 44 || report.AppliedVersions[5] != 45 {
 			t.Fatalf("v40 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

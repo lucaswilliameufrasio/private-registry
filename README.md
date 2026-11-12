@@ -2,7 +2,7 @@
 
 Registry privado self-hosted em desenvolvimento. A fundação contém migrations explícitas de identidade/tenancy/MFA/sessões, autenticação local e rotas HTTP protegidas para workspaces, memberships, metadados/configuração de repositórios e gestão de grants explícitos. **Ainda não há UI, passkeys, convites ou adapters produtivos. O serving genérico privado e público é parcial; não há suporte anunciado aos sete formatos.** Fase 1 permanece incompleta e não há servidor utilizável, release ou suporte anunciado a protocolos. O repositório permanece privado, sem licença definida.
 
-**Entrega utilizável (11/11/2026):** Cargo, npm, Pub e OCI podem ser habilitados no `serve` por opt-in, com storage em filesystem ou S3 compatível e login local ou, opcionalmente, via Muira. O guia de operação, as provas com clientes reais e os limites (OCI só comprovado com ORAS; R2/B2, Muira e Docker reais não validados) estão em [docs/usable-delivery.md](docs/usable-delivery.md). O schema atual é a v44. Isso não é a v1 do plano; os parágrafos abaixo são histórico anterior a esta entrega e prevalece o guia onde houver divergência.
+**Entrega utilizável (11/11/2026):** Cargo, npm, Pub e OCI podem ser habilitados no `serve` por opt-in, com storage em filesystem ou S3 compatível e login local ou, opcionalmente, via Muira. O guia de operação, as provas com clientes reais e os limites (OCI só comprovado com ORAS; R2/B2, Muira e Docker reais não validados) estão em [docs/usable-delivery.md](docs/usable-delivery.md). O schema atual é a v45. Isso não é a v1 do plano; os parágrafos abaixo são histórico anterior a esta entrega e prevalece o guia onde houver divergência.
 
 **Atualização de schema:** a migration atual é a v32. Ela inclui fundações experimentais de catálogo, credencial, reservas, recibos, revisão e publicação Cargo, além de catálogo, credenciais, reservas, recebimento, revisão, publicação e dist-tags npm ainda não expostos; os adapters Cargo e npm continuam opt-in e a API recusa a criação de repositórios Cargo e npm. O comando `serve` verifica o histórico e os checksums das migrations antes de abrir o listener, mas não executa migrations. Referências históricas abaixo a versões anteriores precedem essa atualização.
 
@@ -61,6 +61,7 @@ Registry privado self-hosted em desenvolvimento. A fundação contém migrations
 - [ADR 0046: convites de workspace](docs/adr/0046-workspace-invitations.md)
 - [ADR 0047: manutenção offline de objetos](docs/adr/0047-offline-object-maintenance.md)
 - [ADR 0048: backups completos cifrados](docs/adr/0048-encrypted-installation-backups.md)
+- [ADR 0049: contas de serviço e trusted publishing](docs/adr/0049-service-accounts-and-trusted-publishing.md)
 - [Entrega utilizável: guia de operação e limites](docs/usable-delivery.md)
 
 O plano, o roadmap e o progresso de implementação também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md`, `plans/roadmap.md` e `plans/implementation-progress.md`.

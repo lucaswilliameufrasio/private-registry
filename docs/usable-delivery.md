@@ -1,6 +1,6 @@
 # Entrega utilizável — Cargo, npm, Pub e OCI
 
-**Atualizado:** 12/11/2026 · **Schema:** v44
+**Atualizado:** 12/11/2026 · **Schema:** v45
 
 Esta é a primeira entrega pensada para uso experimental de ponta a ponta. Ela **não é a v1** descrita em [development-plan.md](development-plan.md): o escopo foi reduzido por decisão do proprietário para quatro formatos, storage em objeto e login opcional via Muira. O que continua faltando para a v1 está em [O que esta entrega não cobre](#o-que-esta-entrega-não-cobre) e no [roadmap](roadmap.md).
 
@@ -140,6 +140,24 @@ Para reconstruir um host perdido:
 
 Perde-se o que foi escrito depois do último envio, e o que foi revogado depois desse ponto precisa ser revogado de novo. Acompanhe `GET /api/v1/admin/replication` (campo `health` diferente de `current` pede atenção) ou os logs: cada ciclo que falha gera `WARN`, e a partir da terceira falha seguida, `ERROR`.
 
+### Publicação por CI
+
+Crie uma conta de serviço (`POST /api/v1/workspaces/{w}/service-accounts` com `{"description":"..."}`) e dê a ela os grants de repositório. Então:
+
+- **GitHub Actions, sem segredo:** ligue `REGISTRY_TRUSTED_PUBLISHING_GITHUB=true` (com `..._ALLOWED_NETWORKS` e `..._DNS_SERVER` para alcançar `token.actions.githubusercontent.com`) e registre `POST .../repositories/{r}/trusted-publishers` com `service_account_id`, `repository` (`dono/repo`), `ref` (`refs/heads/main` ou `refs/tags/v*`) e, se quiser, `environment`. No workflow, com `permissions: id-token: write`:
+
+  ```sh
+  ID_TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://registry.example.com" | jq -r .value)
+  curl -s https://registry.example.com/api/v1/trusted-publishing/github/exchange \
+    -H 'Content-Type: application/json' \
+    -d "{\"token\":\"$ID_TOKEN\",\"workspace_id\":\"$WS\",\"repository_id\":\"$REPO\"}"
+  ```
+
+  A resposta traz `write.bearer` (e `read.bearer` se a conta tiver leitura), válidos por 15 minutos.
+- **Outros CIs:** um manager emite tokens estáticos da conta em `POST .../service-accounts/{id}/tokens` (até 30 dias) e guarda como segredo do CI.
+
+Detalhes no [ADR 0049](adr/0049-service-accounts-and-trusted-publishing.md).
+
 ## Usando cada formato
 
 Em todos os casos: crie o repositório com o formato certo (`POST /api/v1/workspaces/{workspace}/repositories` com `"format": "cargo" | "npm" | "pub" | "oci"`, só aceito com o adapter habilitado), conceda `reader`/`publisher` explicitamente (membership não dá acesso) e emita os tokens. Leitura usa o **token pessoal de leitura** (`…/personal-read-tokens`); publicação usa o **token de escrita do formato** (`…/cargo-write-tokens`, `…/npm-write-tokens`, `…/pub-write-tokens`, `…/oci-write-tokens`). Tokens são por repositório, expiram em até 30 dias e aparecem uma única vez.
@@ -199,7 +217,7 @@ Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 - **OCI:** sem mount e referrers; objetos armazenados só são apagados pela coleta offline; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real e sem multipart; migração e coleta de órfãos só offline.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
-- **Sem UI, email, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**
+- **Sem UI, email, passkeys e SCIM contínuo;** trusted publishing só para GitHub Actions.
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
 

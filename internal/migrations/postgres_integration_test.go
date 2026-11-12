@@ -79,7 +79,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 			migrationErrors = append(migrationErrors, result.err)
 			continue
 		}
-		if result.report.CurrentVersion != 44 || result.report.TargetVersion != 44 || result.report.InstallationID == "" {
+		if result.report.CurrentVersion != 45 || result.report.TargetVersion != 45 || result.report.InstallationID == "" {
 			migrationErrors = append(migrationErrors, errors.New("unexpected concurrent PostgreSQL migration report"))
 			continue
 		}
@@ -88,7 +88,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		} else if result.report.InstallationID != installationID {
 			migrationErrors = append(migrationErrors, errors.New("concurrent migrations created different installation identities"))
 		}
-		if len(result.report.AppliedVersions) == 44 {
+		if len(result.report.AppliedVersions) == 45 {
 			first = result.report
 			appliedCount++
 		} else if len(result.report.AppliedVersions) != 0 {
@@ -98,7 +98,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 	if err := errors.Join(migrationErrors...); err != nil {
 		t.Fatal(err)
 	}
-	if appliedCount != 1 || first.CurrentVersion != 44 || first.TargetVersion != 44 || first.InstallationID == "" {
+	if appliedCount != 1 || first.CurrentVersion != 45 || first.TargetVersion != 45 || first.InstallationID == "" {
 		t.Fatalf("PostgreSQL advisory lock did not serialize migration callers: first=%+v applied=%d", first, appliedCount)
 	}
 	if err := VerifyCurrent(ctx, firstDB, config.Postgres, first.InstallationID); err != nil {
@@ -113,7 +113,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		"SELECT count(*) FROM registry_migration_attempts WHERE status = 'succeeded'").Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 44 {
+	if attempts != 45 {
 		t.Fatalf("unexpected successful PostgreSQL migration attempts: %d", attempts)
 	}
 	var checksumCount int
@@ -121,7 +121,7 @@ func TestMigratePostgresRealDatabaseAndAdvisoryLock(t *testing.T) {
 		"SELECT count(*) FROM registry_migration_checksums").Scan(&checksumCount); err != nil {
 		t.Fatal(err)
 	}
-	if checksumCount != 44 {
+	if checksumCount != 45 {
 		t.Fatalf("unexpected PostgreSQL migration checksum count: %d", checksumCount)
 	}
 }
@@ -206,6 +206,8 @@ func TestPostgresUpgradePreservesExistingGenericRepository(t *testing.T) {
 	delete(old, "sql/postgres/000043_oci_policies.sql")
 	delete(old, "sql/sqlite/000044_invitations_and_oci_review.sql")
 	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
+	delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
+	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
 	report, err := migrateWithFS(ctx, db, cfg, old)
 	if err != nil || report.CurrentVersion != 16 {
 		t.Fatalf("prepare v16 schema: report=%+v err=%v", report, err)
@@ -229,7 +231,7 @@ func TestPostgresUpgradePreservesExistingGenericRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err = Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 44 || len(report.AppliedVersions) != 28 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 || report.AppliedVersions[7] != 24 || report.AppliedVersions[8] != 25 || report.AppliedVersions[9] != 26 || report.AppliedVersions[10] != 27 || report.AppliedVersions[11] != 28 || report.AppliedVersions[12] != 29 || report.AppliedVersions[13] != 30 || report.AppliedVersions[14] != 31 || report.AppliedVersions[15] != 32 || report.AppliedVersions[16] != 33 || report.AppliedVersions[17] != 34 || report.AppliedVersions[18] != 35 || report.AppliedVersions[19] != 36 || report.AppliedVersions[20] != 37 || report.AppliedVersions[21] != 38 || report.AppliedVersions[22] != 39 || report.AppliedVersions[23] != 40 || report.AppliedVersions[24] != 41 || report.AppliedVersions[25] != 42 || report.AppliedVersions[26] != 43 || report.AppliedVersions[27] != 44 {
+	if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 29 || report.AppliedVersions[0] != 17 || report.AppliedVersions[1] != 18 || report.AppliedVersions[2] != 19 || report.AppliedVersions[3] != 20 || report.AppliedVersions[4] != 21 || report.AppliedVersions[5] != 22 || report.AppliedVersions[6] != 23 || report.AppliedVersions[7] != 24 || report.AppliedVersions[8] != 25 || report.AppliedVersions[9] != 26 || report.AppliedVersions[10] != 27 || report.AppliedVersions[11] != 28 || report.AppliedVersions[12] != 29 || report.AppliedVersions[13] != 30 || report.AppliedVersions[14] != 31 || report.AppliedVersions[15] != 32 || report.AppliedVersions[16] != 33 || report.AppliedVersions[17] != 34 || report.AppliedVersions[18] != 35 || report.AppliedVersions[19] != 36 || report.AppliedVersions[20] != 37 || report.AppliedVersions[21] != 38 || report.AppliedVersions[22] != 39 || report.AppliedVersions[23] != 40 || report.AppliedVersions[24] != 41 || report.AppliedVersions[25] != 42 || report.AppliedVersions[26] != 43 || report.AppliedVersions[27] != 44 || report.AppliedVersions[28] != 45 {
 		t.Fatalf("upgrade to v30: report=%+v err=%v", report, err)
 	}
 	var format, retained, status, publishedAt string
@@ -319,6 +321,8 @@ func TestPostgresV18PreservesGoRepositoryAndGrants(t *testing.T) {
 	delete(old, "sql/postgres/000043_oci_policies.sql")
 	delete(old, "sql/sqlite/000044_invitations_and_oci_review.sql")
 	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
+	delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
+	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 17 {
 		t.Fatalf("prepare v17: %+v err=%v", report, err)
 	}
@@ -339,7 +343,7 @@ func TestPostgresV18PreservesGoRepositoryAndGrants(t *testing.T) {
 		}
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 44 || len(report.AppliedVersions) != 27 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 || report.AppliedVersions[8] != 26 || report.AppliedVersions[9] != 27 || report.AppliedVersions[10] != 28 || report.AppliedVersions[11] != 29 || report.AppliedVersions[12] != 30 || report.AppliedVersions[13] != 31 || report.AppliedVersions[14] != 32 || report.AppliedVersions[15] != 33 || report.AppliedVersions[16] != 34 || report.AppliedVersions[17] != 35 || report.AppliedVersions[18] != 36 || report.AppliedVersions[19] != 37 || report.AppliedVersions[20] != 38 || report.AppliedVersions[21] != 39 || report.AppliedVersions[22] != 40 || report.AppliedVersions[23] != 41 || report.AppliedVersions[24] != 42 || report.AppliedVersions[25] != 43 || report.AppliedVersions[26] != 44 {
+	if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 28 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 || report.AppliedVersions[8] != 26 || report.AppliedVersions[9] != 27 || report.AppliedVersions[10] != 28 || report.AppliedVersions[11] != 29 || report.AppliedVersions[12] != 30 || report.AppliedVersions[13] != 31 || report.AppliedVersions[14] != 32 || report.AppliedVersions[15] != 33 || report.AppliedVersions[16] != 34 || report.AppliedVersions[17] != 35 || report.AppliedVersions[18] != 36 || report.AppliedVersions[19] != 37 || report.AppliedVersions[20] != 38 || report.AppliedVersions[21] != 39 || report.AppliedVersions[22] != 40 || report.AppliedVersions[23] != 41 || report.AppliedVersions[24] != 42 || report.AppliedVersions[25] != 43 || report.AppliedVersions[26] != 44 || report.AppliedVersions[27] != 45 {
 		t.Fatalf("upgrade to v30: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, config.Postgres, report.InstallationID); err != nil {

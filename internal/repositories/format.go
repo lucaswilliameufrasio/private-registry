@@ -81,7 +81,12 @@ func (s *Service) WithRepositoryManagerTransaction(ctx context.Context, actorUse
 		if role != workspaces.RoleOwner && role != workspaces.RoleAdministrator {
 			return ErrForbidden
 		}
-		if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, format); err != nil {
+		// An empty format accepts any repository the workspace holds.
+		if format == "" {
+			if err := requireActiveRepository(ctx, tx, s.driver, workspaceID, repositoryID); err != nil {
+				return err
+			}
+		} else if err := RequireFormat(ctx, tx, s.driver, workspaceID, repositoryID, format); err != nil {
 			return err
 		}
 		return operation(tx, actorID)

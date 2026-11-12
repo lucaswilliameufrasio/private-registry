@@ -54,12 +54,14 @@ func exercisePubReservationMigration(t *testing.T, ctx context.Context, db *sql.
 	delete(old, "sql/postgres/000043_oci_policies.sql")
 	delete(old, "sql/sqlite/000044_invitations_and_oci_review.sql")
 	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
+	delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
+	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 35 {
 		t.Fatalf("prepare v35 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 44 || len(report.AppliedVersions) != 9 || report.AppliedVersions[0] != 36 || report.AppliedVersions[1] != 37 || report.AppliedVersions[2] != 38 || report.AppliedVersions[3] != 39 || report.AppliedVersions[4] != 40 || report.AppliedVersions[5] != 41 || report.AppliedVersions[6] != 42 || report.AppliedVersions[7] != 43 || report.AppliedVersions[8] != 44 {
+		if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 10 || report.AppliedVersions[0] != 36 || report.AppliedVersions[1] != 37 || report.AppliedVersions[2] != 38 || report.AppliedVersions[3] != 39 || report.AppliedVersions[4] != 40 || report.AppliedVersions[5] != 41 || report.AppliedVersions[6] != 42 || report.AppliedVersions[7] != 43 || report.AppliedVersions[8] != 44 || report.AppliedVersions[9] != 45 {
 			t.Fatalf("v36 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

@@ -26,6 +26,7 @@ import (
 	"private-registry/internal/pub"
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
+	"private-registry/internal/trustedpub"
 	"private-registry/internal/workspaces"
 )
 
@@ -59,6 +60,8 @@ type AuthHTTPConfig struct {
 	OCI *oci.Service
 	// Replication reports SQLite replication health when it is enabled.
 	Replication ReplicationStatus
+	// TrustedPublishing enables CI token exchange when set.
+	TrustedPublishing *trustedpub.Service
 }
 
 type authHTTP struct {
@@ -83,6 +86,7 @@ type authHTTP struct {
 	oci                    *oci.Service
 	replication            ReplicationStatus
 	invitationHashSlots    chan struct{}
+	trustedPublishing      *trustedpub.Service
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -322,6 +326,7 @@ func NewHandler(
 		oci:                    cfg.OCI,
 		replication:            cfg.Replication,
 		invitationHashSlots:    make(chan struct{}, 2),
+		trustedPublishing:      cfg.TrustedPublishing,
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -369,6 +374,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
 	router.Get("/api/v1/admin/replication", h.replicationStatus)
 	h.registerInvitationRoutes(router)
+	h.registerServiceAccountRoutes(router)
 	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
 	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
 	router.Get("/api/v1/admin/jobs/recovery", h.listRecoveryJobs)

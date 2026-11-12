@@ -46,6 +46,17 @@ type Config struct {
 	Muira                   MuiraConfig
 	Replication             ReplicationConfig
 	Backup                  BackupConfig
+	TrustedPublishing       TrustedPublishingConfig
+}
+
+// TrustedPublishingConfig enables GitHub Actions OIDC token exchange. The
+// issuer is GitHub's unless overridden for a test or a compatible provider.
+type TrustedPublishingConfig struct {
+	Enabled         bool
+	Issuer          string
+	AllowedNetworks []netip.Prefix
+	DNSServer       netip.AddrPort
+	CAFile          string
 }
 
 // BackupConfig is read by the backup commands only. The recipient is an age
@@ -341,6 +352,10 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	trustedConfig, err := loadTrustedPublishing(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -365,6 +380,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		Muira:                   muiraConfig,
 		Replication:             replicationConfig,
 		Backup:                  backupConfig,
+		TrustedPublishing:       trustedConfig,
 	}, nil
 }
 
@@ -505,6 +521,52 @@ func loadS3Target(lookup LookupEnv, keyPrefix string) (S3Target, error) {
 		return S3Target{}, err
 	}
 	return S3Target{Endpoint: endpoint, Region: region, Bucket: bucket, Prefix: prefix, AccessKeyIDFile: accessKeyFile, SecretKeyFile: secretKeyFile, CAFile: caFile, AllowedNetworks: networks, DNSServer: dns}, nil
+}
+
+func loadTrustedPublishing(lookup LookupEnv) (TrustedPublishingConfig, error) {
+	enabled := false
+	if raw, ok := lookup("REGISTRY_TRUSTED_PUBLISHING_GITHUB"); ok {
+		switch raw {
+		case "true":
+			enabled = true
+		case "false":
+		default:
+			return TrustedPublishingConfig{}, errors.New("REGISTRY_TRUSTED_PUBLISHING_GITHUB must be true or false")
+		}
+	}
+	keys := []string{"REGISTRY_TRUSTED_PUBLISHING_GITHUB_ISSUER", "REGISTRY_TRUSTED_PUBLISHING_GITHUB_ALLOWED_NETWORKS", "REGISTRY_TRUSTED_PUBLISHING_GITHUB_DNS_SERVER", "REGISTRY_TRUSTED_PUBLISHING_GITHUB_CA_FILE"}
+	if !enabled {
+		for _, key := range keys {
+			if _, exists := lookup(key); exists {
+				return TrustedPublishingConfig{}, fmt.Errorf("%s requires REGISTRY_TRUSTED_PUBLISHING_GITHUB=true", key)
+			}
+		}
+		return TrustedPublishingConfig{}, nil
+	}
+	issuer := "https://token.actions.githubusercontent.com"
+	if _, exists := lookup("REGISTRY_TRUSTED_PUBLISHING_GITHUB_ISSUER"); exists {
+		var err error
+		issuer, err = requiredHTTPSOrigin(lookup, "REGISTRY_TRUSTED_PUBLISHING_GITHUB_ISSUER")
+		if err != nil {
+			return TrustedPublishingConfig{}, err
+		}
+	}
+	networks, err := requiredNetworks(lookup, "REGISTRY_TRUSTED_PUBLISHING_GITHUB_ALLOWED_NETWORKS")
+	if err != nil {
+		return TrustedPublishingConfig{}, err
+	}
+	dns, err := optionalDNSServer(lookup, "REGISTRY_TRUSTED_PUBLISHING_GITHUB_DNS_SERVER")
+	if err != nil {
+		return TrustedPublishingConfig{}, err
+	}
+	caFile := ""
+	if _, exists := lookup("REGISTRY_TRUSTED_PUBLISHING_GITHUB_CA_FILE"); exists {
+		caFile, err = requiredFilePath(lookup, "REGISTRY_TRUSTED_PUBLISHING_GITHUB_CA_FILE")
+		if err != nil {
+			return TrustedPublishingConfig{}, err
+		}
+	}
+	return TrustedPublishingConfig{Enabled: true, Issuer: issuer, AllowedNetworks: networks, DNSServer: dns, CAFile: caFile}, nil
 }
 
 func loadBackup(lookup LookupEnv) (BackupConfig, error) {
