@@ -4,7 +4,7 @@
 
 Esta é a primeira entrega pensada para uso experimental de ponta a ponta. Ela **não é a v1** descrita em [development-plan.md](development-plan.md): o escopo foi reduzido por decisão do proprietário para quatro formatos, storage em objeto e login opcional via Muira. O que continua faltando para a v1 está em [O que esta entrega não cobre](#o-que-esta-entrega-não-cobre) e no [roadmap](roadmap.md).
 
-Tudo aqui é opt-in e experimental. Há disaster recovery do banco SQLite por replicação, mas não um backup completo e independente; leia os limites antes de guardar dados que você não possa perder.
+Tudo aqui é opt-in e experimental. Há backup completo cifrado com verificação e restauração, e replicação contínua do SQLite; leia os limites antes de guardar dados que você não possa perder.
 
 ## O que está disponível
 
@@ -98,6 +98,25 @@ Detalhes no [ADR 0046](adr/0046-workspace-invitations.md).
 
 A coleta OCI e as expirações só removem referências. Para apagar de fato os objetos que nada referencia, numa janela de manutenção com o `serve` parado: `registry collect-objects` (só relata) e depois `registry collect-objects --apply`. Objetos com menos de 24 h e qualquer objeto ainda referenciado são mantidos.
 
+### Backups
+
+```sh
+export REGISTRY_BACKUP_S3_ENDPOINT=https://<outro provedor ou conta>
+export REGISTRY_BACKUP_S3_REGION=auto
+export REGISTRY_BACKUP_S3_BUCKET=registry-backups
+export REGISTRY_BACKUP_S3_ACCESS_KEY_ID_FILE=/etc/registry/backup-access-key-id
+export REGISTRY_BACKUP_S3_SECRET_ACCESS_KEY_FILE=/etc/registry/backup-secret-access-key
+export REGISTRY_BACKUP_S3_ALLOWED_NETWORKS=<CIDRs do endpoint>
+export REGISTRY_BACKUP_S3_DNS_SERVER=1.1.1.1:53
+export REGISTRY_BACKUP_AGE_RECIPIENT=age1...      # chave pública; a identidade fica fora do servidor
+```
+
+- Gere a chave com `age-keygen -o identity.txt` num lugar seguro; só a linha `age1...` vai para o servidor.
+- Agende `registry backup` (por exemplo diário, por systemd timer). Ele roda com o servidor no ar, funciona com SQLite e PostgreSQL (com `pg_dump` do mesmo major) e mantém os últimos 7 (`REGISTRY_BACKUP_RETAIN`).
+- Agende também `registry verify-backup --identity identity.txt`, de preferência em outro host: ele decifra e confere banco e todos os objetos.
+- Para reconstruir: diretório de dados vazio (ou banco PostgreSQL vazio), mesma configuração, a chave mestra da sua cópia, e `registry restore-backup --identity identity.txt`. Depois `registry serve`.
+- Use um bucket e, de preferência, um provedor diferentes dos de produção. Detalhes no [ADR 0048](adr/0048-encrypted-installation-backups.md).
+
 ### Disaster recovery do banco (SQLite)
 
 ```sh
@@ -176,7 +195,7 @@ Owners e administradores do workspace gerenciam o repositório pela API (CSRF e 
 
 Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 
-- **Backup além do disaster recovery.** O banco SQLite tem replicação contínua e restore (seção acima), mas não há backup cifrado independente, retenção longa, verificador externo nem cobertura para PostgreSQL. As peças internas de inventário e recovery isolado continuam sem comando de operador e marcam o resultado como `RECOVERY_INCOMPLETE`; para OCI elas recusam a instalação.
+- **Backup:** não inclui chave mestra, segredos nem configuração; agendamento, alerta e o host do verificador são do operador. As peças internas antigas de recovery isolado (`RECOVERY_INCOMPLETE`) continuam existindo, mas o caminho de operador é `backup`/`restore-backup`.
 - **OCI:** sem mount e referrers; objetos armazenados só são apagados pela coleta offline; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real e sem multipart; migração e coleta de órfãos só offline.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).

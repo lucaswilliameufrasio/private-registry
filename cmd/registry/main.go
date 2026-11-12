@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"filippo.io/age"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/lucaswilliameufrasio/sqlite-replication-go/storages3"
 	"golang.org/x/term"
@@ -29,6 +31,7 @@ import (
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/egress"
+	"private-registry/internal/fullbackup"
 	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
 	"private-registry/internal/maintenance"
@@ -66,8 +69,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if len(args) == 2 && args[0] == "collect-objects" && args[1] == "--apply" {
 		apply, args = true, args[:1]
 	}
+	if len(args) >= 1 && (args[0] == "backup" || args[0] == "verify-backup" || args[0] == "restore-backup") {
+		return runBackupCommand(ctx, args[0], args[1:], logger)
+	}
 	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key" && args[0] != "restore-database" && args[0] != "migrate-objects" && args[0] != "collect-objects") {
-		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]}")
+		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]|backup|verify-backup|restore-backup}")
 	}
 	if logger == nil {
 		return errors.New("logger is required")
@@ -599,6 +605,120 @@ func runObjectMaintenance(ctx context.Context, db *sql.DB, cfg config.Config, lo
 		logger.Info("nothing was deleted; run collect-objects --apply to delete the unreferenced objects")
 	}
 	return nil
+}
+
+// runBackupCommand runs backup, verify-backup or restore-backup. verify and
+// restore take the operator's age identity file; backup never needs it.
+func runBackupCommand(ctx context.Context, command string, args []string, logger *slog.Logger) (err error) {
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	identityPath := flags.String("identity", "", "age identity file (verify-backup, restore-backup)")
+	backupID := flags.String("id", "", "backup ID; default is the newest complete backup")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || (command == "backup" && (*identityPath != "" || *backupID != "")) || (command != "backup" && *identityPath == "") {
+		return errors.New("usage: registry backup | registry verify-backup --identity FILE [--id ID] | registry restore-backup --identity FILE [--id ID]")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if !cfg.Backup.Enabled {
+		return errors.New("backups need REGISTRY_BACKUP_S3_* and REGISTRY_BACKUP_AGE_RECIPIENT")
+	}
+	settings, err := s3ClientSettings(cfg.Backup.Target)
+	if err != nil {
+		return err
+	}
+	client, err := storage.NewRestrictedS3Client(settings)
+	if err != nil {
+		return err
+	}
+	bucket := fullbackup.Bucket{Client: client, Name: cfg.Backup.Target.Bucket, Prefix: cfg.Backup.Target.Prefix}
+	staging := filepath.Join(cfg.DataDir, "backup-staging")
+	runCtx, cancel := context.WithTimeout(ctx, 12*time.Hour)
+	defer cancel()
+
+	switch command {
+	case "backup":
+		recipient, err := age.ParseX25519Recipient(cfg.Backup.Recipient)
+		if err != nil {
+			return errors.New("REGISTRY_BACKUP_AGE_RECIPIENT is not a valid age recipient")
+		}
+		db, err := database.Open(runCtx, cfg)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, db.Close()) }()
+		if err := verifyServeSchema(runCtx, db, cfg.DatabaseDriver); err != nil {
+			return err
+		}
+		store, err := openObjectStore(cfg)
+		if err != nil {
+			return err
+		}
+		report, err := fullbackup.Run(runCtx, fullbackup.Options{DB: db, Driver: cfg.DatabaseDriver, DSN: cfg.DatabaseDSN, Store: store, Bucket: bucket, Recipient: recipient, PgDump: cfg.Backup.PgDump, Staging: staging, Retain: cfg.Backup.Retain})
+		logger.Info("backup", "id", report.ID, "objects", report.Objects, "objects_uploaded", report.ObjectsUploaded, "bytes_uploaded", report.BytesUploaded, "database_bytes", report.DatabaseBytes, "removed_backups", report.Removed)
+		return err
+	case "verify-backup":
+		identity, err := loadAgeIdentity(*identityPath)
+		if err != nil {
+			return err
+		}
+		report, err := fullbackup.Verify(runCtx, bucket, identity, *backupID, staging, cfg.Backup.PgRestore)
+		if err != nil {
+			return err
+		}
+		logger.Info("backup verified", "id", report.ID, "objects", report.Objects, "database_bytes", report.DatabaseBytes)
+		return nil
+	default:
+		identity, err := loadAgeIdentity(*identityPath)
+		if err != nil {
+			return err
+		}
+		store, err := openObjectStore(cfg)
+		if err != nil {
+			return err
+		}
+		options := fullbackup.RestoreOptions{Bucket: bucket, Identity: identity, ID: *backupID, Staging: staging, Driver: cfg.DatabaseDriver, PgRestore: cfg.Backup.PgRestore, Store: store}
+		if cfg.DatabaseDriver == config.SQLite {
+			options.SQLite = cfg.DatabaseDSN
+		} else {
+			db, err := database.Open(runCtx, cfg)
+			if err != nil {
+				return err
+			}
+			defer func() { err = errors.Join(err, db.Close()) }()
+			options.DB, options.DSN = db, cfg.DatabaseDSN
+		}
+		lock, err := objectmaint.AcquireInstanceLock(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, lock.Release()) }()
+		report, err := fullbackup.Restore(runCtx, options)
+		if err != nil {
+			return err
+		}
+		logger.Info("backup restored; revoke again any credential revoked after the backup was taken", "id", report.ID, "objects", report.ObjectsRestored)
+		return nil
+	}
+}
+
+// loadAgeIdentity reads the operator's identity from a private file.
+func loadAgeIdentity(path string) (age.Identity, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > 64<<10 {
+		return nil, errors.New("age identity file must be a private regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("age identity file could not be read")
+	}
+	defer file.Close()
+	identities, err := age.ParseIdentities(file)
+	if err != nil || len(identities) == 0 {
+		return nil, errors.New("age identity file holds no valid identity")
+	}
+	return identities[0], nil
 }
 
 // objectCollectionGrace keeps objects written shortly before serve stopped.

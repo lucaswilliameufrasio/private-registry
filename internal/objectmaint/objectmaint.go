@@ -44,6 +44,29 @@ var referenceQueries = []string{
 	`SELECT m.workspace_id, SUBSTR(r.referenced_digest, 8) FROM registry_oci_manifest_references r JOIN registry_oci_manifests m ON m.repository_id = r.repository_id AND m.digest = r.manifest_digest`,
 }
 
+// requiredQueries list the references that must have a stored object: what
+// is published, and uploads whose object the registry already verified. This
+// is what a backup has to contain.
+var requiredQueries = []string{
+	`SELECT workspace_id, sha256 FROM registry_generic_artifact_files`,
+	`SELECT workspace_id, object_sha256 FROM registry_generic_upload_sessions WHERE object_sha256 IS NOT NULL AND status IN ('uploaded', 'published')`,
+	`SELECT workspace_id, zip_sha256 FROM registry_go_module_versions`,
+	`SELECT workspace_id, zip_sha256 FROM registry_go_upload_sessions WHERE object_verified = 1`,
+	`SELECT workspace_id, archive_sha256 FROM registry_cargo_versions`,
+	`SELECT workspace_id, archive_sha256 FROM registry_cargo_reservations WHERE object_verified = 1`,
+	`SELECT workspace_id, tarball_sha256 FROM registry_npm_versions`,
+	`SELECT workspace_id, tarball_sha256 FROM registry_npm_reservations WHERE object_verified = 1`,
+	`SELECT workspace_id, tarball_sha256 FROM registry_pub_versions`,
+	`SELECT workspace_id, tarball_sha256 FROM registry_pub_reservations WHERE object_verified = 1`,
+	`SELECT workspace_id, SUBSTR(digest, 8) FROM registry_oci_blobs`,
+}
+
+// RequiredObjectsTx returns the objects that must exist for the database in
+// tx to be served, inside the caller's transaction.
+func RequiredObjectsTx(ctx context.Context, tx *sql.Tx) (map[storage.ObjectKey]struct{}, error) {
+	return collectReferences(ctx, tx, requiredQueries)
+}
+
 // ReferencedObjects reads every object reference in one read transaction.
 func ReferencedObjects(ctx context.Context, db *sql.DB, driver config.DatabaseDriver) (map[storage.ObjectKey]struct{}, error) {
 	if db == nil || ctx == nil {
@@ -58,12 +81,25 @@ func ReferencedObjects(ctx context.Context, db *sql.DB, driver config.DatabaseDr
 		return nil, errors.New("object references could not be read")
 	}
 	defer func() { _ = tx.Rollback() }()
-	var count, minimum, maximum int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != KnownSchemaVersion || minimum != 1 || maximum != KnownSchemaVersion {
-		return nil, fmt.Errorf("database schema is not version %d; object maintenance does not know its references", KnownSchemaVersion)
+	return ReferencedObjectsTx(ctx, tx)
+}
+
+// ReferencedObjectsTx reads every object reference inside the caller's
+// transaction, for callers that need the references consistent with another
+// read of the same snapshot.
+func ReferencedObjectsTx(ctx context.Context, tx *sql.Tx) (map[storage.ObjectKey]struct{}, error) {
+	if tx == nil || ctx == nil {
+		return nil, errors.New("object reference parameters are invalid")
+	}
+	return collectReferences(ctx, tx, referenceQueries)
+}
+
+func collectReferences(ctx context.Context, tx *sql.Tx, queries []string) (map[storage.ObjectKey]struct{}, error) {
+	if err := requireKnownSchema(ctx, tx); err != nil {
+		return nil, err
 	}
 	referenced := make(map[storage.ObjectKey]struct{})
-	for _, query := range referenceQueries {
+	for _, query := range queries {
 		rows, err := tx.QueryContext(ctx, query)
 		if err != nil {
 			return nil, errors.New("object references could not be read")
@@ -188,4 +224,12 @@ func Copy(ctx context.Context, source, destination storage.Driver, maxObjectByte
 		return nil
 	})
 	return report, err
+}
+
+func requireKnownSchema(ctx context.Context, tx *sql.Tx) error {
+	var count, minimum, maximum int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != KnownSchemaVersion || minimum != 1 || maximum != KnownSchemaVersion {
+		return fmt.Errorf("database schema is not version %d; object maintenance does not know its references", KnownSchemaVersion)
+	}
+	return nil
 }

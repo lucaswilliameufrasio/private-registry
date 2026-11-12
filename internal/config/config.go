@@ -45,6 +45,18 @@ type Config struct {
 	Storage                 StorageConfig
 	Muira                   MuiraConfig
 	Replication             ReplicationConfig
+	Backup                  BackupConfig
+}
+
+// BackupConfig is read by the backup commands only. The recipient is an age
+// public key; the matching identity stays with the operator.
+type BackupConfig struct {
+	Enabled   bool
+	Target    S3Target
+	Recipient string
+	Retain    int
+	PgDump    string
+	PgRestore string
 }
 
 type StorageDriver string
@@ -325,6 +337,10 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	backupConfig, err := loadBackup(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -348,6 +364,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		Storage:                 storageConfig,
 		Muira:                   muiraConfig,
 		Replication:             replicationConfig,
+		Backup:                  backupConfig,
 	}, nil
 }
 
@@ -488,6 +505,57 @@ func loadS3Target(lookup LookupEnv, keyPrefix string) (S3Target, error) {
 		return S3Target{}, err
 	}
 	return S3Target{Endpoint: endpoint, Region: region, Bucket: bucket, Prefix: prefix, AccessKeyIDFile: accessKeyFile, SecretKeyFile: secretKeyFile, CAFile: caFile, AllowedNetworks: networks, DNSServer: dns}, nil
+}
+
+func loadBackup(lookup LookupEnv) (BackupConfig, error) {
+	keys := []string{"REGISTRY_BACKUP_AGE_RECIPIENT", "REGISTRY_BACKUP_RETAIN", "REGISTRY_BACKUP_PG_DUMP", "REGISTRY_BACKUP_PG_RESTORE"}
+	present := false
+	for _, key := range append(keys, "REGISTRY_BACKUP_S3_ENDPOINT") {
+		if _, exists := lookup(key); exists {
+			present = true
+		}
+	}
+	if !present {
+		return BackupConfig{}, nil
+	}
+	target, err := loadS3Target(lookup, "REGISTRY_BACKUP_S3_")
+	if err != nil {
+		return BackupConfig{}, err
+	}
+	recipient, err := required(lookup, "REGISTRY_BACKUP_AGE_RECIPIENT")
+	if err != nil {
+		return BackupConfig{}, err
+	}
+	if !strings.HasPrefix(recipient, "age1") || len(recipient) > 128 {
+		return BackupConfig{}, errors.New("REGISTRY_BACKUP_AGE_RECIPIENT must be an age X25519 public key")
+	}
+	retainValue, err := value(lookup, "REGISTRY_BACKUP_RETAIN", "7")
+	if err != nil {
+		return BackupConfig{}, err
+	}
+	retain, err := strconv.Atoi(retainValue)
+	if err != nil || retain < 1 || retain > 1000 {
+		return BackupConfig{}, errors.New("REGISTRY_BACKUP_RETAIN must be between 1 and 1000")
+	}
+	tool := func(key, fallback string) (string, error) {
+		raw, err := value(lookup, key, fallback)
+		if err != nil {
+			return "", err
+		}
+		if raw != fallback && !filepath.IsAbs(raw) {
+			return "", fmt.Errorf("%s must be an absolute path", key)
+		}
+		return raw, nil
+	}
+	pgDump, err := tool("REGISTRY_BACKUP_PG_DUMP", "pg_dump")
+	if err != nil {
+		return BackupConfig{}, err
+	}
+	pgRestore, err := tool("REGISTRY_BACKUP_PG_RESTORE", "pg_restore")
+	if err != nil {
+		return BackupConfig{}, err
+	}
+	return BackupConfig{Enabled: true, Target: target, Recipient: recipient, Retain: retain, PgDump: pgDump, PgRestore: pgRestore}, nil
 }
 
 // ReplicationConfig enables continuous SQLite replication to an S3-compatible

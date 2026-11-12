@@ -61,7 +61,7 @@ func TestRunMigrateBootstrapsLocalSQLiteInstallation(t *testing.T) {
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
 	err := run(context.Background(), []string{"publish"}, slog.Default())
-	if err == nil || err.Error() != "usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]}" {
+	if err == nil || err.Error() != "usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]|backup|verify-backup|restore-backup}" {
 		t.Fatalf("unexpected unknown-command result: %v", err)
 	}
 }
