@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/x509"
 	"database/sql"
 	"errors"
@@ -73,14 +74,17 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if len(args) >= 1 && (args[0] == "backup" || args[0] == "verify-backup" || args[0] == "restore-backup") {
 		return runBackupCommand(ctx, args[0], args[1:], logger)
 	}
-	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key" && args[0] != "restore-database" && args[0] != "migrate-objects" && args[0] != "collect-objects") {
-		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]|backup|verify-backup|restore-backup}")
+	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key" && args[0] != "recover-admin" && args[0] != "restore-database" && args[0] != "migrate-objects" && args[0] != "collect-objects") {
+		return errors.New("usage: registry {serve|migrate|bootstrap-admin|recover-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]|backup|verify-backup|restore-backup}")
 	}
 	if logger == nil {
 		return errors.New("logger is required")
 	}
 	if args[0] == "bootstrap-admin" {
 		return runBootstrapAdmin(ctx)
+	}
+	if args[0] == "recover-admin" {
+		return runRecoverAdmin(ctx)
 	}
 	if args[0] == "init-master-key" {
 		return runInitMasterKey(logger)
@@ -852,6 +856,63 @@ func runBootstrapAdmin(ctx context.Context) (err error) {
 		return errors.New("bootstrap result could not be written")
 	}
 	return nil
+}
+
+// runRecoverAdmin lets someone with a shell on the server regain access to an
+// installation administrator account: it sets a new password, removes the
+// account's second factors and revokes its sessions. The next sign-in
+// enrolls TOTP again. It is the way back when no administrator can sign in.
+func runRecoverAdmin(ctx context.Context) (err error) {
+	if err := requireInteractiveTerminal(int(os.Stdin.Fd()), int(os.Stdout.Fd())); err != nil {
+		return errors.New("recover-admin requires an interactive terminal")
+	}
+	currentUser, err := user.Current()
+	if err != nil || currentUser == nil || strings.TrimSpace(currentUser.Username) == "" {
+		return errors.New("local operator identity could not be determined")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, db.Close()) }()
+	if err := verifyServeSchema(ctx, db, cfg.DatabaseDriver); err != nil {
+		return err
+	}
+	masterKey, err := secrets.LoadMasterKeyFile(cfg.MasterKeyFile, cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer masterKey.Destroy()
+	authentication, err := auth.New(db, cfg.DatabaseDriver, &masterKey)
+	if err != nil {
+		return err
+	}
+	loginName, err := readTerminalLine(os.Stdin, os.Stdout, "Administrator login username: ")
+	if err != nil {
+		return err
+	}
+	password, err := readTerminalPassword(os.Stdin, os.Stdout, "New password (input hidden): ")
+	if err != nil {
+		return err
+	}
+	defer clear(password)
+	confirmation, err := readTerminalPassword(os.Stdin, os.Stdout, "Confirm new password (input hidden): ")
+	if err != nil {
+		return err
+	}
+	defer clear(confirmation)
+	if subtle.ConstantTimeCompare(password, confirmation) != 1 {
+		return errors.New("passwords do not match; nothing was changed")
+	}
+	if err := authentication.RecoverAdministrator(ctx, loginName, password, currentUser.Username); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(os.Stdout, "Administrator recovered: sign in with the new password and enroll TOTP again.")
+	return err
 }
 
 func requireInteractiveTerminal(inputFD, outputFD int) error {

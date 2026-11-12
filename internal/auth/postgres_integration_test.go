@@ -89,6 +89,29 @@ func TestPostgresAuthenticationEnforcesEnrollmentRecoveryAndAttemptLimits(t *tes
 		t.Fatalf("PostgreSQL Muira identity accepted wrong issuer: %v", err)
 	}
 
+	// Local operator recovery and an administrator-issued link on PostgreSQL.
+	if err := service.RecoverAdministrator(ctx, "mfa.postgres", []byte("synthetic-postgres-recovered-password"), "operator"); err != nil {
+		t.Fatalf("PostgreSQL recover-admin: %v", err)
+	}
+	loginPassword = []byte("synthetic-postgres-recovered-password")
+	member, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES ($1, 'Member', 'now', 'now')`, member.String()); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := service.IssueRecovery(ctx, userID, member.String(), true)
+	if err != nil {
+		t.Fatalf("PostgreSQL issue recovery: %v", err)
+	}
+	if err := service.CompleteRecovery(ctx, issued.Token, nil); err != nil {
+		t.Fatalf("PostgreSQL complete recovery: %v", err)
+	}
+	if err := service.CompleteRecovery(ctx, issued.Token, nil); !errors.Is(err, ErrRecoveryUnavailable) {
+		t.Fatalf("PostgreSQL recovery reuse: %v", err)
+	}
+
 	const sourceAddress = "192.0.2.90:443"
 	enrollmentLogin, err := service.Login(ctx, "mfa.postgres", loginPassword, sourceAddress)
 	if err != nil {

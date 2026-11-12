@@ -140,6 +140,14 @@ Para reconstruir um host perdido:
 
 Perde-se o que foi escrito depois do último envio, e o que foi revogado depois desse ponto precisa ser revogado de novo. Acompanhe `GET /api/v1/admin/replication` (campo `health` diferente de `current` pede atenção) ou os logs: cada ciclo que falha gera `WARN`, e a partir da terceira falha seguida, `ERROR`.
 
+### Quando alguém perde o acesso
+
+- Primeiro, os códigos de recuperação de MFA.
+- Sem eles, ou se esqueceu a senha: um administrador da instância gera um link em `POST /api/v1/admin/users/{id}/recovery` (com `"reset_mfa": true` para remover TOTP e passkeys) e entrega à pessoa, que define a nova senha em `POST /api/v1/auth/recovery` e entra de novo.
+- Se nenhum administrador consegue entrar: `registry recover-admin` no servidor, em terminal interativo.
+
+Detalhes no [ADR 0050](adr/0050-account-recovery.md).
+
 ### Publicação por CI
 
 Crie uma conta de serviço (`POST /api/v1/workspaces/{w}/service-accounts` com `{"description":"..."}`) e dê a ela os grants de repositório. Então:

@@ -375,6 +375,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Get("/api/v1/admin/replication", h.replicationStatus)
 	h.registerInvitationRoutes(router)
 	h.registerServiceAccountRoutes(router)
+	h.registerRecoveryRoutes(router)
 	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
 	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
 	router.Get("/api/v1/admin/jobs/recovery", h.listRecoveryJobs)
