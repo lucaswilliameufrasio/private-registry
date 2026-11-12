@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"private-registry/internal/auth"
 )
@@ -115,6 +116,10 @@ func (h *authHTTP) muiraCallback(response http.ResponseWriter, request *http.Req
 	}
 	if len(query["error"]) > 0 {
 		// Provider-supplied descriptions are not reflected back.
+		if browserNavigation(request) {
+			redirectToInterface(response, "/#/login?error=muira")
+			return
+		}
 		writeAPIError(response, http.StatusUnauthorized, "muira_authorization_denied")
 		return
 	}
@@ -129,11 +134,19 @@ func (h *authHTTP) muiraCallback(response http.ResponseWriter, request *http.Req
 	}
 	completion, err := h.service.CompleteMuira(request.Context(), sealedState, query.Get("state"), query.Get("code"), bearerToken)
 	if err != nil {
+		if browserNavigation(request) {
+			redirectToInterface(response, "/#/login?error=muira")
+			return
+		}
 		writeMuiraError(response, err)
 		return
 	}
 	switch completion.Intent {
 	case auth.MuiraIntentLink:
+		if browserNavigation(request) {
+			redirectToInterface(response, "/#/account?linked=muira")
+			return
+		}
 		writeJSON(response, http.StatusOK, muiraCompletionResponse{Stage: "linked"})
 	case auth.MuiraIntentLogin:
 		result := completion.Result
@@ -148,6 +161,10 @@ func (h *authHTTP) muiraCallback(response http.ResponseWriter, request *http.Req
 			return
 		}
 		setSessionCookies(response, result.Credentials)
+		if browserNavigation(request) {
+			redirectToInterface(response, "/#/login?stage="+string(result.Stage))
+			return
+		}
 		writeJSON(response, http.StatusOK, muiraCompletionResponse{Stage: string(result.Stage)})
 	default:
 		writeAPIError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
@@ -239,4 +256,15 @@ func clearMuiraStateCookie(response http.ResponseWriter) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// browserNavigation reports a top-level page load, as opposed to an API call,
+// so the callback can send people back to the web interface.
+func browserNavigation(request *http.Request) bool {
+	return request.Header.Get("Sec-Fetch-Mode") == "navigate" || strings.Contains(request.Header.Get("Accept"), "text/html")
+}
+
+func redirectToInterface(response http.ResponseWriter, location string) {
+	response.Header().Set("Location", location)
+	response.WriteHeader(http.StatusSeeOther)
 }

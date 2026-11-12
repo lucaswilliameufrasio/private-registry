@@ -27,6 +27,7 @@ import (
 	"private-registry/internal/repositories"
 	"private-registry/internal/sessions"
 	"private-registry/internal/trustedpub"
+	"private-registry/internal/webui"
 	"private-registry/internal/workspaces"
 )
 
@@ -382,6 +383,11 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	h.registerInvitationRoutes(router)
 	h.registerServiceAccountRoutes(router)
 	h.registerRecoveryRoutes(router)
+	h.registerSessionInfoRoutes(router)
+	ui := webui.Handler(h.ociCanonical)
+	router.Get("/", ui.ServeHTTP)
+	router.Head("/", ui.ServeHTTP)
+	router.Get("/ui/*", ui.ServeHTTP)
 	if h.service.PasskeysEnabled() {
 		h.registerPasskeyRoutes(router)
 	}

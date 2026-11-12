@@ -20,7 +20,7 @@ O plano exige passkeys na v1, e o proprietário decidiu que uma passkey pode sub
 - Uma conta só com passkey que entrar por senha cai no fluxo de TOTP: a passkey não é usada como segundo fator depois da senha.
 - Cadastro obrigatório de fator para administradores continua sendo TOTP; a passkey pode ser adicionada depois.
 - Não há verificação de attestation nem lista de autenticadores permitidos.
-- Só um autenticador de software foi exercitado; Chrome, Safari, Firefox e chaves físicas não foram testados.
+- Exercitado com um autenticador de software nos testes HTTP e com o autenticador virtual do Chromium pela interface web; Safari, Firefox e chaves físicas não foram testados.
 
 ## Evidência
 

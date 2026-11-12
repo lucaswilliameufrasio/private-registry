@@ -22,9 +22,13 @@ Arquivos genéricos e módulos Go continuam disponíveis como antes. Hex não fa
 
 Todas as jornadas com cliente real passam pelo comando `serve` de verdade, atrás de um front TLS local, e preparam usuário, grants e tokens direto no banco/serviço: elas provam o protocolo, não a jornada administrativa pela API.
 
+## Interface web
+
+Abra a origem canônica (`https://registry.example.com/`) no navegador. Dá para entrar com senha, passkey ou Muira; criar workspaces e repositórios; ver como configurar cada cliente; conceder acesso; emitir tokens; convidar pessoas; configurar CI com contas de serviço e trusted publishing; revisar imagens OCI; gerenciar TOTP e passkeys; e, para administradores, ligar o cadastro por convite, ver a replicação e gerar links de recuperação. O que não está na interface continua pela API. Ver [ADR 0052](adr/0052-web-interface.md).
+
 ## Subindo uma instância
 
-O servidor fica atrás de um proxy que termina TLS. Sem UI: a administração é pela API HTTP.
+O servidor fica atrás de um proxy que termina TLS. A administração do dia a dia está na interface web; o restante é pela API HTTP.
 
 ```sh
 export REGISTRY_DATA_DIR=/var/lib/registry
@@ -229,7 +233,7 @@ Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 - **OCI:** sem mount e referrers; objetos armazenados só são apagados pela coleta offline; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real e sem multipart; migração e coleta de órfãos só offline.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
-- **Sem UI, email e SCIM contínuo;** trusted publishing só para GitHub Actions; passkeys não testadas em navegador real.
+- **Interface web parcial** (as tarefas comuns); **sem email e SCIM contínuo;** trusted publishing só para GitHub Actions. Passkeys testadas no Chromium com autenticador virtual, não em Safari, Firefox ou chave física.
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
 

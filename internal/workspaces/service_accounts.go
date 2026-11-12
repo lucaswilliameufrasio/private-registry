@@ -194,3 +194,71 @@ func isServiceAccount(ctx context.Context, tx *sql.Tx, s *Service, userID string
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_service_accounts WHERE user_id = `+bind(s.driver, 1)+`)`, userID).Scan(&found)
 	return found, err
 }
+
+// Member is one active membership as seen by other members.
+type Member struct {
+	UserID         string
+	DisplayName    string
+	LoginName      string
+	Role           string
+	ServiceAccount bool
+}
+
+// ListMembers returns the active members of a workspace to any active member,
+// so people can find whom to grant access to. Contact emails are not shown.
+func (s *Service) ListMembers(ctx context.Context, actorUserID, workspaceID string) ([]Member, error) {
+	actorID, err := parseUserID(actorUserID)
+	if err != nil {
+		return nil, ErrUnauthenticated
+	}
+	workspaceID, err = parseWorkspaceID(workspaceID)
+	if err != nil {
+		return nil, ErrInvalidWorkspaceID
+	}
+	var members []Member
+	err = s.withWriteTransaction(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveUser(ctx, tx, s.driver, actorID); err != nil {
+			return err
+		}
+		if _, err := activeWorkspaceRole(ctx, tx, s.driver, workspaceID, actorID); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT m.user_id, u.display_name, COALESCE(c.login_name, ''), m.role, EXISTS (SELECT 1 FROM registry_service_accounts a WHERE a.user_id = m.user_id) FROM registry_workspace_memberships m JOIN registry_users u ON u.user_id = m.user_id LEFT JOIN registry_local_credentials c ON c.user_id = m.user_id WHERE m.workspace_id = `+bind(s.driver, 1)+` AND m.status = 'active' AND u.status = 'active' ORDER BY u.display_name, m.user_id LIMIT 1000`, workspaceID)
+		if err != nil {
+			return errors.New("workspace members could not be listed")
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var member Member
+			if err := rows.Scan(&member.UserID, &member.DisplayName, &member.LoginName, &member.Role, &member.ServiceAccount); err != nil {
+				return errors.New("workspace member could not be read")
+			}
+			members = append(members, member)
+		}
+		return rows.Err()
+	})
+	return members, err
+}
+
+// Profile is what a signed-in person sees about their own account.
+type Profile struct {
+	UserID        string
+	DisplayName   string
+	LoginName     string
+	InstanceAdmin bool
+	HasTOTP       bool
+	Passkeys      int
+}
+
+func (s *Service) Profile(ctx context.Context, userID string) (Profile, error) {
+	id, err := parseUserID(userID)
+	if err != nil {
+		return Profile{}, ErrUnauthenticated
+	}
+	profile := Profile{UserID: id}
+	err = s.db.QueryRowContext(ctx, `SELECT u.display_name, COALESCE(c.login_name, ''), EXISTS (SELECT 1 FROM registry_instance_admins a WHERE a.user_id = u.user_id), EXISTS (SELECT 1 FROM registry_totp_credentials t WHERE t.user_id = u.user_id AND t.status = 'active'), (SELECT COUNT(*) FROM registry_webauthn_credentials w WHERE w.user_id = u.user_id) FROM registry_users u LEFT JOIN registry_local_credentials c ON c.user_id = u.user_id WHERE u.user_id = `+bind(s.driver, 1)+` AND u.status = 'active'`, id).Scan(&profile.DisplayName, &profile.LoginName, &profile.InstanceAdmin, &profile.HasTOTP, &profile.Passkeys)
+	if err != nil {
+		return Profile{}, ErrUserUnavailable
+	}
+	return profile, nil
+}
