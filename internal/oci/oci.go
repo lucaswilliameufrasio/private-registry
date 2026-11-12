@@ -421,7 +421,7 @@ func writeError(err error) error {
 		return nil
 	case errors.Is(err, repositories.ErrOCIWriteTokenUnavailable):
 		return ErrUnauthorized
-	case errors.Is(err, ErrManifestBlob), errors.Is(err, ErrManifestInvalid), errors.Is(err, ErrDigestInvalid), errors.Is(err, ErrQuota), errors.Is(err, ErrTagImmutable):
+	case errors.Is(err, ErrManifestBlob), errors.Is(err, ErrManifestInvalid), errors.Is(err, ErrDigestInvalid), errors.Is(err, ErrQuota), errors.Is(err, ErrTagImmutable), errors.Is(err, ErrReviewPending):
 		return err
 	default:
 		return ErrUnavailable
@@ -446,7 +446,7 @@ func (s *Service) StatBlob(ctx context.Context, repository, digest string) (int6
 
 // OpenBlob returns the verified bytes of a blob known to this repository.
 func (s *Service) OpenBlob(ctx context.Context, workspace, repository, digest string) (io.ReadCloser, int64, error) {
-	size, err := s.StatBlob(ctx, repository, digest)
+	size, err := s.StatReadableBlob(ctx, workspace, repository, digest)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -502,10 +502,49 @@ func (s *Service) PutManifest(ctx context.Context, principal Principal, workspac
 	default:
 		return "", ErrManifestInvalid
 	}
+	mediaType, blobs, children, err := parseManifest(body, contentType)
+	if err != nil {
+		return "", err
+	}
+	queued := false
+	err = s.repos.WithOCIWriteTokenTransaction(ctx, principal.bearer, workspace, repository, func(tx *sql.Tx, user string) error {
+		if err := s.requireReferences(ctx, tx, repository, blobs, children); err != nil {
+			return err
+		}
+		var known bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_manifests WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, digest).Scan(&known); err != nil {
+			return ErrUnavailable
+		}
+		if !known {
+			required, err := s.reviewRequired(ctx, tx, workspace, repository)
+			if err != nil {
+				return err
+			}
+			if required {
+				// The submission is committed as pending and the client is
+				// told the push did not publish anything.
+				queued = true
+				return s.queueReview(ctx, tx, user, workspace, repository, image, tag, digest, mediaType, body)
+			}
+		}
+		return s.commitManifest(ctx, tx, user, workspace, repository, image, tag, digest, mediaType, body, blobs, children, known)
+	})
+	if err != nil {
+		return "", writeError(err)
+	}
+	if queued {
+		return "", ErrReviewPending
+	}
+	return digest, nil
+}
+
+// parseManifest validates a manifest document and returns its media type and
+// the blobs (image manifest) or child manifests (index) it references.
+func parseManifest(body []byte, contentType string) (string, []string, []string, error) {
 	var document manifestDocument
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&document); err != nil || decoder.More() || document.SchemaVersion != 2 {
-		return "", ErrManifestInvalid
+		return "", nil, nil, ErrManifestInvalid
 	}
 	mediaType := contentType
 	if mediaType == "" {
@@ -513,101 +552,103 @@ func (s *Service) PutManifest(ctx context.Context, principal Principal, workspac
 	}
 	isIndex, known := manifestMediaTypes[mediaType]
 	if !known || (document.MediaType != "" && document.MediaType != mediaType) {
-		return "", ErrManifestInvalid
+		return "", nil, nil, ErrManifestInvalid
 	}
 	var blobs, children []string
 	if isIndex {
 		if document.Config != nil || len(document.Layers) != 0 || len(document.Manifests) > maxReferences {
-			return "", ErrManifestInvalid
+			return "", nil, nil, ErrManifestInvalid
 		}
 		for _, child := range document.Manifests {
 			if !ValidDigest(child.Digest) {
-				return "", ErrManifestInvalid
+				return "", nil, nil, ErrManifestInvalid
 			}
 			children = append(children, child.Digest)
 		}
 	} else {
 		if document.Config == nil || len(document.Manifests) != 0 || len(document.Layers) > maxReferences {
-			return "", ErrManifestInvalid
+			return "", nil, nil, ErrManifestInvalid
 		}
 		for _, item := range append([]descriptor{*document.Config}, document.Layers...) {
 			// Foreign layers would make the registry vouch for bytes it does
 			// not hold.
 			if !ValidDigest(item.Digest) || len(item.URLs) != 0 || item.Size == nil || *item.Size < 0 {
-				return "", ErrManifestInvalid
+				return "", nil, nil, ErrManifestInvalid
 			}
 			blobs = append(blobs, item.Digest)
 		}
 	}
-	err := s.repos.WithOCIWriteTokenTransaction(ctx, principal.bearer, workspace, repository, func(tx *sql.Tx, user string) error {
-		for _, blob := range blobs {
-			var present bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_blobs WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, blob).Scan(&present); err != nil {
-				return ErrUnavailable
-			}
-			if !present {
-				return ErrManifestBlob
-			}
-		}
-		for _, child := range children {
-			var present bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_manifests WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, child).Scan(&present); err != nil {
-				return ErrUnavailable
-			}
-			if !present {
-				return ErrManifestBlob
-			}
-		}
-		now := time.Now().UTC().UnixMilli()
-		var known bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_manifests WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, digest).Scan(&known); err != nil {
+	return mediaType, blobs, children, nil
+}
+
+// requireReferences checks that everything a manifest references is already
+// part of the repository.
+func (s *Service) requireReferences(ctx context.Context, tx *sql.Tx, repository string, blobs, children []string) error {
+	for _, blob := range blobs {
+		var present bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_blobs WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, blob).Scan(&present); err != nil {
 			return ErrUnavailable
 		}
-		if !known {
-			if err := s.checkQuota(ctx, tx, workspace, repository, int64(len(body))); err != nil {
-				return err
-			}
-			query := `INSERT INTO registry_oci_manifests (repository_id, workspace_id, digest, media_type, content, created_by, created_at_ms) VALUES (` + s.binds(7) + `)`
-			if _, err := tx.ExecContext(ctx, query, repository, workspace, digest, mediaType, body, user, now); err != nil {
-				return ErrUnavailable
-			}
+		if !present {
+			return ErrManifestBlob
 		}
-		if tag != "" {
-			policy, err := s.readPolicy(ctx, tx, repository)
-			if err != nil {
-				return err
-			}
-			if policy.ImmutableTags {
-				var current string
-				err := tx.QueryRowContext(ctx, `SELECT manifest_digest FROM registry_oci_tags WHERE repository_id = `+s.bind(1)+` AND image_name = `+s.bind(2)+` AND tag = `+s.bind(3), repository, image, tag).Scan(&current)
-				if err != nil && !errors.Is(err, sql.ErrNoRows) {
-					return ErrUnavailable
-				}
-				if err == nil && current != digest {
-					return ErrTagImmutable
-				}
-			}
-		}
-		for kind, targets := range map[string][]string{"blob": blobs, "manifest": children} {
-			for _, target := range targets {
-				query := `INSERT INTO registry_oci_manifest_references (repository_id, manifest_digest, referenced_digest, kind) VALUES (` + s.binds(4) + `) ON CONFLICT DO NOTHING`
-				if _, err := tx.ExecContext(ctx, query, repository, digest, target, kind); err != nil {
-					return ErrUnavailable
-				}
-			}
-		}
-		if tag != "" {
-			query := `INSERT INTO registry_oci_tags (repository_id, image_name, tag, manifest_digest, updated_by, updated_at_ms) VALUES (` + s.binds(6) + `) ON CONFLICT (repository_id, image_name, tag) DO UPDATE SET manifest_digest = excluded.manifest_digest, updated_by = excluded.updated_by, updated_at_ms = excluded.updated_at_ms`
-			if _, err := tx.ExecContext(ctx, query, repository, image, tag, digest, user, now); err != nil {
-				return ErrUnavailable
-			}
-		}
-		return s.audit(ctx, tx, user, repository, image, digest)
-	})
-	if err != nil {
-		return "", writeError(err)
 	}
-	return digest, nil
+	for _, child := range children {
+		var present bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_oci_manifests WHERE repository_id = `+s.bind(1)+` AND digest = `+s.bind(2)+`)`, repository, child).Scan(&present); err != nil {
+			return ErrUnavailable
+		}
+		if !present {
+			return ErrManifestBlob
+		}
+	}
+	return nil
+}
+
+// commitManifest publishes a manifest and moves its tag inside the caller's
+// transaction. known reports that the repository already holds the digest.
+func (s *Service) commitManifest(ctx context.Context, tx *sql.Tx, user, workspace, repository, image, tag, digest, mediaType string, body []byte, blobs, children []string, known bool) error {
+	now := time.Now().UTC().UnixMilli()
+	if !known {
+		if err := s.checkQuota(ctx, tx, workspace, repository, int64(len(body))); err != nil {
+			return err
+		}
+		query := `INSERT INTO registry_oci_manifests (repository_id, workspace_id, digest, media_type, content, created_by, created_at_ms) VALUES (` + s.binds(7) + `)`
+		if _, err := tx.ExecContext(ctx, query, repository, workspace, digest, mediaType, body, user, now); err != nil {
+			return ErrUnavailable
+		}
+	}
+	if tag != "" {
+		policy, err := s.readPolicy(ctx, tx, repository)
+		if err != nil {
+			return err
+		}
+		if policy.ImmutableTags {
+			var current string
+			err := tx.QueryRowContext(ctx, `SELECT manifest_digest FROM registry_oci_tags WHERE repository_id = `+s.bind(1)+` AND image_name = `+s.bind(2)+` AND tag = `+s.bind(3), repository, image, tag).Scan(&current)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return ErrUnavailable
+			}
+			if err == nil && current != digest {
+				return ErrTagImmutable
+			}
+		}
+	}
+	for kind, targets := range map[string][]string{"blob": blobs, "manifest": children} {
+		for _, target := range targets {
+			query := `INSERT INTO registry_oci_manifest_references (repository_id, manifest_digest, referenced_digest, kind) VALUES (` + s.binds(4) + `) ON CONFLICT DO NOTHING`
+			if _, err := tx.ExecContext(ctx, query, repository, digest, target, kind); err != nil {
+				return ErrUnavailable
+			}
+		}
+	}
+	if tag != "" {
+		query := `INSERT INTO registry_oci_tags (repository_id, image_name, tag, manifest_digest, updated_by, updated_at_ms) VALUES (` + s.binds(6) + `) ON CONFLICT (repository_id, image_name, tag) DO UPDATE SET manifest_digest = excluded.manifest_digest, updated_by = excluded.updated_by, updated_at_ms = excluded.updated_at_ms`
+		if _, err := tx.ExecContext(ctx, query, repository, image, tag, digest, user, now); err != nil {
+			return ErrUnavailable
+		}
+	}
+	return s.audit(ctx, tx, user, repository, image, digest)
 }
 
 func (s *Service) audit(ctx context.Context, tx *sql.Tx, user, repository, image, digest string) error {

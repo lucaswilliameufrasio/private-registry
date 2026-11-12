@@ -166,14 +166,14 @@ oras push registry.example.com/<workspace>/<repository>/time/app:v1 ./arquivo
 
 O usuário é ignorado; a senha é o token. Para pull, use o token pessoal de leitura.
 
-Owners e administradores do workspace gerenciam o repositório pela API (CSRF e MFA recente): `PUT .../oci-policy` liga tags imutáveis, `DELETE .../oci-tags/{tag}?image=<nome>` remove uma tag e `DELETE .../oci-manifests/{digest}` remove um manifest e suas tags. A quota lógica do repositório e do workspace também vale para OCI. Blobs sem manifest são liberados depois de 24 h. `docker login` aceita qualquer senha (o `/v2/` não tem como validar token por repositório); o erro aparece no primeiro push/pull.
+Owners e administradores do workspace gerenciam o repositório pela API (CSRF e MFA recente): `PUT .../oci-policy` liga tags imutáveis, `DELETE .../oci-tags/{tag}?image=<nome>` remove uma tag e `DELETE .../oci-manifests/{digest}` remove um manifest e suas tags. A quota lógica do repositório e do workspace também vale para OCI. Blobs sem manifest são liberados depois de 24 h. Com `PUT .../oci-review-policy` ligado, manifests novos esperam aprovação de outro manager em `.../oci-reviews` antes de serem publicados. `docker login` aceita qualquer senha (o `/v2/` não tem como validar token por repositório); o erro aparece no primeiro push/pull.
 
 ## O que esta entrega não cobre
 
 Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 
 - **Backup além do disaster recovery.** O banco SQLite tem replicação contínua e restore (seção acima), mas não há backup cifrado independente, retenção longa, verificador externo nem cobertura para PostgreSQL. As peças internas de inventário e recovery isolado continuam sem comando de operador e marcam o resultado como `RECOVERY_INCOMPLETE`; para OCI elas recusam a instalação.
-- **OCI:** sem revisão humana, mount e referrers; a coleta libera quota mas não apaga objetos armazenados; Docker/containerd não comprovados; blob limitado a 1 GiB.
+- **OCI:** sem mount e referrers; a coleta libera quota mas não apaga objetos armazenados; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real, sem multipart, sem GC de órfãos, sem migração entre drivers.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
 - **Sem UI, email, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**

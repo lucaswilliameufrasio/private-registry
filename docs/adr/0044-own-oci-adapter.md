@@ -28,9 +28,19 @@ Implementar o protocolo OCI Distribution dentro do registry (`internal/oci`, rot
 - **Exclusão** pela API de gestão, nunca pelo protocolo (`DELETE` de `/v2/` segue 405, porque token de escrita não remove conteúdo): `DELETE .../oci-tags/{tag}?image=<nome>` e `DELETE .../oci-manifests/{digest}`, que remove também as tags do repositório que apontam para ele e recusa (`409 manifest_in_use`) um manifest listado por um índice. Exige owner ou administrador do workspace, CSRF e MFA recente, e é auditado. Uma tag imutável pode ser retirada assim.
 - **Coleta.** A cada hora o `serve` remove a pertença de blobs que nenhum manifest do repositório referencia e que têm mais de 24 h (carência para pushes em andamento, que enviam blobs antes do manifest; reenviar um blob reinicia a carência). Isso libera quota e acesso. **O objeto armazenado não é apagado**: ele pode ser compartilhado com outros formatos do workspace pela deduplicação, e apagar com segurança exige leases que ainda não existem.
 
+## Revisão humana (2026-11-12, migration v44)
+
+- `GET`/`PUT .../oci-review-policy` liga a revisão no repositório (a mesma flag `review_required` dos outros formatos, com revisão otimista e MFA recente).
+- Com revisão ligada, um manifest que o repositório ainda não publicou não é publicado no push: fica como submissão pendente e o cliente recebe `403 DENIED` dizendo que aguarda revisão. Repetir o push não duplica a pendência. Retag de um digest já publicado não passa por revisão.
+- Blobs enviados para uma submissão pendente não são legíveis por leitores, nem por digest: com revisão ligada, só blobs referenciados por um manifest publicado são servidos. Quem publica continua vendo a existência dos próprios blobs (o `HEAD` que o push usa).
+- Owners e administradores do workspace listam (`GET .../oci-reviews`), baixam o documento como anexo (`.../oci-reviews/{id}/manifest`) e decidem (`POST .../approve` ou `/reject`, com CSRF e MFA recente). Quem enviou nunca decide a própria submissão (também garantido por `CHECK` no banco).
+- A aprovação publica o manifest e move a tag na mesma transação, depois de conferir de novo que quem enviou ainda tem grant `publisher` e está ativo, que tudo o que o manifest referencia continua no repositório, a quota e a regra de tags imutáveis. Se algo mudou, responde `409 review_stale` e nada é publicado.
+- Submissões pendentes contam na quota. Decisões são auditadas.
+
 ## Limites conhecidos
 
-- **Sem revisão humana nem reserva de identidade** para OCI. O plano da v1 exige esses controles.
+- **Sem reserva de identidade** para OCI (nomes de imagem não são reservados antes do push).
+- A revisão não usa o papel de revisor explícito dos outros formatos: quem revisa é owner ou administrador do workspace.
 - **Espaço físico não é recuperado:** a coleta só remove a pertença lógica; os objetos ficam no object store.
 - **Sem backup/recovery:** nenhum conjunto de recuperação captura blobs OCI; toda preparação de recovery recusa uma instalação que tenha conteúdo OCI.
 - **Sem mount entre repositórios** (o cliente recebe uma sessão de upload comum) e **sem API de referrers** (404; clientes usam o esquema de tag de fallback). `_catalog` não existe.

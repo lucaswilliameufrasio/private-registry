@@ -30,6 +30,17 @@ func (s *Service) NPMReviewPolicy(ctx context.Context, actorUserID, workspaceID,
 	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatNPM)
 }
 
+// OCIReviewPolicy reports whether new OCI manifests wait for human review.
+func (s *Service) OCIReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string) (ReviewPolicy, error) {
+	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatOCI)
+}
+
+// SetOCIReviewPolicy changes whether new OCI manifests wait for review.
+// Content already published is unaffected.
+func (s *Service) SetOCIReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string, expectedRevision int64, required bool) (ReviewPolicy, error) {
+	return s.setReviewPolicy(ctx, actorUserID, workspaceID, repositoryID, expectedRevision, required, FormatOCI)
+}
+
 // PubReviewPolicy remains internal until Pub publication is available.
 func (s *Service) PubReviewPolicy(ctx context.Context, actorUserID, workspaceID, repositoryID string) (ReviewPolicy, error) {
 	return s.reviewPolicy(ctx, actorUserID, workspaceID, repositoryID, FormatPub)
@@ -169,11 +180,15 @@ func (s *Service) setReviewPolicy(ctx context.Context, actorUserID, workspaceID,
 				query = `UPDATE registry_npm_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)`
 			} else if format == FormatPub {
 				query = `UPDATE registry_pub_reservations SET review_hold = 1 WHERE workspace_id = ` + bind(s.driver, 1) + ` AND repository_id = ` + bind(s.driver, 2) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_pub_publications p WHERE p.reservation_id = registry_pub_reservations.reservation_id)`
-			} else {
+			} else if format != FormatOCI {
 				return errors.New("repository review format is unsupported")
 			}
-			if _, err := tx.ExecContext(ctx, query, workspaceID, repositoryID); err != nil {
-				return errors.New("pending uploads could not be held for review")
+			// OCI has no upload reservations to hold: manifests are checked
+			// against the policy when they are pushed.
+			if format != FormatOCI {
+				if _, err := tx.ExecContext(ctx, query, workspaceID, repositoryID); err != nil {
+					return errors.New("pending uploads could not be held for review")
+				}
 			}
 		}
 		if err := recordAudit(ctx, tx, s.driver, actorID, "repository.review_policy.changed", "repository", repositoryID); err != nil {

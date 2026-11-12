@@ -617,3 +617,66 @@ func TestOCIUsageCountsAgainstTheWorkspaceQuota(t *testing.T) {
 		t.Fatalf("OCI push ignored generic usage: %d", response.Code)
 	}
 }
+
+func TestOCIReviewThroughTheProtocol(t *testing.T) {
+	f := newOCIHTTPFixture(t)
+	ctx := context.Background()
+	base := "/api/v1/workspaces/" + f.workspace + "/repositories/" + f.repository
+	admin := muiraAdminMFACookies(t, f.handler)
+	manage := func(method, path, body string) *httptest.ResponseRecorder {
+		return authHTTPRequestWithCookies(f.handler, method, path, body, authTestOrigin, "registry.example", admin, admin[csrfCookieName].Value)
+	}
+	if response := manage(http.MethodPut, base+"/oci-review-policy", `{"required":true,"expected_revision":0}`); response.Code != http.StatusOK {
+		t.Fatalf("enable review: %d %s", response.Code, response.Body.String())
+	}
+	// The pusher is an ordinary member; the workspace owner reviews.
+	publisher := seedHTTPUser(t, f.authHTTPFixture, "oci.submitter")
+	if err := f.workspaceService.SetMembershipRole(ctx, f.owner, f.workspace, publisher, "member"); err != nil {
+		t.Fatal(err)
+	}
+	write, read := f.tokens(t, publisher, f.repository)
+	image := f.name(f.repository, "app")
+	configBlob, layer := []byte(`{"os":"linux"}`), bytes.Repeat([]byte("reviewed "), 64)
+	f.pushBlob(t, f.repository, write, configBlob)
+	layerDigest := f.pushBlob(t, f.repository, write, layer)
+	manifest := ociImageManifest(configBlob, layer)
+	if response := f.do(http.MethodPut, image+"/manifests/v1", write, oci.MediaTypeOCIManifest, manifest); response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "review") {
+		t.Fatalf("push under review: %d %s", response.Code, response.Body.String())
+	}
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"manifest":  f.do(http.MethodGet, image+"/manifests/v1", read, "", nil),
+		"blob GET":  f.do(http.MethodGet, image+"/blobs/"+layerDigest, read, "", nil),
+		"blob HEAD": f.do(http.MethodHead, image+"/blobs/"+layerDigest, read, "", nil),
+		"by digest": f.do(http.MethodGet, image+"/manifests/"+ociDigest(manifest), read, "", nil),
+	} {
+		if response.Code != http.StatusNotFound {
+			t.Errorf("pending %s readable: %d", name, response.Code)
+		}
+	}
+	listed := manage(http.MethodGet, base+"/oci-reviews", "")
+	var reviews struct {
+		Reviews []ociReviewResponse `json:"reviews"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &reviews); err != nil || len(reviews.Reviews) != 1 || reviews.Reviews[0].SubmittedBy != publisher {
+		t.Fatalf("reviews: %s", listed.Body.String())
+	}
+	id := reviews.Reviews[0].ReviewID
+	if document := manage(http.MethodGet, base+"/oci-reviews/"+id+"/manifest", ""); document.Code != http.StatusOK || !bytes.Equal(document.Body.Bytes(), manifest) || document.Header().Get("Content-Disposition") != "attachment" {
+		t.Fatalf("review document: %d", document.Code)
+	}
+	if response := authHTTPRequestWithCookies(f.handler, http.MethodPost, base+"/oci-reviews/"+id+"/approve", "", authTestOrigin, "registry.example", admin, ""); response.Code != http.StatusForbidden {
+		t.Fatalf("approval without CSRF: %d", response.Code)
+	}
+	if response := manage(http.MethodPost, base+"/oci-reviews/"+id+"/approve", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("approve: %d %s", response.Code, response.Body.String())
+	}
+	if response := f.do(http.MethodGet, image+"/manifests/v1", read, "", nil); response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), manifest) {
+		t.Fatalf("approved manifest: %d", response.Code)
+	}
+	if response := f.do(http.MethodGet, image+"/blobs/"+layerDigest, read, "", nil); response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), layer) {
+		t.Fatalf("approved layer: %d", response.Code)
+	}
+	if response := manage(http.MethodPost, base+"/oci-reviews/"+id+"/reject", ""); response.Code != http.StatusNotFound {
+		t.Fatalf("decision after approval: %d", response.Code)
+	}
+}

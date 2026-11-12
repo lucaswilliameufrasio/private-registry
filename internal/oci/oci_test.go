@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"private-registry/internal/backup"
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/config"
@@ -69,6 +70,26 @@ func TestSQLiteOCILifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	exerciseOCILifecycle(t, ctx, db, config.SQLite)
+}
+
+func TestSQLiteOCIReview(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{DataDir: dataDir, DatabaseDriver: config.SQLite, DatabaseMaxOpenConns: 4}
+	cfg.DatabaseDSN = filepath.Join(cfg.DataDir, "registry.sqlite")
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := migrations.Migrate(ctx, db, cfg); err != nil {
+		t.Fatal(err)
+	}
+	exerciseOCIReview(t, ctx, db, config.SQLite)
 }
 
 // exerciseOCILifecycle covers quota, immutable tags, deletion and blob
@@ -289,6 +310,173 @@ func exerciseOCILifecycle(t *testing.T, ctx context.Context, db *sql.DB, driver 
 	}
 	if _, err := push(layerA); err != nil {
 		t.Fatalf("re-upload after collection within the freed quota: %v", err)
+	}
+}
+
+// exerciseOCIReview covers human review: pending submissions publish nothing,
+// pending blobs stay unreadable, the submitter cannot approve, and approval
+// publishes after revalidating the submitter's grant.
+func exerciseOCIReview(t *testing.T, ctx context.Context, db *sql.DB, driver config.DatabaseDriver) {
+	t.Helper()
+	owner, err := bootstrap.CreateFirstAdmin(ctx, db, driver, bootstrap.AdminInput{LoginName: "oci.reviewed", DisplayName: "Synthetic OCI Review", Email: "oci-review@example.invalid", Password: []byte("synthetic-oci-password-never-reuse"), OperatorLabel: "synthetic-test-operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceService, err := workspaces.New(db, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := workspaceService.CreateWorkspace(ctx, owner, "oci-review", "OCI review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := map[config.DatabaseDriver][]string{config.SQLite: {"?", "?"}, config.Postgres: {"$1", "$2"}}[driver]
+	if _, err := db.ExecContext(ctx, `INSERT INTO registry_users (user_id, display_name, created_at, updated_at) VALUES (`+bindings[0]+`, 'Reviewer', 'now', `+bindings[1]+`)`, reviewer.String(), "now"); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspaceService.SetMembershipRole(ctx, owner, workspace.ID, reviewer.String(), workspaces.RoleAdministrator); err != nil {
+		t.Fatal(err)
+	}
+	repos, err := repositories.New(db, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.EnableFormatCreation(repositories.FormatOCI); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	store, err := storage.NewFileSystem(filepath.Join(root, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := oci.New(db, driver, repos, store, oci.Options{StagingDirectory: filepath.Join(root, "staging"), MaxBlobBytes: 1 << 20, MaxUploads: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := repos.CreateWithFormat(ctx, owner, workspace.ID, "reviewed", "Reviewed", repositories.FormatOCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []repositories.GrantRole{repositories.GrantReader, repositories.GrantPublisher} {
+		if _, err := repos.GrantRepositoryRole(ctx, owner, workspace.ID, repository.ID, owner, role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, err := repos.IssueOCIWriteToken(ctx, owner, workspace.ID, repository.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := service.Authorize(ctx, token.Bearer, workspace.ID, repository.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	push := func(content []byte) string {
+		t.Helper()
+		id, err := service.StartUpload(writer, workspace.ID, repository.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.FinishUpload(ctx, writer, workspace.ID, repository.ID, id, digestOf(content), bytes.NewReader(content)); err != nil {
+			t.Fatal(err)
+		}
+		return digestOf(content)
+	}
+	manifestFor := func(configBlob, layer []byte) []byte {
+		return []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"%s","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"%s","size":%d},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"%s","size":%d}]}`, oci.MediaTypeOCIManifest, digestOf(configBlob), len(configBlob), digestOf(layer), len(layer)))
+	}
+	if _, err := repos.SetOCIReviewPolicy(ctx, owner, workspace.ID, repository.ID, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	configBlob, layer := []byte(`{"os":"linux"}`), bytes.Repeat([]byte("secret layer "), 100)
+	push(configBlob)
+	layerDigest := push(layer)
+	manifest := manifestFor(configBlob, layer)
+	if _, err := service.PutManifest(ctx, writer, workspace.ID, repository.ID, "app", "v1", oci.MediaTypeOCIManifest, manifest); !errors.Is(err, oci.ErrReviewPending) {
+		t.Fatalf("push under review: %v", err)
+	}
+	if _, err := service.PutManifest(ctx, writer, workspace.ID, repository.ID, "app", "v1", oci.MediaTypeOCIManifest, manifest); !errors.Is(err, oci.ErrReviewPending) {
+		t.Fatalf("repeated push under review: %v", err)
+	}
+	if _, err := service.GetManifest(ctx, repository.ID, "app", "v1"); !errors.Is(err, oci.ErrManifestUnknown) {
+		t.Fatalf("pending manifest is visible: %v", err)
+	}
+	// The layer was uploaded but is not readable by digest until published.
+	if _, err := service.StatReadableBlob(ctx, workspace.ID, repository.ID, layerDigest); !errors.Is(err, oci.ErrBlobUnknown) {
+		t.Fatalf("pending blob readable: %v", err)
+	}
+	if _, _, err := service.OpenBlob(ctx, workspace.ID, repository.ID, layerDigest); !errors.Is(err, oci.ErrBlobUnknown) {
+		t.Fatalf("pending blob downloadable: %v", err)
+	}
+	if _, err := service.StatBlob(ctx, repository.ID, layerDigest); err != nil {
+		t.Fatalf("publisher existence probe: %v", err)
+	}
+	reviews, err := service.ListReviews(ctx, reviewer.String(), workspace.ID, repository.ID)
+	if err != nil || len(reviews) != 1 || reviews[0].Tag != "v1" || reviews[0].Image != "app" || reviews[0].SubmittedBy != owner {
+		t.Fatalf("pending reviews: %+v %v", reviews, err)
+	}
+	if submitted, err := service.ReviewManifest(ctx, reviewer.String(), workspace.ID, repository.ID, reviews[0].ID); err != nil || !bytes.Equal(submitted.Content, manifest) {
+		t.Fatalf("review manifest: %v", err)
+	}
+	if err := service.DecideReview(ctx, owner, workspace.ID, repository.ID, reviews[0].ID, true); !errors.Is(err, oci.ErrSelfReview) {
+		t.Fatalf("submitter approved their own push: %v", err)
+	}
+	if err := service.DecideReview(ctx, reviewer.String(), workspace.ID, repository.ID, reviews[0].ID, true); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if got, err := service.GetManifest(ctx, repository.ID, "app", "v1"); err != nil || !bytes.Equal(got.Content, manifest) {
+		t.Fatalf("approved manifest not published: %v", err)
+	}
+	if _, err := service.StatReadableBlob(ctx, workspace.ID, repository.ID, layerDigest); err != nil {
+		t.Fatalf("published blob unreadable: %v", err)
+	}
+	if err := service.DecideReview(ctx, reviewer.String(), workspace.ID, repository.ID, reviews[0].ID, true); !errors.Is(err, oci.ErrReviewUnknown) {
+		t.Fatalf("decided twice: %v", err)
+	}
+	// Retagging a published digest needs no review.
+	if _, err := service.PutManifest(ctx, writer, workspace.ID, repository.ID, "app", "stable", oci.MediaTypeOCIManifest, manifest); err != nil {
+		t.Fatalf("retag of a reviewed digest: %v", err)
+	}
+
+	// A rejected submission publishes nothing.
+	otherLayer := bytes.Repeat([]byte("rejected "), 50)
+	push(otherLayer)
+	rejected := manifestFor(configBlob, otherLayer)
+	if _, err := service.PutManifest(ctx, writer, workspace.ID, repository.ID, "app", "v2", oci.MediaTypeOCIManifest, rejected); !errors.Is(err, oci.ErrReviewPending) {
+		t.Fatal(err)
+	}
+	reviews, _ = service.ListReviews(ctx, reviewer.String(), workspace.ID, repository.ID)
+	if len(reviews) != 1 {
+		t.Fatalf("pending after approval: %+v", reviews)
+	}
+	if err := service.DecideReview(ctx, reviewer.String(), workspace.ID, repository.ID, reviews[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.GetManifest(ctx, repository.ID, "app", "v2"); !errors.Is(err, oci.ErrManifestUnknown) {
+		t.Fatalf("rejected manifest published: %v", err)
+	}
+
+	// Approval rechecks the submitter's grant.
+	third := bytes.Repeat([]byte("third "), 50)
+	push(third)
+	if _, err := service.PutManifest(ctx, writer, workspace.ID, repository.ID, "app", "v3", oci.MediaTypeOCIManifest, manifestFor(configBlob, third)); !errors.Is(err, oci.ErrReviewPending) {
+		t.Fatal(err)
+	}
+	if err := repos.RevokeRepositoryRole(ctx, owner, workspace.ID, repository.ID, owner, repositories.GrantPublisher); err != nil {
+		t.Fatal(err)
+	}
+	reviews, _ = service.ListReviews(ctx, reviewer.String(), workspace.ID, repository.ID)
+	if len(reviews) != 1 {
+		t.Fatalf("pending: %+v", reviews)
+	}
+	if err := service.DecideReview(ctx, reviewer.String(), workspace.ID, repository.ID, reviews[0].ID, true); !errors.Is(err, oci.ErrReviewStale) {
+		t.Fatalf("approval after the submitter lost the grant: %v", err)
+	}
+	if _, err := service.GetManifest(ctx, repository.ID, "app", "v3"); !errors.Is(err, oci.ErrManifestUnknown) {
+		t.Fatalf("stale approval published: %v", err)
 	}
 }
 

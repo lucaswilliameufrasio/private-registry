@@ -118,6 +118,8 @@ func writeOCIServiceError(response http.ResponseWriter, err error) {
 		ociError(response, http.StatusRequestedRangeNotSatisfiable, "BLOB_UPLOAD_INVALID", "upload chunk is out of order")
 	case errors.Is(err, oci.ErrTooLarge):
 		ociError(response, http.StatusRequestEntityTooLarge, "SIZE_INVALID", "content exceeds the size limit")
+	case errors.Is(err, oci.ErrReviewPending):
+		ociError(response, http.StatusForbidden, "DENIED", "manifest is waiting for review and is published when a reviewer approves it")
 	case errors.Is(err, oci.ErrQuota):
 		ociError(response, http.StatusForbidden, "DENIED", "logical quota exceeded")
 	case errors.Is(err, oci.ErrTagImmutable):
@@ -287,7 +289,7 @@ func (h *authHTTP) ociDispatch(response http.ResponseWriter, request *http.Reque
 		}
 		response.WriteHeader(http.StatusNoContent)
 	case route.kind == "blob" && (request.Method == http.MethodGet || request.Method == http.MethodHead):
-		h.ociBlob(response, request, route)
+		h.ociBlob(response, request, route, principal)
 	case route.kind == "manifest" && request.Method == http.MethodPut:
 		h.ociPutManifest(response, request, route, principal)
 	case route.kind == "manifest" && (request.Method == http.MethodGet || request.Method == http.MethodHead):
@@ -392,7 +394,7 @@ func (h *authHTTP) ociFinishUpload(response http.ResponseWriter, request *http.R
 	response.WriteHeader(http.StatusCreated)
 }
 
-func (h *authHTTP) ociBlob(response http.ResponseWriter, request *http.Request, route ociRoute) {
+func (h *authHTTP) ociBlob(response http.ResponseWriter, request *http.Request, route ociRoute, principal oci.Principal) {
 	ctx, cancel := contextWithDeadline(request, time.Now().Add(ociUploadTimeout))
 	defer cancel()
 	setOCIContentHeaders := func(size int64) {
@@ -404,7 +406,15 @@ func (h *authHTTP) ociBlob(response http.ResponseWriter, request *http.Request, 
 		response.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
 	if request.Method == http.MethodHead {
-		size, err := h.oci.StatBlob(ctx, route.repository, route.reference)
+		// A publisher probing before a push sees every blob it uploaded;
+		// readers only see blobs that published manifests reference.
+		stat := h.oci.StatReadableBlob
+		if principal.CanWrite {
+			stat = func(ctx context.Context, _, repository, digest string) (int64, error) {
+				return h.oci.StatBlob(ctx, repository, digest)
+			}
+		}
+		size, err := stat(ctx, route.workspace, route.repository, route.reference)
 		if err != nil {
 			writeOCIServiceError(response, err)
 			return
