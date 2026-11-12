@@ -106,7 +106,7 @@ Para reconstruir um host perdido:
 2. Com o diretório de dados vazio, rode `registry restore-database`. Ele nunca sobrescreve um banco existente.
 3. Rode `registry serve`. Os pacotes voltam a ser servidos se o storage for S3; com storage em filesystem os bytes se perderam com o host.
 
-Perde-se o que foi escrito depois do último envio, e o que foi revogado depois desse ponto precisa ser revogado de novo. Acompanhe os logs: cada ciclo que falha gera um `WARN`.
+Perde-se o que foi escrito depois do último envio, e o que foi revogado depois desse ponto precisa ser revogado de novo. Acompanhe `GET /api/v1/admin/replication` (campo `health` diferente de `current` pede atenção) ou os logs: cada ciclo que falha gera `WARN`, e a partir da terceira falha seguida, `ERROR`.
 
 ## Usando cada formato
 

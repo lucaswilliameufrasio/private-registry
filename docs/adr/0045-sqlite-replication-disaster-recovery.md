@@ -27,7 +27,8 @@ A integração expôs dois defeitos, corrigidos em [sqlite-replication-go#1](htt
 ## Limites
 
 - **Só o banco.** Objetos de pacote, chave mestra e configuração não são replicados. O desastre completo só é recuperável com `REGISTRY_STORAGE_DRIVER=s3` (os bytes já estão fora do host) e com cópia da chave mestra guardada pelo operador. Com storage em filesystem, o restore traz um catálogo que aponta para objetos perdidos.
-- **RPO.** Perde-se o que foi escrito depois do último ciclo enviado: até o intervalo, ou mais se o destino estiver indisponível. Não há alerta além de log `WARN` por ciclo falho; não existe endpoint de status.
+- **RPO.** Perde-se o que foi escrito depois do último ciclo enviado: até o intervalo, ou mais se o destino estiver indisponível.
+- **Acompanhamento.** `GET /api/v1/admin/replication` (só administrador da instância) devolve `health` (`current`, `pending`, `lagging` quando o bucket não está comprovadamente atualizado há mais de 3 intervalos, `failing`), `lag_seconds`, `last_current_at`, geração, TXID e falhas seguidas; não devolve bucket, chaves nem texto de erro. Cada ciclo falho gera `WARN`, e a partir da terceira falha seguida, `ERROR`. Não há envio de alerta: isso fica com o monitoramento do operador consultando o endpoint ou os logs.
 - **Revogações.** Tokens e sessões voltam como estavam no ponto restaurado; o que foi revogado depois precisa ser revogado de novo.
 - **Custo por ciclo.** Cada captura copia o banco inteiro (Online Backup) e reaplica a cadeia da geração segurando o lock de escrita, e cada envio reconfirma todos os objetos da geração. Bom para bancos de dezenas ou poucas centenas de MB; bancos grandes vão atrasar escritas e podem estourar os 30 s.
 - **Plataforma.** A biblioteca só captura em Linux amd64; em outra plataforma o `serve` recusa subir com replicação ligada. PostgreSQL não é coberto.

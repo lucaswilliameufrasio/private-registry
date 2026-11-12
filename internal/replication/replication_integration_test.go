@@ -178,7 +178,7 @@ func TestReplicationRestoresEveryCommittedWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := replicator.Status()
-	if first.Generation == "" || first.TXID == 0 || first.LastSyncedAt.IsZero() {
+	if health, _ := first.Evaluate(time.Now()); first.Generation == "" || first.TXID == 0 || first.LastSyncedAt.IsZero() || health != HealthCurrent {
 		t.Fatalf("status after the first cycle: %+v", first)
 	}
 
@@ -354,7 +354,7 @@ func TestReplicationRecoversFromDestinationOutage(t *testing.T) {
 		if err := replicator.Cycle(f.ctx); err == nil {
 			t.Fatal("upload to a missing bucket succeeded")
 		}
-		if status := replicator.Status(); status.ConsecutiveFails != attempt || status.LastError == "" || !status.LastSyncedAt.IsZero() {
+		if status := replicator.Status(); status.ConsecutiveFails != attempt || status.LastError == "" || !status.LastSyncedAt.IsZero() || func() bool { health, _ := status.Evaluate(time.Now()); return health != HealthFailing }() {
 			t.Fatalf("status during outage: %+v", status)
 		}
 	}

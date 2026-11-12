@@ -297,6 +297,28 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err := repositoryService.EnableFormatCreation(enabledFormats...); err != nil {
 		return err
 	}
+	var replicator *replication.Replicator
+	if cfg.Replication.Enabled {
+		store, err := openReplicationStore(cfg)
+		if err != nil {
+			return err
+		}
+		replicator, err = replication.New(replication.Options{
+			DatabasePath:        cfg.DatabaseDSN,
+			Directory:           filepath.Join(cfg.DataDir, "replication"),
+			Store:               store,
+			Prefix:              cfg.Replication.Target.Prefix,
+			RemoteID:            cfg.Replication.Target.Endpoint + "/" + cfg.Replication.Target.Bucket,
+			Interval:            cfg.Replication.Interval,
+			RotateAfterCaptures: cfg.Replication.RotateAfterCaptures,
+			RetainGenerations:   cfg.Replication.RetainGenerations,
+			Logger:              logger,
+		})
+		if err != nil {
+			return err
+		}
+		httpConfig.Replication = replicator
+	}
 	handler, err := server.NewHandler(health, authentication, workspaceService, repositoryService, artifactService, httpConfig)
 	if err != nil {
 		return err
@@ -321,29 +343,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		workers.Wait()
 	}()
 	replicationDone := make(chan struct{})
-	if cfg.Replication.Enabled {
-		store, err := openReplicationStore(cfg)
-		if err != nil {
-			_ = listener.Close()
-			stopWorker()
-			return err
-		}
-		replicator, err := replication.New(replication.Options{
-			DatabasePath:        cfg.DatabaseDSN,
-			Directory:           filepath.Join(cfg.DataDir, "replication"),
-			Store:               store,
-			Prefix:              cfg.Replication.Target.Prefix,
-			RemoteID:            cfg.Replication.Target.Endpoint + "/" + cfg.Replication.Target.Bucket,
-			Interval:            cfg.Replication.Interval,
-			RotateAfterCaptures: cfg.Replication.RotateAfterCaptures,
-			RetainGenerations:   cfg.Replication.RetainGenerations,
-			Logger:              logger,
-		})
-		if err != nil {
-			_ = listener.Close()
-			stopWorker()
-			return err
-		}
+	if replicator != nil {
 		go func() {
 			defer close(replicationDone)
 			replicator.Run(workerCtx)

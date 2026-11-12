@@ -540,6 +540,29 @@ func (s *Service) VisibilityPolicy(ctx context.Context, actorUserID string) (Vis
 	return policy, nil
 }
 
+// RequireInstanceAdministrator authorizes installation-level read endpoints
+// that have no repository or workspace of their own.
+func (s *Service) RequireInstanceAdministrator(ctx context.Context, actorUserID string) error {
+	if s == nil || s.db == nil || ctx == nil {
+		return errors.New("installation administrator authorization is unavailable")
+	}
+	actorID, err := parseUUID(actorUserID, ErrUnauthenticated)
+	if err != nil {
+		return ErrUnauthenticated
+	}
+	if err := requireActiveUserDB(ctx, s.db, s.driver, actorID); err != nil {
+		return err
+	}
+	isAdministrator, err := isInstanceAdministratorDB(ctx, s.db, s.driver, actorID)
+	if err != nil {
+		return errors.New("installation administrator authorization could not be checked")
+	}
+	if !isAdministrator {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func (s *Service) withWriteTransaction(ctx context.Context, operation func(*sql.Tx) error) (retErr error) {
 	if s == nil || s.db == nil || operation == nil {
 		return errors.New("repository service is not initialized")

@@ -66,6 +66,52 @@ type Status struct {
 	LastSyncedAt     time.Time
 	ConsecutiveFails int
 	LastError        string
+	// LastCycleAt is when the last cycle ended, successful or not.
+	LastCycleAt time.Time
+	StartedAt   time.Time
+	Interval    time.Duration
+}
+
+// Health classifies replication for operators. A database that did not
+// change is not lagging: lag is measured from the last cycle that had nothing
+// left to send, which is the last moment the bucket was known to be current.
+type Health string
+
+const (
+	HealthCurrent Health = "current"
+	HealthPending Health = "pending" // no generation uploaded yet
+	HealthLagging Health = "lagging"
+	HealthFailing Health = "failing"
+)
+
+// Evaluate reports the health at now. Replication is lagging when the bucket
+// was last known to be current more than three intervals ago, and failing
+// when the most recent cycles failed.
+func (s Status) Evaluate(now time.Time) (Health, time.Duration) {
+	if s.ConsecutiveFails > 0 {
+		reference := s.LastCurrentAt()
+		if reference.IsZero() {
+			reference = s.StartedAt
+		}
+		return HealthFailing, now.Sub(reference)
+	}
+	reference := s.LastCurrentAt()
+	if reference.IsZero() {
+		return HealthPending, now.Sub(s.StartedAt)
+	}
+	lag := now.Sub(reference)
+	if s.Interval > 0 && lag > 3*s.Interval {
+		return HealthLagging, lag
+	}
+	return HealthCurrent, lag
+}
+
+// LastCurrentAt is the last time the bucket held every committed change.
+func (s Status) LastCurrentAt() time.Time {
+	if s.ConsecutiveFails == 0 && !s.LastSyncedAt.IsZero() && s.LastCycleAt.After(s.LastSyncedAt) {
+		return s.LastCycleAt
+	}
+	return s.LastSyncedAt
 }
 
 type Replicator struct {
@@ -105,7 +151,7 @@ func New(options Options) (*Replicator, error) {
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("SQLite replication directory must be a private directory")
 	}
-	return &Replicator{options: options}, nil
+	return &Replicator{options: options, status: Status{StartedAt: time.Now().UTC(), Interval: options.Interval}}, nil
 }
 
 func (r *Replicator) Status() Status {
@@ -142,6 +188,7 @@ func (r *Replicator) Cycle(ctx context.Context) error {
 func (r *Replicator) cycle(ctx context.Context, final bool) error {
 	err := r.replicateOnce(ctx, final)
 	r.mu.Lock()
+	r.status.LastCycleAt = time.Now().UTC()
 	if err != nil {
 		r.status.ConsecutiveFails++
 		r.status.LastError = err.Error()
@@ -161,7 +208,11 @@ func (r *Replicator) cycle(ctx context.Context, final bool) error {
 		if failures >= maxCaptureFailures && !sqliteBusy(err) {
 			r.generation = ""
 		}
-		r.options.Logger.Warn("SQLite replication cycle failed", "error", err, "consecutive_failures", failures, "generation", r.generation)
+		level := slog.LevelWarn
+		if failures >= maxCaptureFailures {
+			level = slog.LevelError
+		}
+		r.options.Logger.Log(context.Background(), level, "SQLite replication cycle failed", "error", err, "consecutive_failures", failures, "generation", r.generation)
 	}
 	return err
 }

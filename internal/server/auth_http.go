@@ -57,6 +57,8 @@ type AuthHTTPConfig struct {
 	PubWriteProtocol       *PubWriteProtocolConfig
 	// OCI enables the experimental /v2/ distribution routes when set.
 	OCI *oci.Service
+	// Replication reports SQLite replication health when it is enabled.
+	Replication ReplicationStatus
 }
 
 type authHTTP struct {
@@ -79,6 +81,7 @@ type authHTTP struct {
 	pubWriteProtocol       *pubWriteProtocol
 	pubMetadataSlots       chan struct{}
 	oci                    *oci.Service
+	replication            ReplicationStatus
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -316,6 +319,7 @@ func NewHandler(
 		pubWriteProtocol:       pubWrite,
 		pubMetadataSlots:       make(chan struct{}, 4),
 		oci:                    cfg.OCI,
+		replication:            cfg.Replication,
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -361,6 +365,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/generic-logical-quota", h.setLogicalQuota)
 	router.Get("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.getLogicalQuota)
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
+	router.Get("/api/v1/admin/replication", h.replicationStatus)
 	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
 	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
 	router.Get("/api/v1/admin/jobs/recovery", h.listRecoveryJobs)
