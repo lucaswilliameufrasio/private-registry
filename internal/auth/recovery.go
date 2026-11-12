@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"private-registry/internal/bootstrap"
+	"private-registry/internal/database"
 	"private-registry/internal/loginname"
 	"private-registry/internal/password"
 )
@@ -268,6 +269,10 @@ func (s *Service) recordRecoveryAudit(ctx context.Context, tx *sql.Tx, actor, op
 func (s *Service) withTransaction(ctx context.Context, operation func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return ErrUnavailable
+	}
+	if err := database.ReserveWrite(ctx, tx, s.driver); err != nil {
+		_ = tx.Rollback()
 		return ErrUnavailable
 	}
 	if err := operation(tx); err != nil {

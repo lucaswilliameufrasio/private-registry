@@ -18,6 +18,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"private-registry/internal/config"
+	"private-registry/internal/database"
 	"private-registry/internal/repositories"
 )
 
@@ -236,6 +237,9 @@ func (s *Service) Exchange(ctx context.Context, rawToken, workspace, repository 
 		return Exchanged{}, ErrUnavailable
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := database.ReserveWrite(ctx, tx, s.driver); err != nil {
+		return Exchanged{}, ErrUnavailable
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT publisher_id, service_account_id, COALESCE(subject_repository_id, ''), subject_ref, COALESCE(subject_environment, '') FROM registry_trusted_publishers WHERE workspace_id = `+s.bind(1)+` AND repository_id = `+s.bind(2)+` AND revoked_at_ms IS NULL AND provider = 'github' AND subject_repository = `+s.bind(3)+` ORDER BY publisher_id`, workspace, repository, strings.ToLower(claims.Repository))
 	if err != nil {
 		return Exchanged{}, ErrUnavailable
