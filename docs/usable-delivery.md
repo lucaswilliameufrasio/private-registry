@@ -62,7 +62,7 @@ export REGISTRY_S3_DNS_SERVER=1.1.1.1:53                       # obrigatório pa
 - Os arquivos de credencial precisam ser do usuário do processo, modo `0600`/`0400`, sem symlink. Nada é lido de variáveis `AWS_*`.
 - A saída só alcança o endpoint configurado, nos CIDRs configurados. Você precisa informar as redes do provedor; sem elas o servidor não sobe.
 - Todos os formatos passam a guardar os bytes no bucket. **Continuam em disco local:** o banco SQLite, `<data>/s3-staging` (cada leitura e escrita baixa/gera o objeto inteiro ali para verificar o SHA-256) e os stagings de upload dos formatos. Reserve disco para isso: o teto do staging S3 é `(2 × 1 GiB + 1) × REGISTRY_S3_MAX_CONCURRENT` (default 8).
-- Trocar de `filesystem` para `s3` numa instância com dados **não migra objetos**; os existentes ficam ilegíveis até serem copiados para o bucket na mesma estrutura de chaves (`<prefix>/workspaces/<workspace>/sha256/<digest>`). Não há ferramenta para isso.
+- Para migrar uma instância que já tem dados em filesystem: pare o `serve`, configure as variáveis acima e rode `registry migrate-objects` (verificado, repetível, não apaga a cópia local). Depois suba o `serve` e, quando estiver satisfeito, remova `<data>/object-store`. Ver [ADR 0047](adr/0047-offline-object-maintenance.md).
 - Antes de confiar num provedor, valide nele: escrita condicional `If-None-Match: *` em `PutObject` (nenhum provedor foi verificado aqui; um que ignore a condição enfraquece a imutabilidade para quem tem escrita no bucket), objetos próximos de 1 GiB dentro do limite de 2 minutos por requisição, e comportamento sob falha.
 
 ### Login via Muira (opcional)
@@ -93,6 +93,10 @@ Para contas locais, use convites (abaixo).
 4. Conceda os grants de repositório; o convite dá só a membership.
 
 Detalhes no [ADR 0046](adr/0046-workspace-invitations.md).
+
+### Liberando espaço
+
+A coleta OCI e as expirações só removem referências. Para apagar de fato os objetos que nada referencia, numa janela de manutenção com o `serve` parado: `registry collect-objects` (só relata) e depois `registry collect-objects --apply`. Objetos com menos de 24 h e qualquer objeto ainda referenciado são mantidos.
 
 ### Disaster recovery do banco (SQLite)
 
@@ -173,8 +177,8 @@ Owners e administradores do workspace gerenciam o repositório pela API (CSRF e 
 Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 
 - **Backup além do disaster recovery.** O banco SQLite tem replicação contínua e restore (seção acima), mas não há backup cifrado independente, retenção longa, verificador externo nem cobertura para PostgreSQL. As peças internas de inventário e recovery isolado continuam sem comando de operador e marcam o resultado como `RECOVERY_INCOMPLETE`; para OCI elas recusam a instalação.
-- **OCI:** sem mount e referrers; a coleta libera quota mas não apaga objetos armazenados; Docker/containerd não comprovados; blob limitado a 1 GiB.
-- **Storage S3:** sem qualificação em provedor real, sem multipart, sem GC de órfãos, sem migração entre drivers.
+- **OCI:** sem mount e referrers; objetos armazenados só são apagados pela coleta offline; Docker/containerd não comprovados; blob limitado a 1 GiB.
+- **Storage S3:** sem qualificação em provedor real e sem multipart; migração e coleta de órfãos só offline.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
 - **Sem UI, email, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).

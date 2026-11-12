@@ -34,6 +34,7 @@ import (
 	"private-registry/internal/maintenance"
 	"private-registry/internal/migrations"
 	"private-registry/internal/npm"
+	"private-registry/internal/objectmaint"
 	"private-registry/internal/oci"
 	"private-registry/internal/pub"
 	"private-registry/internal/replication"
@@ -61,8 +62,12 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
-	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key" && args[0] != "restore-database") {
-		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database}")
+	apply := false
+	if len(args) == 2 && args[0] == "collect-objects" && args[1] == "--apply" {
+		apply, args = true, args[:1]
+	}
+	if len(args) != 1 || (args[0] != "serve" && args[0] != "migrate" && args[0] != "bootstrap-admin" && args[0] != "init-master-key" && args[0] != "restore-database" && args[0] != "migrate-objects" && args[0] != "collect-objects") {
+		return errors.New("usage: registry {serve|migrate|bootstrap-admin|init-master-key|restore-database|migrate-objects|collect-objects [--apply]}")
 	}
 	if logger == nil {
 		return errors.New("logger is required")
@@ -102,6 +107,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		err = errors.Join(err, db.Close())
 	}()
 
+	if args[0] == "migrate-objects" || args[0] == "collect-objects" {
+		return runObjectMaintenance(ctx, db, cfg, logger, args[0], apply)
+	}
 	if args[0] == "migrate" {
 		report, err := migrations.Migrate(ctx, db, cfg)
 		if err != nil {
@@ -130,6 +138,13 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	if err := verifyServeSchema(ctx, db, cfg.DatabaseDriver); err != nil {
 		return err
 	}
+	// Offline object maintenance takes the same lock, so it cannot run while
+	// this process serves.
+	instanceLock, err := objectmaint.AcquireInstanceLock(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, instanceLock.Release()) }()
 	masterKey, err := secrets.LoadMasterKeyFile(cfg.MasterKeyFile, cfg.DataDir)
 	if err != nil {
 		return err
@@ -536,6 +551,58 @@ func runRestoreDatabase(ctx context.Context, cfg config.Config, logger *slog.Log
 	logger.Info("database restored from replication", "generation", restored.Generation, "skipped_generations", restored.Skipped)
 	return nil
 }
+
+// runObjectMaintenance runs offline object commands while holding the
+// instance lock that serve also takes.
+func runObjectMaintenance(ctx context.Context, db *sql.DB, cfg config.Config, logger *slog.Logger, command string, apply bool) (err error) {
+	if err := verifyServeSchema(ctx, db, cfg.DatabaseDriver); err != nil {
+		return err
+	}
+	lock, err := objectmaint.AcquireInstanceLock(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	if command == "migrate-objects" {
+		if cfg.Storage.Driver != config.StorageS3 {
+			return errors.New("migrate-objects copies the filesystem object store into S3; configure REGISTRY_STORAGE_DRIVER=s3 and its destination first")
+		}
+		source, err := storage.NewFileSystem(filepath.Join(cfg.DataDir, "object-store"))
+		if err != nil {
+			return err
+		}
+		destination, err := openObjectStore(cfg)
+		if err != nil {
+			return err
+		}
+		report, err := objectmaint.Copy(ctx, source, destination, config.MaxConfiguredUploadBytes, func(progress objectmaint.CopyReport) {
+			logger.Info("objects copied so far", "objects", progress.Copied, "bytes", progress.Bytes)
+		})
+		if err != nil {
+			return err
+		}
+		logger.Info("object migration complete; the filesystem copy was kept", "objects", report.Copied, "bytes", report.Bytes)
+		return nil
+	}
+	store, err := openObjectStore(cfg)
+	if err != nil {
+		return err
+	}
+	walkCtx, cancel := context.WithTimeout(ctx, 6*time.Hour)
+	defer cancel()
+	report, err := objectmaint.Collect(walkCtx, db, cfg.DatabaseDriver, store, time.Now(), objectCollectionGrace, apply)
+	logger.Info("object collection", "apply", apply, "scanned", report.Scanned, "referenced", report.Referenced, "too_recent", report.TooRecent, "unreferenced", report.Unreferenced, "unreferenced_bytes", report.UnrefBytes, "deleted", report.Deleted, "deleted_bytes", report.DeletedBytes)
+	if err != nil {
+		return err
+	}
+	if !apply && report.Unreferenced > 0 {
+		logger.Info("nothing was deleted; run collect-objects --apply to delete the unreferenced objects")
+	}
+	return nil
+}
+
+// objectCollectionGrace keeps objects written shortly before serve stopped.
+const objectCollectionGrace = 24 * time.Hour
 
 // loadCertificatePool returns nil (system roots) when no bundle is configured.
 // A configured bundle replaces the system roots for that single integration.

@@ -41,7 +41,7 @@ Implementar o protocolo OCI Distribution dentro do registry (`internal/oci`, rot
 
 - **Sem reserva de identidade** para OCI (nomes de imagem não são reservados antes do push).
 - A revisão não usa o papel de revisor explícito dos outros formatos: quem revisa é owner ou administrador do workspace.
-- **Espaço físico não é recuperado:** a coleta só remove a pertença lógica; os objetos ficam no object store.
+- **Espaço físico só é recuperado offline**, por `registry collect-objects --apply` com o servidor parado ([ADR 0047](0047-offline-object-maintenance.md)).
 - **Sem backup/recovery:** nenhum conjunto de recuperação captura blobs OCI; toda preparação de recovery recusa uma instalação que tenha conteúdo OCI.
 - **Sem mount entre repositórios** (o cliente recebe uma sessão de upload comum) e **sem API de referrers** (404; clientes usam o esquema de tag de fallback). `_catalog` não existe.
 - **Tamanho de blob** limitado por `REGISTRY_MAX_UPLOAD_BYTES` (teto 1 GiB); layers maiores são recusadas. O staging pode ocupar até `sessões × limite` (sessões = 4 × `REGISTRY_MAX_CONCURRENT_UPLOADS`, máximo 64).

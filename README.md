@@ -59,6 +59,7 @@ Registry privado self-hosted em desenvolvimento. A fundação contém migrations
 - [ADR 0044: adapter OCI próprio](docs/adr/0044-own-oci-adapter.md)
 - [ADR 0045: disaster recovery do SQLite por replicação](docs/adr/0045-sqlite-replication-disaster-recovery.md)
 - [ADR 0046: convites de workspace](docs/adr/0046-workspace-invitations.md)
+- [ADR 0047: manutenção offline de objetos](docs/adr/0047-offline-object-maintenance.md)
 - [Entrega utilizável: guia de operação e limites](docs/usable-delivery.md)
 
 O plano, o roadmap e o progresso de implementação também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md`, `plans/roadmap.md` e `plans/implementation-progress.md`.
