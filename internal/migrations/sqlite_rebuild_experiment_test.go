@@ -89,6 +89,8 @@ func TestSQLiteRepositoryRebuildExperiment(t *testing.T) {
 			delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
 			delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
 			delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
+			delete(old, "sql/sqlite/000046_email_delivery.sql")
+			delete(old, "sql/postgres/000046_email_delivery.sql")
 			if _, err := migrateWithFS(ctx, db, cfg, old); err != nil {
 				t.Fatal(err)
 			}
@@ -139,7 +141,7 @@ func TestSQLiteRepositoryRebuildExperiment(t *testing.T) {
 					}
 				} else {
 					report, err = Migrate(ctx, db, cfg)
-					if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 28 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 || report.AppliedVersions[8] != 26 || report.AppliedVersions[9] != 27 || report.AppliedVersions[10] != 28 || report.AppliedVersions[11] != 29 || report.AppliedVersions[12] != 30 || report.AppliedVersions[13] != 31 || report.AppliedVersions[14] != 32 || report.AppliedVersions[15] != 33 || report.AppliedVersions[16] != 34 || report.AppliedVersions[17] != 35 || report.AppliedVersions[18] != 36 || report.AppliedVersions[19] != 37 || report.AppliedVersions[20] != 38 || report.AppliedVersions[21] != 39 || report.AppliedVersions[22] != 40 || report.AppliedVersions[23] != 41 || report.AppliedVersions[24] != 42 || report.AppliedVersions[25] != 43 || report.AppliedVersions[26] != 44 || report.AppliedVersions[27] != 45 {
+					if err != nil || report.CurrentVersion != 46 || len(report.AppliedVersions) != 29 || report.AppliedVersions[0] != 18 || report.AppliedVersions[1] != 19 || report.AppliedVersions[2] != 20 || report.AppliedVersions[3] != 21 || report.AppliedVersions[4] != 22 || report.AppliedVersions[5] != 23 || report.AppliedVersions[6] != 24 || report.AppliedVersions[7] != 25 || report.AppliedVersions[8] != 26 || report.AppliedVersions[9] != 27 || report.AppliedVersions[10] != 28 || report.AppliedVersions[11] != 29 || report.AppliedVersions[12] != 30 || report.AppliedVersions[13] != 31 || report.AppliedVersions[14] != 32 || report.AppliedVersions[15] != 33 || report.AppliedVersions[16] != 34 || report.AppliedVersions[17] != 35 || report.AppliedVersions[18] != 36 || report.AppliedVersions[19] != 37 || report.AppliedVersions[20] != 38 || report.AppliedVersions[21] != 39 || report.AppliedVersions[22] != 40 || report.AppliedVersions[23] != 41 || report.AppliedVersions[24] != 42 || report.AppliedVersions[25] != 43 || report.AppliedVersions[26] != 44 || report.AppliedVersions[27] != 45 || report.AppliedVersions[28] != 46 {
 						t.Fatalf("v17 to v30 upgrade failed: %+v err=%v", report, err)
 					}
 					if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

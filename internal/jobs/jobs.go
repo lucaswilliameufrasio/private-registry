@@ -105,6 +105,24 @@ func (q *Queue) transaction(ctx context.Context, operation func(*sql.Tx) error) 
 // Enqueue creates a durable job once. A repeated key with different parameters
 // is rejected; payloads must not contain credentials or sensitive data.
 func (q *Queue) Enqueue(ctx context.Context, key, kind, payload string, maxAttempts int, available, now time.Time) (string, error) {
+	var jobID string
+	err := q.transaction(ctx, func(tx *sql.Tx) error {
+		var err error
+		jobID, err = q.EnqueueTx(ctx, tx, key, kind, payload, maxAttempts, available, now)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return jobID, nil
+}
+
+// EnqueueTx is Enqueue inside the caller's transaction, so a job is created
+// exactly when the business change that needs it commits.
+func (q *Queue) EnqueueTx(ctx context.Context, tx *sql.Tx, key, kind, payload string, maxAttempts int, available, now time.Time) (string, error) {
+	if q == nil || ctx == nil || tx == nil {
+		return "", ErrUnavailable
+	}
 	if strings.TrimSpace(key) != key || len(key) < 1 || len(key) > 200 || strings.TrimSpace(kind) != kind || len(kind) < 1 || len(kind) > 80 || len(payload) > 16384 || maxAttempts < 1 || maxAttempts > 100 || available.IsZero() || now.IsZero() {
 		return "", ErrInvalid
 	}
@@ -113,36 +131,54 @@ func (q *Queue) Enqueue(ctx context.Context, key, kind, payload string, maxAttem
 		return "", errors.New("job identity could not be created")
 	}
 	jobID := id.String()
-	err = q.transaction(ctx, func(tx *sql.Tx) error {
-		query := `INSERT INTO registry_jobs (job_id, idempotency_key, kind, payload, status, attempts, max_attempts, initial_available_at_ms, available_at_ms, created_at_ms, updated_at_ms)
+	query := `INSERT INTO registry_jobs (job_id, idempotency_key, kind, payload, status, attempts, max_attempts, initial_available_at_ms, available_at_ms, created_at_ms, updated_at_ms)
 		VALUES (` + q.bind(1) + `,` + q.bind(2) + `,` + q.bind(3) + `,` + q.bind(4) + `,'pending',0,` + q.bind(5) + `,` + q.bind(6) + `,` + q.bind(7) + `,` + q.bind(8) + `,` + q.bind(9) + `) ON CONFLICT (idempotency_key) DO NOTHING`
-		result, err := tx.ExecContext(ctx, query, jobID, key, kind, payload, maxAttempts, available.UnixMilli(), available.UnixMilli(), now.UnixMilli(), now.UnixMilli())
+	result, err := tx.ExecContext(ctx, query, jobID, key, kind, payload, maxAttempts, available.UnixMilli(), available.UnixMilli(), now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return "", errors.New("job could not be enqueued")
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return "", errors.New("job enqueue result could not be read")
+	}
+	if count == 1 {
+		return jobID, nil
+	}
+	var storedKind, storedPayload string
+	var storedMax int
+	var storedAvailable int64
+	query = `SELECT job_id, kind, payload, max_attempts, initial_available_at_ms FROM registry_jobs WHERE idempotency_key = ` + q.bind(1)
+	if err := tx.QueryRowContext(ctx, query, key).Scan(&jobID, &storedKind, &storedPayload, &storedMax, &storedAvailable); err != nil {
+		return "", errors.New("existing job could not be read")
+	}
+	if storedKind != kind || storedPayload != payload || storedMax != maxAttempts || storedAvailable != available.UnixMilli() {
+		return "", ErrConflict
+	}
+	return jobID, nil
+}
+
+// Abandon ends an owned claim as dead without further attempts, for failures
+// that retrying cannot fix.
+func (q *Queue) Abandon(ctx context.Context, id, token string, now time.Time) error {
+	if _, err := uuid.Parse(id); err != nil || now.IsZero() {
+		return ErrInvalid
+	}
+	if _, err := uuid.Parse(token); err != nil {
+		return ErrInvalid
+	}
+	return q.transaction(ctx, func(tx *sql.Tx) error {
+		query := `UPDATE registry_jobs SET status = 'dead', lease_token = NULL, lease_until_ms = NULL, last_failure_code = 'operation_failed', revision = revision + 1, updated_at_ms = ` + q.bind(1) + ` WHERE job_id = ` + q.bind(2) + ` AND status = 'running' AND lease_token = ` + q.bind(3) + ` AND lease_until_ms > ` + q.bind(4)
+		result, err := tx.ExecContext(ctx, query, now.UnixMilli(), id, token, now.UnixMilli())
 		if err != nil {
-			return errors.New("job could not be enqueued")
+			return errors.New("job could not be abandoned")
 		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return errors.New("job enqueue result could not be read")
-		}
-		if count == 1 {
-			return nil
-		}
-		var storedKind, storedPayload string
-		var storedMax int
-		var storedAvailable int64
-		query = `SELECT job_id, kind, payload, max_attempts, initial_available_at_ms FROM registry_jobs WHERE idempotency_key = ` + q.bind(1)
-		if err := tx.QueryRowContext(ctx, query, key).Scan(&jobID, &storedKind, &storedPayload, &storedMax, &storedAvailable); err != nil {
-			return errors.New("existing job could not be read")
-		}
-		if storedKind != kind || storedPayload != payload || storedMax != maxAttempts || storedAvailable != available.UnixMilli() {
-			return ErrConflict
+		if count, err := result.RowsAffected(); err != nil {
+			return errors.New("job abandonment could not be checked")
+		} else if count != 1 {
+			return ErrLease
 		}
 		return nil
 	})
-	if err != nil {
-		return "", err
-	}
-	return jobID, nil
 }
 
 // Claim serializes selection and grants a fresh fencing token. Expired claims

@@ -1,9 +1,10 @@
 // Drives the web interface in a real headless Chromium over the DevTools
 // Protocol, with no npm dependencies. Usage: node browser_journey.mjs
 // <devtools-port> <registry-origin> <admin-login> <admin-password>
+// <mailpit-api-url>
 import crypto from "node:crypto";
 
-const [port, origin, login, password] = process.argv.slice(2);
+const [port, origin, login, password, mailpit] = process.argv.slice(2);
 const step = (name) => console.log("step:", name);
 
 const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
@@ -55,6 +56,24 @@ function totp(secretBase32) {
   const mac = crypto.createHmac("sha1", key).update(counter).digest();
   const offset = mac[mac.length - 1] & 0x0f;
   return String((mac.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, "0");
+}
+
+// Waits for an email whose subject contains subject and returns the link
+// to route found in its text body.
+async function emailedLink(recipient, subject, route) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const listing = await (await fetch(`${mailpit}/api/v1/messages`)).json();
+    for (const message of listing.messages || []) {
+      if (message.To.length === 1 && message.To[0].Address === recipient && message.Subject.includes(subject)) {
+        const detail = await (await fetch(`${mailpit}/api/v1/message/${message.ID}`)).json();
+        const match = detail.Text.match(new RegExp(origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/#/" + route + "\\?token=[A-Za-z0-9%._-]+"));
+        if (match) return match[0];
+      }
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`no "${subject}" email with a ${route} link reached ${recipient}`);
 }
 
 await send("Runtime.enable");
@@ -132,6 +151,39 @@ await waitFor(has("MFA recente"), "MFA-level session from the passkey");
 step("administration page");
 await visit("#/admin");
 await waitFor(has("Política atual"), "admin page");
+
+step("confirm an email address from the emailed link");
+await visit("#/account");
+await waitFor(has("Enviar confirmação"), "email panel");
+await fill("email", "browser.admin@example.com");
+await submit("Enviar confirmação");
+await waitFor(has("Aguardando confirmação"), "pending address");
+const verifyLink = await emailedLink("browser.admin@example.com", "Confirme seu e-mail", "verify-email");
+await send("Page.navigate", { url: verifyLink });
+await waitFor(has("Confirmar que este endereço é seu?"), "confirmation page");
+await submit("Confirmar");
+await waitFor(has("E-mail confirmado"), "confirmed address");
+await visit("#/account");
+await waitFor(has("confirmado"), "account shows the confirmed address");
+
+step("forgot password: emailed link sets a new password, second factor still required");
+await evaluate("document.getElementById('logout').click()");
+await waitFor(has("Esqueci minha senha"), "forgot password link");
+await visit("#/forgot");
+await fill("login_name", login);
+await submit("Enviar link");
+await waitFor(has("Verifique seu e-mail"), "request accepted");
+const recoverLink = await emailedLink("browser.admin@example.com", "Recuperação", "recover");
+await send("Page.navigate", { url: recoverLink });
+await waitFor("document.querySelector('[name=password]') !== null", "recovery form");
+const newPassword = password + "-renewed";
+await fill("password", newPassword);
+await submit("Definir");
+await waitFor(has("Entrar com passkey"), "back on the login page");
+await fill("login_name", login);
+await fill("password", newPassword);
+await submit("Entrar");
+await waitFor(has("Segundo fator"), "second factor still required after recovery");
 
 console.log("browser journey passed");
 socket.close();

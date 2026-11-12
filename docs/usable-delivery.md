@@ -92,11 +92,29 @@ Para contas locais, use convites (abaixo).
 ### Convidando pessoas
 
 1. Uma vez, o administrador da instância permite cadastro por convite: `PUT /api/v1/admin/signup-policy` com `{"policy":"invitations"}`.
-2. Um owner ou administrador do workspace cria o convite: `POST /api/v1/workspaces/{w}/invitations` com `{"role":"member"}`. O token aparece uma vez; entregue-o por um canal seu (não há email).
+2. Um owner ou administrador do workspace cria o convite: `POST /api/v1/workspaces/{w}/invitations` com `{"role":"member"}`. O token aparece uma vez; entregue-o por um canal seu. Com e-mail configurado, inclua `"email"` e o convite vai direto para a pessoa (o token não é devolvido), e a conta criada por ele já nasce com esse e-mail confirmado.
 3. A pessoa cria a conta com `POST /api/v1/auth/invitations/redeem` (`token`, `login_name`, `display_name`, `password`) e faz login. Quem já tem conta, inclusive pelo Muira, usa `POST /api/v1/invitations/accept` com `{"token":"..."}` estando logado.
 4. Conceda os grants de repositório; o convite dá só a membership.
 
 Detalhes no [ADR 0046](adr/0046-workspace-invitations.md).
+
+### E-mail (opcional)
+
+Sem `REGISTRY_EMAIL_PROVIDER`, nada é enviado e os links continuam sendo entregues à mão. Com ele, o registry envia convites, recuperação de senha, confirmação de e-mail e avisos de segurança (senha redefinida, passkey nova, e-mail trocado).
+
+| Provedor | Variáveis |
+| --- | --- |
+| `sabia` | `REGISTRY_EMAIL_API_ORIGIN` (origem HTTPS da instância), `REGISTRY_EMAIL_API_KEY_FILE` (chave `sb_live_…`). O remetente vem do perfil de canal do Sabiá. |
+| `resend` | `REGISTRY_EMAIL_API_KEY_FILE`, `REGISTRY_EMAIL_FROM`; origem padrão `https://api.resend.com` |
+| `millionsend` | `REGISTRY_EMAIL_API_KEY_FILE`, `REGISTRY_EMAIL_FROM`; origem padrão `https://api.millionsend.com` (ou a sua, se for self-hosted) |
+| `smtp` | `REGISTRY_EMAIL_SMTP_ADDRESS` (`host:porta`), `REGISTRY_EMAIL_SMTP_SECURITY` (`starttls` padrão, `tls` ou `none` só para IP de loopback), `REGISTRY_EMAIL_SMTP_USERNAME` + `REGISTRY_EMAIL_SMTP_PASSWORD_FILE` opcionais, `REGISTRY_EMAIL_FROM` |
+
+Todos exigem `REGISTRY_EMAIL_ALLOWED_NETWORKS` e aceitam `REGISTRY_EMAIL_DNS_SERVER` e `REGISTRY_EMAIL_CA_FILE`, como as outras integrações. As mensagens ficam numa fila no banco, cifrada com a chave mestra, e são repetidas em falhas temporárias com a mesma chave de idempotência.
+
+- **Sabiá:** antes do primeiro envio, publique os templates com a chave de deploy: `POST {origem}/v1/template-deployments/plan` e depois `/apply` com o corpo de `sabia/templates.json` (no apply, acrescente `"confirmations": []`). Faça isso no deploy, como uma migration. O arquivo é gerado pelo código: `go test ./internal/email -run TestTemplatesAndSabiaManifest -update-sabia-manifest`.
+- **Desenvolvimento com Mailpit:** `make setup-mailpit`, rode `/tmp/opencode/private-registry-mailpit/mailpit --smtp 127.0.0.1:1025 --listen 127.0.0.1:8025` e use `REGISTRY_EMAIL_PROVIDER=smtp`, `REGISTRY_EMAIL_SMTP_ADDRESS=127.0.0.1:1025`, `REGISTRY_EMAIL_SMTP_SECURITY=none`, `REGISTRY_EMAIL_ALLOWED_NETWORKS=127.0.0.1/32`. As mensagens aparecem em `http://127.0.0.1:8025`.
+
+Cada pessoa confirma o próprio e-mail em **Conta** na interface (ou `PUT /api/v1/account/email`). Só um e-mail confirmado recebe links de recuperação e avisos. Detalhes no [ADR 0054](adr/0054-transactional-email.md).
 
 ### Liberando espaço
 
@@ -152,6 +170,7 @@ Com uma sessão (e MFA recente, se a conta já tiver segundo fator), `POST /api/
 
 - Primeiro, os códigos de recuperação de MFA.
 - Sem eles, ou se esqueceu a senha: um administrador da instância gera um link em `POST /api/v1/admin/users/{id}/recovery` (com `"reset_mfa": true` para remover TOTP e passkeys) e entrega à pessoa, que define a nova senha em `POST /api/v1/auth/recovery` e entra de novo.
+- Com e-mail configurado e e-mail confirmado: "Esqueci minha senha" na tela de login (`POST /api/v1/auth/recovery/request` com o login). O link chega por e-mail, vale 1 h e só troca a senha: o segundo fator continua sendo pedido. O administrador também pode mandar o link por e-mail com `"send_email": true`, sem vê-lo.
 - Se nenhum administrador consegue entrar: `registry recover-admin` no servidor, em terminal interativo.
 
 Detalhes no [ADR 0050](adr/0050-account-recovery.md).
@@ -233,14 +252,14 @@ Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 - **OCI:** sem mount e referrers; objetos armazenados só são apagados pela coleta offline; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real e sem multipart; migração e coleta de órfãos só offline.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
-- **Interface web parcial** (as tarefas comuns); **sem email e SCIM contínuo;** trusted publishing só para GitHub Actions. Passkeys testadas no Chromium com autenticador virtual, não em Safari, Firefox ou chave física.
+- **Interface web parcial** (as tarefas comuns); **sem SCIM contínuo;** e-mail testado com Mailpit e servidores falsos, nenhum envio real por Sabiá, Resend ou MillionSend; trusted publishing só para GitHub Actions. Passkeys testadas no Chromium com autenticador virtual, não em Safari, Firefox ou chave física.
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
 - **arm64:** validado só por emulação QEMU ([ADR 0053](adr/0053-arm64-validation.md)); a replicação do SQLite não roda em arm64, use os backups.
 
 ## Evidência desta entrega
 
-- `cmd/registry`: jornadas pelo `serve` real com Cargo, npm, Dart e ORAS; npm com storage S3 (Floci); opt-in e recusa de Muira inalcançável.
+- `cmd/registry`: jornadas pelo `serve` real com Cargo, npm, Dart e ORAS; npm com storage S3 (Floci); opt-in e recusa de Muira inalcançável; recuperação de senha por e-mail via SMTP no Mailpit; jornada no Chromium incluindo confirmação de e-mail e "esqueci minha senha".
 - `internal/server`: jornadas HTTP de OCI e de Muira contra provedor sintético.
 - `internal/oci`: mesma bateria em SQLite e PostgreSQL real.
 - `internal/config`, `internal/secrets`, `internal/storage`, `cmd/registryctl`: configuração, arquivos de segredo, composição S3 e provider do Cargo.

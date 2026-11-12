@@ -67,6 +67,7 @@ const maxWorkspacePageSize = 100
 type Service struct {
 	db     *sql.DB
 	driver config.DatabaseDriver
+	mail   *invitationMailer
 }
 
 func New(db *sql.DB, driver config.DatabaseDriver) (*Service, error) {

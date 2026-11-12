@@ -66,6 +66,7 @@ Registry privado self-hosted em desenvolvimento. A fundação contém migrations
 - [ADR 0051: passkeys](docs/adr/0051-passkeys.md)
 - [ADR 0052: interface web](docs/adr/0052-web-interface.md)
 - [ADR 0053: validação em arm64](docs/adr/0053-arm64-validation.md)
+- [ADR 0054: e-mail transacional](docs/adr/0054-transactional-email.md)
 - [Entrega utilizável: guia de operação e limites](docs/usable-delivery.md)
 
 O plano, o roadmap e o progresso de implementação também estão registrados no ai-memory, workspace `ursoc`, projeto `private-registry`, em `plans/development-plan.md`, `plans/roadmap.md` e `plans/implementation-progress.md`.

@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +17,8 @@ type signupPolicyBody struct {
 type invitationCreateRequest struct {
 	Role       string `json:"role"`
 	TTLSeconds int64  `json:"ttl_seconds"`
+	// Email, when set, sends the invitation to this address.
+	Email string `json:"email"`
 }
 
 type invitationResponse struct {
@@ -25,7 +28,9 @@ type invitationResponse struct {
 	CreatedBy    string `json:"created_by,omitempty"`
 	CreatedAt    string `json:"created_at,omitempty"`
 	ExpiresAt    string `json:"expires_at"`
-	// Token is present only in the creation response.
+	Email        string `json:"email,omitempty"`
+	// Token is present only in the creation response of an invitation that
+	// was not emailed.
 	Token string `json:"token,omitempty"`
 }
 
@@ -71,6 +76,8 @@ func writeInvitationError(response http.ResponseWriter, err error) {
 		writeAPIError(response, http.StatusConflict, "already_member")
 	case errors.Is(err, workspaces.ErrMembershipUnavailable):
 		writeAPIError(response, http.StatusConflict, "membership_unavailable")
+	case errors.Is(err, workspaces.ErrEmailUnavailable):
+		writeAPIError(response, http.StatusConflict, "email_unavailable")
 	case errors.Is(err, workspaces.ErrInvalidAccount), errors.Is(err, workspaces.ErrInvalidInvitation), errors.Is(err, workspaces.ErrInvalidPolicy):
 		writeAPIError(response, http.StatusBadRequest, "invalid_request")
 	default:
@@ -128,12 +135,17 @@ func (h *authHTTP) createInvitation(response http.ResponseWriter, request *http.
 		writeAPIError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	issued, err := h.workspaces.CreateInvitation(request.Context(), session.UserID, chi.URLParam(request, "workspaceID"), payload.Role, time.Duration(payload.TTLSeconds)*time.Second)
+	issued, err := h.workspaces.CreateInvitationFor(request.Context(), session.UserID, chi.URLParam(request, "workspaceID"), payload.Role, time.Duration(payload.TTLSeconds)*time.Second, payload.Email)
 	if err != nil {
 		writeInvitationError(response, err)
 		return
 	}
-	writeJSON(response, http.StatusCreated, invitationResponse{InvitationID: issued.ID, Role: issued.Role, ExpiresAt: issued.ExpiresAt.Format(time.RFC3339Nano), Token: issued.Token})
+	result := invitationResponse{InvitationID: issued.ID, Role: issued.Role, ExpiresAt: issued.ExpiresAt.Format(time.RFC3339Nano), Email: strings.TrimSpace(payload.Email), Token: issued.Token}
+	// An emailed link goes only to its recipient.
+	if result.Email != "" {
+		result.Token = ""
+	}
+	writeJSON(response, http.StatusCreated, result)
 }
 
 func (h *authHTTP) listInvitations(response http.ResponseWriter, request *http.Request) {
@@ -148,7 +160,7 @@ func (h *authHTTP) listInvitations(response http.ResponseWriter, request *http.R
 	}
 	result := invitationListResponse{Invitations: make([]invitationResponse, 0, len(items))}
 	for _, item := range items {
-		result.Invitations = append(result.Invitations, invitationResponse{InvitationID: item.ID, Role: item.Role, State: item.State, CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt.Format(time.RFC3339Nano), ExpiresAt: item.ExpiresAt.Format(time.RFC3339Nano)})
+		result.Invitations = append(result.Invitations, invitationResponse{InvitationID: item.ID, Role: item.Role, State: item.State, CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt.Format(time.RFC3339Nano), ExpiresAt: item.ExpiresAt.Format(time.RFC3339Nano), Email: item.Email})
 	}
 	writeJSON(response, http.StatusOK, result)
 }

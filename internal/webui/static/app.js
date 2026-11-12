@@ -23,6 +23,11 @@ const MESSAGES = {
   recovery_unavailable: "Link de recuperação inválido, expirado ou já usado.",
   invalid_password: "A senha precisa ter pelo menos 15 caracteres.",
   temporarily_unavailable: "Serviço temporariamente indisponível.",
+  email_unavailable: "O envio de e-mail não está configurado nesta instalação.",
+  no_verified_email: "Essa conta não tem e-mail confirmado.",
+  invalid_email: "Endereço de e-mail inválido.",
+  too_many_requests: "Muitos pedidos de confirmação. Tente de novo mais tarde.",
+  verification_unavailable: "Link de confirmação inválido, expirado ou já usado.",
 };
 
 // ---------- helpers ----------
@@ -239,7 +244,8 @@ function loginPage(params) {
   if (state.methods && state.methods.passkeys && window.PublicKeyCredential) methods.append(el("button", { type: "button", class: "secondary", onclick: () => passkeyLogin().catch(() => {}) }, "Entrar com passkey"));
   if (state.methods && state.methods.muira) methods.append(el("button", { type: "button", class: "secondary", onclick: () => { location.href = "/api/v1/auth/muira/start"; } }, "Entrar com Muira"));
 
-  show(passwordForm, methods);
+  const forgot = state.methods && state.methods.email_recovery ? el("p", { class: "muted" }, el("a", { href: "#/forgot" }, "Esqueci minha senha")) : "";
+  show(passwordForm, methods, forgot);
   root.append(el("div", { class: "panel" }, el("h1", {}, "Entrar"), stage));
   if (params.get("error")) toast("A autenticação externa falhou.", true);
   if (params.get("stage")) nextStage(params.get("stage"));
@@ -307,16 +313,23 @@ async function invitationsTab(workspace, role) {
   const data = await when(api("GET", "/api/v1/workspaces/" + workspace + "/invitations"));
   const created = el("div");
   const roles = role === "owner" ? ["member", "administrator"] : ["member"];
-  const rows = data.invitations.map((i) => el("tr", {}, el("td", {}, i.role), el("td", {}, i.state), el("td", {}, formatDate(i.expires_at)),
+  const rows = data.invitations.map((i) => el("tr", {}, el("td", {}, i.role), el("td", {}, i.email || "link"), el("td", {}, i.state), el("td", {}, formatDate(i.expires_at)),
     el("td", {}, i.state === "pending" ? el("button", { class: "danger", type: "button", onclick: async () => {
       await when(api("DELETE", "/api/v1/workspaces/" + workspace + "/invitations/" + i.invitation_id));
       go("#/w/" + workspace + "/invitations");
     } }, "Revogar") : "")));
-  return el("div", {}, created, el("div", { class: "panel" }, el("h2", {}, "Novo convite"), form("Criar convite", [el("div", { class: "row" }, el("div", {}, field("Papel", select("role", roles, "member"))), el("div", {}, field("Validade (dias)", input("days", { type: "number", min: "1", max: "30", value: "7" }))))], async (form) => {
-    const invitation = await when(api("POST", "/api/v1/workspaces/" + workspace + "/invitations", { role: form.get("role"), ttl_seconds: ttlSeconds(form.get("days")) }));
+  return el("div", {}, created, el("div", { class: "panel" }, el("h2", {}, "Novo convite"), form("Criar convite", [el("div", { class: "row" }, el("div", {}, field("Papel", select("role", roles, "member"))), el("div", {}, field("Validade (dias)", input("days", { type: "number", min: "1", max: "30", value: "7" }))),
+    state.methods && state.methods.email_recovery ? el("div", {}, field("E-mail (opcional: envia o convite)", input("email", { type: "email", autocomplete: "off" }))) : "")], async (form) => {
+    const email = (form.get("email") || "").trim();
+    const invitation = await when(api("POST", "/api/v1/workspaces/" + workspace + "/invitations", { role: form.get("role"), ttl_seconds: ttlSeconds(form.get("days")), email: email || undefined }));
+    if (invitation.email) {
+      toast("Convite enviado para " + invitation.email + ".");
+      go("#/w/" + workspace + "/invitations");
+      return;
+    }
     const link = location.origin + "/#/invite?token=" + encodeURIComponent(invitation.token);
     created.replaceChildren(secret("Link do convite", link, "Envie por um canal seu. Funciona uma vez e expira em " + formatDate(invitation.expires_at) + "."));
-  })), el("div", { class: "panel" }, table(["Papel", "Estado", "Expira", ""], rows)));
+  })), el("div", { class: "panel" }, table(["Papel", "Enviado para", "Estado", "Expira", ""], rows)));
 }
 
 async function serviceAccountsTab(workspace) {
@@ -470,6 +483,7 @@ async function reviewsTab(workspace, repository) {
 async function accountPage() {
   const s = state.session;
   const passkeys = await when(api("GET", "/api/v1/auth/passkeys")).catch(() => ({ passkeys: [] }));
+  const address = await api("GET", "/api/v1/account/email").catch(() => null);
   const rows = passkeys.passkeys.map((p) => el("tr", {}, el("td", {}, p.name), el("td", {}, formatDate(p.created_at)), el("td", {}, formatDate(p.last_used_at) || "nunca"),
     el("td", {}, el("button", { class: "danger", type: "button", onclick: async () => {
       if (!confirm("Remover a passkey " + p.name + "?")) return;
@@ -489,12 +503,24 @@ async function accountPage() {
   }
   return el("div", {}, el("h1", {}, "Conta"),
     el("div", { class: "panel" }, el("p", {}, el("strong", {}, s.display_name || ""), " ", s.login_name ? el("code", {}, s.login_name) : ""), el("p", { class: "muted" }, "TOTP: ", s.has_totp ? "cadastrado" : "não cadastrado", " · sessão: ", s.level, s.mfa_recent ? " (MFA recente)" : ""), totp),
+    address ? emailPanel(address) : "",
     el("div", { class: "panel" }, el("h2", {}, "Passkeys"), table(["Nome", "Criada", "Último uso", ""], rows),
       state.methods && state.methods.passkeys && window.PublicKeyCredential ? form("Adicionar passkey", [field("Nome", input("name", { required: true, value: "Este dispositivo" }))], async (form) => {
         await passkeyRegister(form.get("name"));
         await loadSession();
         go("#/account");
       }) : el("p", { class: "muted" }, "Passkeys indisponíveis neste navegador ou nesta instalação.")));
+}
+
+function emailPanel(address) {
+  const status = address.email ? [el("code", {}, address.email), " ", address.verified ? el("span", { class: "badge" }, "confirmado") : el("span", { class: "badge" }, "não confirmado")] : [el("span", { class: "muted" }, "nenhum")];
+  const pending = address.pending_email ? el("p", { class: "muted" }, "Aguardando confirmação: ", el("code", {}, address.pending_email), ". Abra o link enviado para esse endereço.") : "";
+  const change = address.delivery_enabled ? form("Enviar confirmação", [field("Novo e-mail", input("email", { type: "email", required: true, autocomplete: "email" }))], async (form) => {
+    await when(api("PUT", "/api/v1/account/email", { email: form.get("email") }));
+    toast("Enviamos um link de confirmação. O endereço só passa a valer depois de confirmado.");
+    go("#/account");
+  }) : el("p", { class: "muted" }, "O envio de e-mail não está configurado nesta instalação.");
+  return el("div", { class: "panel" }, el("h2", {}, "E-mail"), el("p", {}, "Atual: ", status), el("p", { class: "muted" }, "Um e-mail confirmado permite pedir a recuperação da senha e receber avisos de segurança."), pending, change);
 }
 
 async function adminPage() {
@@ -508,8 +534,13 @@ async function adminPage() {
         go("#/admin");
       } }, policy.policy === "closed" ? "Permitir cadastro por convite" : "Fechar cadastro")),
     replication ? el("div", { class: "panel" }, el("h2", {}, "Replicação do banco"), replication.enabled ? el("p", {}, "Estado: ", el("strong", {}, replication.health), " · atraso ", String(replication.lag_seconds || 0), " s · último envio ", formatDate(replication.last_synced_at) || "—") : el("p", { class: "muted" }, "Desligada.")) : "",
-    el("div", { class: "panel" }, el("h2", {}, "Recuperar uma conta"), recovery, form("Gerar link", [el("div", { class: "row" }, el("div", {}, field("ID do usuário", input("user", { required: true }))), el("div", {}, el("label", {}, input("reset_mfa", { type: "checkbox" }), " remover TOTP e passkeys")))], async (form) => {
-      const issued = await when(api("POST", "/api/v1/admin/users/" + encodeURIComponent(form.get("user")) + "/recovery", { reset_mfa: form.get("reset_mfa") === "on" }));
+    el("div", { class: "panel" }, el("h2", {}, "Recuperar uma conta"), recovery, form("Gerar link", [el("div", { class: "row" }, el("div", {}, field("ID do usuário", input("user", { required: true }))), el("div", {}, el("label", {}, input("reset_mfa", { type: "checkbox" }), " remover TOTP e passkeys")),
+      state.methods && state.methods.email_recovery ? el("div", {}, el("label", {}, input("send_email", { type: "checkbox" }), " enviar ao e-mail confirmado da pessoa")) : "")], async (form) => {
+      const issued = await when(api("POST", "/api/v1/admin/users/" + encodeURIComponent(form.get("user")) + "/recovery", { reset_mfa: form.get("reset_mfa") === "on", send_email: form.get("send_email") === "on" }));
+      if (issued.emailed) {
+        recovery.replaceChildren(el("p", {}, "Link enviado ao e-mail confirmado da pessoa. Vale uma vez, por 24 horas."));
+        return;
+      }
       recovery.replaceChildren(secret("Link de recuperação", location.origin + "/#/recover?token=" + encodeURIComponent(issued.token), "Entregue à pessoa por um canal seu. Vale uma vez, por 24 horas."));
     })));
 }
@@ -542,6 +573,28 @@ function recoverPage(params) {
   })));
 }
 
+function forgotPage() {
+  const root = el("div", { class: "narrow" });
+  const panel = el("div", { class: "panel" }, el("h1", {}, "Esqueci minha senha"), el("p", { class: "muted" }, "Informe seu login. Se a conta tiver e-mail confirmado, enviamos um link que vale por uma hora."),
+    form("Enviar link", [field("Login", input("login_name", { required: true, autocomplete: "username" }))], async (form) => {
+      await when(api("POST", "/api/v1/auth/recovery/request", { login_name: form.get("login_name") }));
+      panel.replaceChildren(el("h1", {}, "Verifique seu e-mail"), el("p", {}, "Se a conta existir e tiver e-mail confirmado, o link chega em instantes. O segundo fator continua sendo pedido ao entrar."), el("p", {}, el("a", { href: "#/login" }, "Voltar")));
+    }), el("p", { class: "muted" }, "Sem e-mail confirmado? Peça a um administrador do registry."));
+  root.append(panel);
+  return root;
+}
+
+// The address is confirmed only on click: mail scanners that open links
+// cannot confirm it.
+function verifyEmailPage(params) {
+  const token = params.get("token") || "";
+  const panel = el("div", { class: "panel" }, el("h1", {}, "Confirmar e-mail"), el("p", {}, "Confirmar que este endereço é seu?"), el("button", { type: "button", onclick: async () => {
+    await when(api("POST", "/api/v1/auth/email/confirm", { token }));
+    panel.replaceChildren(el("h1", {}, "E-mail confirmado"), el("p", {}, el("a", { href: "#/" }, "Continuar")));
+  } }, "Confirmar"));
+  return el("div", { class: "narrow" }, panel);
+}
+
 // ---------- router ----------
 
 async function render() {
@@ -555,6 +608,8 @@ async function render() {
   try {
     if (parts[0] === "invite") page = invitePage(params);
     else if (parts[0] === "recover") page = recoverPage(params);
+    else if (parts[0] === "verify-email") page = verifyEmailPage(params);
+    else if (parts[0] === "forgot" && !signedIn) page = forgotPage();
     else if (!signedIn || parts[0] === "login") page = loginPage(params);
     else if (parts[0] === "account") page = await accountPage();
     else if (parts[0] === "admin") page = await adminPage();

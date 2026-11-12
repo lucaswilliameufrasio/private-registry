@@ -74,12 +74,14 @@ func exerciseNPMTokenMigration(t *testing.T, ctx context.Context, db *sql.DB, cf
 	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
 	delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
 	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
+	delete(old, "sql/sqlite/000046_email_delivery.sql")
+	delete(old, "sql/postgres/000046_email_delivery.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 26 {
 		t.Fatalf("prepare v26 fixture: %+v err=%v", report, err)
 	}
 	if !fail {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 19 || report.AppliedVersions[0] != 27 || report.AppliedVersions[1] != 28 || report.AppliedVersions[2] != 29 || report.AppliedVersions[3] != 30 || report.AppliedVersions[4] != 31 || report.AppliedVersions[5] != 32 || report.AppliedVersions[6] != 33 || report.AppliedVersions[7] != 34 || report.AppliedVersions[8] != 35 || report.AppliedVersions[9] != 36 || report.AppliedVersions[10] != 37 || report.AppliedVersions[11] != 38 || report.AppliedVersions[12] != 39 || report.AppliedVersions[13] != 40 || report.AppliedVersions[14] != 41 || report.AppliedVersions[15] != 42 || report.AppliedVersions[16] != 43 || report.AppliedVersions[17] != 44 || report.AppliedVersions[18] != 45 {
+		if err != nil || report.CurrentVersion != 46 || len(report.AppliedVersions) != 20 || report.AppliedVersions[0] != 27 || report.AppliedVersions[1] != 28 || report.AppliedVersions[2] != 29 || report.AppliedVersions[3] != 30 || report.AppliedVersions[4] != 31 || report.AppliedVersions[5] != 32 || report.AppliedVersions[6] != 33 || report.AppliedVersions[7] != 34 || report.AppliedVersions[8] != 35 || report.AppliedVersions[9] != 36 || report.AppliedVersions[10] != 37 || report.AppliedVersions[11] != 38 || report.AppliedVersions[12] != 39 || report.AppliedVersions[13] != 40 || report.AppliedVersions[14] != 41 || report.AppliedVersions[15] != 42 || report.AppliedVersions[16] != 43 || report.AppliedVersions[17] != 44 || report.AppliedVersions[18] != 45 || report.AppliedVersions[19] != 46 {
 			t.Fatalf("v27–v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

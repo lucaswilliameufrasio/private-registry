@@ -61,6 +61,8 @@ func exercisePubCatalogMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
 	delete(old, "sql/sqlite/000045_service_accounts_recovery_passkeys.sql")
 	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
+	delete(old, "sql/sqlite/000046_email_delivery.sql")
+	delete(old, "sql/postgres/000046_email_delivery.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 33 {
 		t.Fatalf("prepare v33 fixture: %+v err=%v", report, err)
 	}
@@ -89,7 +91,7 @@ func exercisePubCatalogMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 		return
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 45 || len(report.AppliedVersions) != 12 || report.AppliedVersions[0] != 34 || report.AppliedVersions[1] != 35 || report.AppliedVersions[2] != 36 || report.AppliedVersions[3] != 37 || report.AppliedVersions[4] != 38 || report.AppliedVersions[5] != 39 || report.AppliedVersions[6] != 40 || report.AppliedVersions[7] != 41 || report.AppliedVersions[8] != 42 || report.AppliedVersions[9] != 43 || report.AppliedVersions[10] != 44 || report.AppliedVersions[11] != 45 {
+	if err != nil || report.CurrentVersion != 46 || len(report.AppliedVersions) != 13 || report.AppliedVersions[0] != 34 || report.AppliedVersions[1] != 35 || report.AppliedVersions[2] != 36 || report.AppliedVersions[3] != 37 || report.AppliedVersions[4] != 38 || report.AppliedVersions[5] != 39 || report.AppliedVersions[6] != 40 || report.AppliedVersions[7] != 41 || report.AppliedVersions[8] != 42 || report.AppliedVersions[9] != 43 || report.AppliedVersions[10] != 44 || report.AppliedVersions[11] != 45 || report.AppliedVersions[12] != 46 {
 		t.Fatalf("Pub catalog upgrade: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

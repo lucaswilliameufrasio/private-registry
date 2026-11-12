@@ -322,4 +322,22 @@ func TestPostgresInvitations(t *testing.T) {
 	if succeeded != 1 {
 		t.Fatalf("contested invitation redeemed %d times", succeeded)
 	}
+	// An emailed invitation confirms the redeemed account's address.
+	queue := &captureQueue{}
+	if err := service.EnableEmail(queue, "https://registry.example"); err != nil {
+		t.Fatal(err)
+	}
+	mailed, err := service.CreateInvitationFor(ctx, adminID, workspace.ID, RoleMember, 0, "pg.mailed@example.com")
+	if err != nil || len(queue.sent) != 1 {
+		t.Fatalf("emailed invitation: %v %d", err, len(queue.sent))
+	}
+	mailedUser, _, err := service.RedeemInvitation(ctx, mailed.Token, "pg.mailed", "PG Mailed", []byte("synthetic-invited-password-never-reuse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var address string
+	var verified bool
+	if err := db.QueryRowContext(ctx, "SELECT email, email_verified FROM registry_users WHERE user_id = $1", mailedUser).Scan(&address, &verified); err != nil || address != "pg.mailed@example.com" || !verified {
+		t.Fatalf("PostgreSQL emailed invitation address: %q %v %v", address, verified, err)
+	}
 }

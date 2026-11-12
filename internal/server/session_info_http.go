@@ -78,8 +78,9 @@ func (h *authHTTP) listMembers(response http.ResponseWriter, request *http.Reque
 // authMethods tells the sign-in page which methods this installation offers.
 func (h *authHTTP) authMethods(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, struct {
-		Password bool `json:"password"`
-		Passkeys bool `json:"passkeys"`
-		Muira    bool `json:"muira"`
-	}{true, h.service.PasskeysEnabled(), h.service.MuiraEnabled()})
+		Password      bool `json:"password"`
+		Passkeys      bool `json:"passkeys"`
+		Muira         bool `json:"muira"`
+		EmailRecovery bool `json:"email_recovery"`
+	}{true, h.service.PasskeysEnabled(), h.service.MuiraEnabled(), h.service.EmailEnabled()})
 }

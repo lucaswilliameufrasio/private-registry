@@ -73,6 +73,7 @@ type Service struct {
 	key      *secrets.MasterKey
 	muira    *muiraLogin
 	passkeys *webauthn.WebAuthn
+	mail     *mailer
 }
 
 var passwordHashAdmission = make(chan struct{}, maxConcurrentPasswordChecks)

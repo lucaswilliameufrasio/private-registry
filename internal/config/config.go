@@ -47,6 +47,7 @@ type Config struct {
 	Replication             ReplicationConfig
 	Backup                  BackupConfig
 	TrustedPublishing       TrustedPublishingConfig
+	Email                   EmailConfig
 }
 
 // TrustedPublishingConfig enables GitHub Actions OIDC token exchange. The
@@ -356,6 +357,10 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	emailConfig, err := loadEmail(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ListenAddress:           listenAddress,
@@ -381,6 +386,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		Replication:             replicationConfig,
 		Backup:                  backupConfig,
 		TrustedPublishing:       trustedConfig,
+		Email:                   emailConfig,
 	}, nil
 }
 

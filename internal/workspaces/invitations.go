@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"private-registry/internal/bootstrap"
+	"private-registry/internal/email"
 	"private-registry/internal/password"
 )
 
@@ -40,6 +41,7 @@ var (
 	ErrLoginNameTaken        = errors.New("login name is already taken")
 	ErrInvalidAccount        = errors.New("login name, display name or password does not meet the requirements")
 	ErrAlreadyMember         = errors.New("account is already a member of this workspace")
+	ErrEmailUnavailable      = errors.New("email delivery is not configured on this installation")
 )
 
 type IssuedInvitation struct {
@@ -57,6 +59,8 @@ type Invitation struct {
 	CreatedAt time.Time
 	ExpiresAt time.Time
 	State     string // pending, redeemed, revoked, expired
+	// Email is the address the invitation was sent to, if any.
+	Email string
 }
 
 // SignupPolicyValue returns the installation's account creation policy.
@@ -121,6 +125,22 @@ func (s *Service) withInstanceAdministrator(ctx context.Context, actorUserID str
 // matching the membership delegation rules. The invitation grants membership
 // only: repository grants are still assigned explicitly.
 func (s *Service) CreateInvitation(ctx context.Context, actorUserID, workspaceID, role string, ttl time.Duration) (IssuedInvitation, error) {
+	return s.CreateInvitationFor(ctx, actorUserID, workspaceID, role, ttl, "")
+}
+
+// CreateInvitationFor is CreateInvitation that, when address is set, emails
+// the link to it. Redeeming an emailed invitation to create an account
+// makes that address the account's confirmed address.
+func (s *Service) CreateInvitationFor(ctx context.Context, actorUserID, workspaceID, role string, ttl time.Duration, address string) (IssuedInvitation, error) {
+	address = strings.TrimSpace(address)
+	if address != "" {
+		if s.mail == nil {
+			return IssuedInvitation{}, ErrEmailUnavailable
+		}
+		if !email.ValidAddress(address) {
+			return IssuedInvitation{}, ErrInvalidInvitation
+		}
+	}
 	if ctx == nil {
 		return IssuedInvitation{}, errors.New("invitation context is required")
 	}
@@ -167,9 +187,18 @@ func (s *Service) CreateInvitation(ctx context.Context, actorUserID, workspaceID
 		if actorRole == RoleAdministrator && role != RoleMember {
 			return ErrForbidden
 		}
-		query := `INSERT INTO registry_workspace_invitations (invitation_id, workspace_id, role, token_sha256, created_by, created_at_ms, expires_at_ms) VALUES (` + bind(s.driver, 1) + `, ` + bind(s.driver, 2) + `, ` + bind(s.driver, 3) + `, ` + bind(s.driver, 4) + `, ` + bind(s.driver, 5) + `, ` + bind(s.driver, 6) + `, ` + bind(s.driver, 7) + `)`
-		if _, err := tx.ExecContext(ctx, query, issued.ID, workspaceID, role, hex.EncodeToString(digest[:]), actorID, now.UnixMilli(), issued.ExpiresAt.UnixMilli()); err != nil {
+		var recipient any
+		if address != "" {
+			recipient = address
+		}
+		query := `INSERT INTO registry_workspace_invitations (invitation_id, workspace_id, role, token_sha256, created_by, created_at_ms, expires_at_ms, email) VALUES (` + bind(s.driver, 1) + `, ` + bind(s.driver, 2) + `, ` + bind(s.driver, 3) + `, ` + bind(s.driver, 4) + `, ` + bind(s.driver, 5) + `, ` + bind(s.driver, 6) + `, ` + bind(s.driver, 7) + `, ` + bind(s.driver, 8) + `)`
+		if _, err := tx.ExecContext(ctx, query, issued.ID, workspaceID, role, hex.EncodeToString(digest[:]), actorID, now.UnixMilli(), issued.ExpiresAt.UnixMilli(), recipient); err != nil {
 			return errors.New("invitation could not be created")
+		}
+		if address != "" {
+			if err := s.mail.send(ctx, tx, s.driver, issued, workspaceID, actorID, address); err != nil {
+				return err
+			}
 		}
 		return recordAudit(ctx, tx, s.driver, actorID, "workspace.invitation.created", "workspace_invitation", issued.ID)
 	})
@@ -202,7 +231,7 @@ func (s *Service) ListInvitations(ctx context.Context, actorUserID, workspaceID 
 		if actorRole != RoleOwner && actorRole != RoleAdministrator {
 			return ErrForbidden
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT invitation_id, role, created_by, created_at_ms, expires_at_ms, redeemed_at_ms, revoked_at_ms FROM registry_workspace_invitations WHERE workspace_id = `+bind(s.driver, 1)+` ORDER BY invitation_id DESC LIMIT 200`, workspaceID)
+		rows, err := tx.QueryContext(ctx, `SELECT invitation_id, role, created_by, created_at_ms, expires_at_ms, redeemed_at_ms, revoked_at_ms, email FROM registry_workspace_invitations WHERE workspace_id = `+bind(s.driver, 1)+` ORDER BY invitation_id DESC LIMIT 200`, workspaceID)
 		if err != nil {
 			return errors.New("invitations could not be listed")
 		}
@@ -212,10 +241,12 @@ func (s *Service) ListInvitations(ctx context.Context, actorUserID, workspaceID 
 			var item Invitation
 			var created, expires int64
 			var redeemed, revoked sql.NullInt64
-			if err := rows.Scan(&item.ID, &item.Role, &item.CreatedBy, &created, &expires, &redeemed, &revoked); err != nil {
+			var recipient sql.NullString
+			if err := rows.Scan(&item.ID, &item.Role, &item.CreatedBy, &created, &expires, &redeemed, &revoked, &recipient); err != nil {
 				return errors.New("invitation could not be read")
 			}
 			item.CreatedAt, item.ExpiresAt = time.UnixMilli(created).UTC(), time.UnixMilli(expires).UTC()
+			item.Email = recipient.String
 			switch {
 			case redeemed.Valid:
 				item.State = "redeemed"
@@ -284,6 +315,7 @@ func (s *Service) RevokeInvitation(ctx context.Context, actorUserID, workspaceID
 
 type pendingInvitation struct {
 	id, workspaceID, role, creator string
+	email                          sql.NullString
 }
 
 // checkInvitation validates the token without using it.
@@ -303,7 +335,8 @@ func (s *Service) checkInvitation(ctx context.Context, tx *sql.Tx, token string)
 	var workspaceID, role, storedHash, creator string
 	var expires int64
 	var redeemed, revoked sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT i.workspace_id, i.role, i.token_sha256, i.created_by, i.expires_at_ms, i.redeemed_at_ms, i.revoked_at_ms FROM registry_workspace_invitations i JOIN registry_workspaces w ON w.workspace_id = i.workspace_id WHERE i.invitation_id = `+bind(s.driver, 1)+` AND w.status = 'active'`, idText).Scan(&workspaceID, &role, &storedHash, &creator, &expires, &redeemed, &revoked)
+	var recipient sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT i.workspace_id, i.role, i.token_sha256, i.created_by, i.expires_at_ms, i.redeemed_at_ms, i.revoked_at_ms, i.email FROM registry_workspace_invitations i JOIN registry_workspaces w ON w.workspace_id = i.workspace_id WHERE i.invitation_id = `+bind(s.driver, 1)+` AND w.status = 'active'`, idText).Scan(&workspaceID, &role, &storedHash, &creator, &expires, &redeemed, &revoked, &recipient)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fail(ErrInvitationUnavailable)
 	} else if err != nil {
@@ -322,16 +355,25 @@ func (s *Service) checkInvitation(ctx context.Context, tx *sql.Tx, token string)
 	if err := requireActiveUser(ctx, tx, s.driver, creator); err != nil {
 		return fail(ErrInvitationUnavailable)
 	}
-	return pendingInvitation{id: idText, workspaceID: workspaceID, role: role, creator: creator}, nil
+	return pendingInvitation{id: idText, workspaceID: workspaceID, role: role, creator: creator, email: recipient}, nil
 }
 
 // consumeInvitation validates the token and marks it used by userID inside the
 // caller's transaction, then adds the membership.
-func (s *Service) consumeInvitation(ctx context.Context, tx *sql.Tx, token, userID string) (string, error) {
+func (s *Service) consumeInvitation(ctx context.Context, tx *sql.Tx, token, userID string) (pendingInvitation, error) {
 	invitation, err := s.checkInvitation(ctx, tx, token)
 	if err != nil {
-		return "", err
+		return pendingInvitation{}, err
 	}
+	workspaceID, err := s.applyInvitation(ctx, tx, invitation, userID)
+	if err != nil {
+		return pendingInvitation{}, err
+	}
+	invitation.workspaceID = workspaceID
+	return invitation, nil
+}
+
+func (s *Service) applyInvitation(ctx context.Context, tx *sql.Tx, invitation pendingInvitation, userID string) (string, error) {
 	idText, workspaceID, role, creator := invitation.id, invitation.workspaceID, invitation.role, invitation.creator
 	_, status, exists, err := readMembership(ctx, tx, s.driver, workspaceID, userID)
 	if err != nil {
@@ -377,8 +419,8 @@ func (s *Service) AcceptInvitation(ctx context.Context, actorUserID, token strin
 		if err := requireActiveUser(ctx, tx, s.driver, actorID); err != nil {
 			return err
 		}
-		var err error
-		workspaceID, err = s.consumeInvitation(ctx, tx, token, actorID)
+		invitation, err := s.consumeInvitation(ctx, tx, token, actorID)
+		workspaceID = invitation.workspaceID
 		return err
 	})
 	return workspaceID, err
@@ -435,9 +477,18 @@ func (s *Service) RedeemInvitation(ctx context.Context, token, loginName, displa
 				return ErrLoginNameTaken
 			}
 		}
-		var err error
-		workspaceID, err = s.consumeInvitation(ctx, tx, token, userID.String())
-		return err
+		invitation, err := s.consumeInvitation(ctx, tx, token, userID.String())
+		if err != nil {
+			return err
+		}
+		workspaceID = invitation.workspaceID
+		// The link reached this person at the invited address.
+		if invitation.email.Valid {
+			if _, err := tx.ExecContext(ctx, `UPDATE registry_users SET email = `+bind(s.driver, 1)+`, email_verified = TRUE WHERE user_id = `+bind(s.driver, 2), invitation.email.String, userID.String()); err != nil {
+				return errors.New("account email could not be recorded")
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return "", "", err

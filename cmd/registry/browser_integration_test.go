@@ -74,6 +74,12 @@ func TestWebInterfaceInARealBrowser(t *testing.T) {
 	t.Setenv("REGISTRY_EXPERIMENTAL_NPM", "true")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	box, smtpAddress := startMailpit(t, ctx)
+	t.Setenv("REGISTRY_EMAIL_PROVIDER", "smtp")
+	t.Setenv("REGISTRY_EMAIL_SMTP_ADDRESS", smtpAddress)
+	t.Setenv("REGISTRY_EMAIL_SMTP_SECURITY", "none")
+	t.Setenv("REGISTRY_EMAIL_FROM", "Registry <registry@registry.example>")
+	t.Setenv("REGISTRY_EMAIL_ALLOWED_NETWORKS", "127.0.0.1/32")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := run(ctx, []string{"migrate"}, logger); err != nil {
 		t.Fatal(err)
@@ -149,7 +155,7 @@ func TestWebInterfaceInARealBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	journey := exec.CommandContext(ctx, "node", script, debugPort, origin, "browser.admin", password)
+	journey := exec.CommandContext(ctx, "node", script, debugPort, origin, "browser.admin", password, box.api)
 	output, err := journey.CombinedOutput()
 	t.Logf("browser journey output:\n%s", output)
 	if err != nil || !strings.Contains(string(output), "browser journey passed") {

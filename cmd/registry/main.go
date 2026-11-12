@@ -32,6 +32,7 @@ import (
 	"private-registry/internal/config"
 	"private-registry/internal/database"
 	"private-registry/internal/egress"
+	"private-registry/internal/email"
 	"private-registry/internal/fullbackup"
 	"private-registry/internal/gomod"
 	"private-registry/internal/jobs"
@@ -201,6 +202,23 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	jobQueue, err := jobs.New(db, cfg.DatabaseDriver)
 	if err != nil {
 		return err
+	}
+	var outbox *email.Outbox
+	if cfg.Email.Provider != config.EmailDisabled {
+		sender, err := openEmailSender(cfg)
+		if err != nil {
+			return err
+		}
+		outbox, err = email.NewOutbox(jobQueue, &masterKey, sender)
+		if err != nil {
+			return err
+		}
+		if err := authentication.EnableEmail(outbox, cfg.CanonicalOrigin); err != nil {
+			return err
+		}
+		if err := workspaceService.EnableEmail(outbox, cfg.CanonicalOrigin); err != nil {
+			return err
+		}
 	}
 	expirationWorker, err := maintenance.NewUploadExpiration(jobQueue, artifactService)
 	if err != nil {
@@ -388,6 +406,13 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 			worker.Run(workerCtx, logger)
 		}()
 	}
+	if outbox != nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			outbox.Run(workerCtx, logger)
+		}()
+	}
 	if ociCollector != nil {
 		workers.Add(1)
 		go func() {
@@ -408,7 +433,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 	} else {
 		close(replicationDone)
 	}
-	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver, "storage_driver", cfg.Storage.Driver, "sqlite_replication", cfg.Replication.Enabled)
+	logger.Info("registry HTTP server listening", "address", listener.Addr().String(), "database_driver", cfg.DatabaseDriver, "storage_driver", cfg.Storage.Driver, "sqlite_replication", cfg.Replication.Enabled, "email_provider", string(cfg.Email.Provider))
 	serveErr := server.Serve(ctx, listener, handler, health.MarkDraining, shutdownTimeout)
 	stopWorker()
 	select {

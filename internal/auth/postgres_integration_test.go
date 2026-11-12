@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"private-registry/internal/config"
 	"private-registry/internal/database"
+	"private-registry/internal/email"
 	"private-registry/internal/migrations"
 	"private-registry/internal/password"
 	"private-registry/internal/secrets"
@@ -110,6 +111,37 @@ func TestPostgresAuthenticationEnforcesEnrollmentRecoveryAndAttemptLimits(t *tes
 	}
 	if err := service.CompleteRecovery(ctx, issued.Token, nil); !errors.Is(err, ErrRecoveryUnavailable) {
 		t.Fatalf("PostgreSQL recovery reuse: %v", err)
+	}
+
+	// Address confirmation, self-service recovery and notices on PostgreSQL.
+	queue := &recordingQueue{}
+	if err := service.EnableEmail(queue, "https://registry.example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RequestEmailVerification(ctx, userID, "pg.admin@example.com"); err != nil {
+		t.Fatalf("PostgreSQL email verification: %v", err)
+	}
+	if err := service.ConfirmEmail(ctx, linkToken(t, queue.last(t, email.TemplateEmailVerification).Data["link"])); err != nil {
+		t.Fatalf("PostgreSQL confirm email: %v", err)
+	}
+	if current, err := service.AccountEmailOf(ctx, userID); err != nil || !current.Verified || current.Address != "pg.admin@example.com" {
+		t.Fatalf("PostgreSQL confirmed address: %+v %v", current, err)
+	}
+	if err := service.RequestRecovery(ctx, "mfa.postgres"); err != nil {
+		t.Fatalf("PostgreSQL recovery request: %v", err)
+	}
+	if err := service.RequestRecovery(ctx, "mfa.postgres"); err != nil {
+		t.Fatal(err)
+	}
+	if queue.count(email.TemplateRecovery) != 1 {
+		t.Fatalf("PostgreSQL recovery cooldown sent %d links", queue.count(email.TemplateRecovery))
+	}
+	loginPassword = []byte("synthetic-postgres-emailed-password")
+	if err := service.CompleteRecovery(ctx, linkToken(t, queue.last(t, email.TemplateRecovery).Data["link"]), loginPassword); err != nil {
+		t.Fatalf("PostgreSQL emailed recovery: %v", err)
+	}
+	if notice := queue.last(t, email.TemplateSecurityNotice); notice.To != "pg.admin@example.com" {
+		t.Fatalf("PostgreSQL notice: %+v", notice)
 	}
 
 	const sourceAddress = "192.0.2.90:443"

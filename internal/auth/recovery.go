@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"private-registry/internal/bootstrap"
 	"private-registry/internal/database"
+	"private-registry/internal/email"
 	"private-registry/internal/loginname"
 	"private-registry/internal/password"
 )
@@ -45,6 +46,21 @@ type IssuedRecovery struct {
 // the next sign-in enrolls new ones. It never creates a session. Earlier
 // unused links for the account stop working.
 func (s *Service) IssueRecovery(ctx context.Context, actorUserID, targetUserID string, resetMFA bool) (IssuedRecovery, error) {
+	return s.issueRecovery(ctx, actorUserID, targetUserID, resetMFA, false)
+}
+
+// IssueRecoveryByEmail is IssueRecovery delivered to the account's confirmed
+// address: the link is never shown to the administrator.
+func (s *Service) IssueRecoveryByEmail(ctx context.Context, actorUserID, targetUserID string, resetMFA bool) (IssuedRecovery, error) {
+	if s != nil && s.mail == nil {
+		return IssuedRecovery{}, ErrEmailUnavailable
+	}
+	issued, err := s.issueRecovery(ctx, actorUserID, targetUserID, resetMFA, true)
+	issued.Token = ""
+	return issued, err
+}
+
+func (s *Service) issueRecovery(ctx context.Context, actorUserID, targetUserID string, resetMFA, byEmail bool) (IssuedRecovery, error) {
 	if err := s.validate(ctx); err != nil {
 		return IssuedRecovery{}, err
 	}
@@ -93,6 +109,15 @@ func (s *Service) IssueRecovery(ctx context.Context, actorUserID, targetUserID s
 		if service || status != "active" || (!local && !resetMFA) {
 			return ErrRecoveryTarget
 		}
+		var display string
+		var address sql.NullString
+		var verified bool
+		if err := tx.QueryRowContext(ctx, `SELECT display_name, email, email_verified FROM registry_users WHERE user_id = `+bind(s.driver, 1), target.String()).Scan(&display, &address, &verified); err != nil {
+			return ErrUnavailable
+		}
+		if byEmail && (!verified || !address.Valid) {
+			return ErrNoVerifiedEmail
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE registry_password_resets SET revoked_at_ms = `+bind(s.driver, 1)+` WHERE user_id = `+bind(s.driver, 2)+` AND used_at_ms IS NULL AND revoked_at_ms IS NULL`, now.UnixMilli(), target.String()); err != nil {
 			return ErrUnavailable
 		}
@@ -102,6 +127,12 @@ func (s *Service) IssueRecovery(ctx context.Context, actorUserID, targetUserID s
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO registry_password_resets (reset_id, user_id, token_sha256, reset_mfa, created_by, created_at_ms, expires_at_ms) VALUES (`+bind(s.driver, 1)+`, `+bind(s.driver, 2)+`, `+bind(s.driver, 3)+`, `+bind(s.driver, 4)+`, `+bind(s.driver, 5)+`, `+bind(s.driver, 6)+`, `+bind(s.driver, 7)+`)`, issued.ID, target.String(), hex.EncodeToString(digest[:]), flag, actor.String(), now.UnixMilli(), issued.ExpiresAt.UnixMilli()); err != nil {
 			return ErrUnavailable
+		}
+		if byEmail {
+			message := email.Message{Template: email.TemplateRecovery, To: address.String, Data: map[string]string{"display_name": display, "link": s.mail.link("recover", issued.Token), "expires_at": stamp(issued.ExpiresAt)}}
+			if err := s.mail.queue.EnqueueTx(ctx, tx, "recovery:"+issued.ID, message); err != nil {
+				return ErrUnavailable
+			}
 		}
 		return s.recordRecoveryAudit(ctx, tx, actor.String(), "", "account.recovery.issued", target.String())
 	})
@@ -182,6 +213,16 @@ func (s *Service) CompleteRecovery(ctx context.Context, token string, newPasswor
 		if err := s.applyRecovery(ctx, tx, userID, hash, resetMFA == 1, now); err != nil {
 			return err
 		}
+		event := "senha redefinida pela recuperação de acesso"
+		switch {
+		case resetMFA == 1 && hash != "":
+			event = "senha redefinida e segundo fator removido pela recuperação de acesso"
+		case resetMFA == 1:
+			event = "segundo fator removido pela recuperação de acesso"
+		}
+		if err := s.notifyUser(ctx, tx, "recovery-completed:"+idText, userID, event, now); err != nil {
+			return err
+		}
 		return s.recordRecoveryAudit(ctx, tx, userID, "", "account.recovery.completed", userID)
 	})
 }
@@ -215,7 +256,11 @@ func (s *Service) RecoverAdministrator(ctx context.Context, loginName string, ne
 		if _, err := tx.ExecContext(ctx, `UPDATE registry_password_resets SET revoked_at_ms = `+bind(s.driver, 1)+` WHERE user_id = `+bind(s.driver, 2)+` AND used_at_ms IS NULL AND revoked_at_ms IS NULL`, time.Now().UTC().UnixMilli(), userID); err != nil {
 			return ErrUnavailable
 		}
-		if err := s.applyRecovery(ctx, tx, userID, hash, true, time.Now().UTC()); err != nil {
+		now := time.Now().UTC()
+		if err := s.applyRecovery(ctx, tx, userID, hash, true, now); err != nil {
+			return err
+		}
+		if err := s.notifyUser(ctx, tx, "admin-recovered:"+uuid.NewString(), userID, "acesso de administrador recuperado no servidor: senha redefinida e segundo fator removido", now); err != nil {
 			return err
 		}
 		return s.recordRecoveryAudit(ctx, tx, "", operator, "instance_admin.recovered", userID)

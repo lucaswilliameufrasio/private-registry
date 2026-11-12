@@ -1,4 +1,4 @@
-.PHONY: build build-arm64 verify-arm64 format format-check lint test setup-floci setup-postgres setup-oci setup-authentik check-hex test-integration race verify spike-sqlite
+.PHONY: build build-arm64 verify-arm64 format format-check lint test setup-floci setup-postgres setup-oci setup-authentik setup-mailpit check-hex test-integration race verify spike-sqlite
 
 build:
 	CGO_ENABLED=0 go build ./...
@@ -9,7 +9,7 @@ build-arm64:
 # Runs the suites with an arm64 build under QEMU user emulation
 # (qemu-aarch64). Without binfmt_misc registration, tests that re-execute
 # their own binary or build and run a helper cannot run and are reported.
-verify-arm64: build-arm64 setup-floci setup-postgres setup-oci
+verify-arm64: build-arm64 setup-floci setup-postgres setup-oci setup-mailpit
 	GOARCH=arm64 CGO_ENABLED=0 go test -exec qemu-aarch64 -count=1 ./...
 	GOARCH=arm64 CGO_ENABLED=0 go test -exec qemu-aarch64 -p=1 -timeout=60m -tags=integration -count=1 ./...
 
@@ -26,6 +26,7 @@ lint:
 	bash -n scripts/setup-postgres.sh
 	bash -n scripts/setup-oci.sh
 	bash -n scripts/setup-authentik.sh
+	bash -n scripts/setup-mailpit.sh
 	bash -n scripts/check-hex.sh
 
 test:
@@ -43,13 +44,16 @@ setup-oci:
 setup-authentik:
 	bash scripts/setup-authentik.sh
 
+setup-mailpit:
+	bash scripts/setup-mailpit.sh
+
 check-hex:
 	bash scripts/check-hex.sh
 
-test-integration: setup-floci setup-postgres setup-oci setup-authentik check-hex
+test-integration: setup-floci setup-postgres setup-oci setup-authentik setup-mailpit check-hex
 	go test -p=1 -timeout=20m -tags=integration -count=3 ./...
 
-race: setup-floci setup-postgres setup-oci setup-authentik check-hex
+race: setup-floci setup-postgres setup-oci setup-authentik setup-mailpit check-hex
 	go test -p=1 -race -timeout=20m -tags=integration -count=1 ./...
 
 verify: build format-check lint test test-integration race

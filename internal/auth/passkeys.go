@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -228,6 +230,10 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, userID, sealed 
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO registry_webauthn_credentials (credential_id, user_id, name, credential, sign_count, created_at_ms) VALUES (`+bind(s.driver, 1)+`, `+bind(s.driver, 2)+`, `+bind(s.driver, 3)+`, `+bind(s.driver, 4)+`, `+bind(s.driver, 5)+`, `+bind(s.driver, 6)+`)`, id, userID, ceremony.Name, encoded, int64(credential.Authenticator.SignCount), now.UnixMilli()); err != nil {
 			return ErrPasskeyRejected
+		}
+		credentialDigest := sha256.Sum256(credential.ID)
+		if err := s.notifyUser(ctx, tx, "passkey:"+hex.EncodeToString(credentialDigest[:16]), userID, "nova passkey cadastrada", now); err != nil {
+			return err
 		}
 		return s.recordRecoveryAudit(ctx, tx, userID, "", "passkey.registered", userID)
 	})

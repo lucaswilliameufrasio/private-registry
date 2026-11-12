@@ -1,6 +1,6 @@
 # ADR 0050 — Recuperação de conta
 
-- **Status:** Implementado; sem envio por email
+- **Status:** Implementado; envio por e-mail no [ADR 0054](0054-transactional-email.md)
 - **Data:** 2026-11-12
 
 ## Contexto
@@ -16,7 +16,7 @@ Não existia reset de senha. Quem esquecesse a senha, ou perdesse o TOTP e os c�
 
 ## Limites
 
-Sem email: nem o link nem um aviso à pessoa são enviados automaticamente. Não há reset de senha iniciado pela própria pessoa.
+Sem e-mail configurado, nem o link nem um aviso são enviados à pessoa. Com e-mail ([ADR 0054](0054-transactional-email.md)), o administrador pode enviar o link ao e-mail confirmado, e a própria pessoa pode pedir um link que só redefine a senha.
 
 ## Evidência
 
