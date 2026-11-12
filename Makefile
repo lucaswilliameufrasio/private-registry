@@ -1,7 +1,17 @@
-.PHONY: build format format-check lint test setup-floci setup-postgres setup-oci setup-authentik check-hex test-integration race verify spike-sqlite
+.PHONY: build build-arm64 verify-arm64 format format-check lint test setup-floci setup-postgres setup-oci setup-authentik check-hex test-integration race verify spike-sqlite
 
 build:
 	CGO_ENABLED=0 go build ./...
+
+build-arm64:
+	GOARCH=arm64 CGO_ENABLED=0 go build ./...
+
+# Runs the suites with an arm64 build under QEMU user emulation
+# (qemu-aarch64). Without binfmt_misc registration, tests that re-execute
+# their own binary or build and run a helper cannot run and are reported.
+verify-arm64: build-arm64 setup-floci setup-postgres setup-oci
+	GOARCH=arm64 CGO_ENABLED=0 go test -exec qemu-aarch64 -count=1 ./...
+	GOARCH=arm64 CGO_ENABLED=0 go test -exec qemu-aarch64 -p=1 -timeout=60m -tags=integration -count=1 ./...
 
 format:
 	gofmt -w cmd internal

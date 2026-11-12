@@ -236,6 +236,7 @@ Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 - **Interface web parcial** (as tarefas comuns); **sem email e SCIM contínuo;** trusted publishing só para GitHub Actions. Passkeys testadas no Chromium com autenticador virtual, não em Safari, Firefox ou chave física.
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
+- **arm64:** validado só por emulação QEMU ([ADR 0053](adr/0053-arm64-validation.md)); a replicação do SQLite não roda em arm64, use os backups.
 
 ## Evidência desta entrega
 
