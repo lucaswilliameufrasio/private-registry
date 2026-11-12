@@ -82,6 +82,7 @@ type authHTTP struct {
 	pubMetadataSlots       chan struct{}
 	oci                    *oci.Service
 	replication            ReplicationStatus
+	invitationHashSlots    chan struct{}
 	goMetadataSlots        chan struct{}
 	maxUploadBytes         int64
 	canonicalOrigin        string
@@ -320,6 +321,7 @@ func NewHandler(
 		pubMetadataSlots:       make(chan struct{}, 4),
 		oci:                    cfg.OCI,
 		replication:            cfg.Replication,
+		invitationHashSlots:    make(chan struct{}, 2),
 		goMetadataSlots:        make(chan struct{}, 4),
 		maxUploadBytes:         artifactService.MaxUploadBytes(),
 		canonicalOrigin:        canonicalOrigin,
@@ -366,6 +368,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	router.Get("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.getLogicalQuota)
 	router.Put("/api/v1/admin/workspaces/{workspaceID}/repositories/{repositoryID}/generic-logical-quota", h.setLogicalQuota)
 	router.Get("/api/v1/admin/replication", h.replicationStatus)
+	h.registerInvitationRoutes(router)
 	router.Get("/api/v1/admin/jobs/dead", h.listDeadJobs)
 	router.Post("/api/v1/admin/jobs/{jobID}/retry", h.retryDeadJob)
 	router.Get("/api/v1/admin/jobs/recovery", h.listRecoveryJobs)

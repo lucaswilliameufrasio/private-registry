@@ -1,6 +1,6 @@
 # Entrega utilizável — Cargo, npm, Pub e OCI
 
-**Atualizado:** 12/11/2026 · **Schema:** v43
+**Atualizado:** 12/11/2026 · **Schema:** v44
 
 Esta é a primeira entrega pensada para uso experimental de ponta a ponta. Ela **não é a v1** descrita em [development-plan.md](development-plan.md): o escopo foi reduzido por decisão do proprietário para quatro formatos, storage em objeto e login opcional via Muira. O que continua faltando para a v1 está em [O que esta entrega não cobre](#o-que-esta-entrega-não-cobre) e no [roadmap](roadmap.md).
 
@@ -83,7 +83,16 @@ export REGISTRY_MUIRA_DNS_SERVER=1.1.1.1:53
 
 O login local continua funcionando. O Muira substitui apenas a senha: quem administra a instância ou um workspace ainda precisa do TOTP local, e operações sensíveis continuam exigindo MFA local recente. Quem não foi vinculado nem pré-autorizado recebe 401 e nenhuma conta é criada.
 
-Este é hoje o único caminho para ter mais de um usuário: não existem convites nem cadastro local.
+Para contas locais, use convites (abaixo).
+
+### Convidando pessoas
+
+1. Uma vez, o administrador da instância permite cadastro por convite: `PUT /api/v1/admin/signup-policy` com `{"policy":"invitations"}`.
+2. Um owner ou administrador do workspace cria o convite: `POST /api/v1/workspaces/{w}/invitations` com `{"role":"member"}`. O token aparece uma vez; entregue-o por um canal seu (não há email).
+3. A pessoa cria a conta com `POST /api/v1/auth/invitations/redeem` (`token`, `login_name`, `display_name`, `password`) e faz login. Quem já tem conta, inclusive pelo Muira, usa `POST /api/v1/invitations/accept` com `{"token":"..."}` estando logado.
+4. Conceda os grants de repositório; o convite dá só a membership.
+
+Detalhes no [ADR 0046](adr/0046-workspace-invitations.md).
 
 ### Disaster recovery do banco (SQLite)
 
@@ -167,7 +176,7 @@ Itens obrigatórios da v1 que **não** estão feitos e afetam o uso:
 - **OCI:** sem revisão humana, mount e referrers; a coleta libera quota mas não apaga objetos armazenados; Docker/containerd não comprovados; blob limitado a 1 GiB.
 - **Storage S3:** sem qualificação em provedor real, sem multipart, sem GC de órfãos, sem migração entre drivers.
 - **Muira:** login real não validado; sem logout federado; callback responde JSON (não há UI).
-- **Sem UI, convites, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**
+- **Sem UI, email, passkeys, SCIM contínuo, contas de serviço, trusted publishing.**
 - **Hex** e os demais requisitos do plano (egress global negado, verificador externo de backup, matriz de plataformas, benchmarks).
 - Uma instância ativa; nada aqui foi testado com várias.
 

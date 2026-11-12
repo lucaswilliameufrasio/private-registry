@@ -246,3 +246,80 @@ func seedPostgresAdmin(t *testing.T, ctx context.Context, db *sql.DB, userID str
 		t.Fatal(err)
 	}
 }
+
+func TestPostgresInvitations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	t.Cleanup(cancel)
+	fixture, err := testinfra.StartPostgres(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := fixture.Stop(); err != nil {
+			t.Errorf("stop owned PostgreSQL fixture: %v", err)
+		}
+	})
+	cfg := config.Config{DatabaseDriver: config.Postgres, DatabaseDSN: fixture.DSN(), DatabaseMaxOpenConns: 4}
+	db, err := database.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := migrations.Migrate(ctx, db, cfg); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(db, config.Postgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminID := seedPostgresUser(t, ctx, db, "active")
+	seedPostgresAdmin(t, ctx, db, adminID)
+	workspace, err := service.CreateWorkspace(ctx, adminID, "invited", "Invited")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invitation, err := service.CreateInvitation(ctx, adminID, workspace.ID, RoleMember, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.RedeemInvitation(ctx, invitation.Token, "pg.invited", "PG Invited", []byte("synthetic-invited-password-never-reuse")); !errors.Is(err, ErrSignupClosed) {
+		t.Fatalf("redeem with signup closed: %v", err)
+	}
+	if err := service.SetSignupPolicy(ctx, adminID, SignupInvitations); err != nil {
+		t.Fatal(err)
+	}
+	userID, joined, err := service.RedeemInvitation(ctx, invitation.Token, "pg.invited", "PG Invited", []byte("synthetic-invited-password-never-reuse"))
+	if err != nil || joined != workspace.ID {
+		t.Fatalf("redeem: %v", err)
+	}
+	if _, _, err := service.RedeemInvitation(ctx, invitation.Token, "pg.other", "PG Other", []byte("synthetic-invited-password-never-reuse")); !errors.Is(err, ErrInvitationUnavailable) {
+		t.Fatalf("reuse: %v", err)
+	}
+	var role string
+	if err := db.QueryRowContext(ctx, "SELECT role FROM registry_workspace_memberships WHERE workspace_id = $1 AND user_id = $2", workspace.ID, userID).Scan(&role); err != nil || role != RoleMember {
+		t.Fatalf("membership: %q %v", role, err)
+	}
+	// Two concurrent redemptions of one invitation: exactly one succeeds.
+	contested, err := service.CreateInvitation(ctx, adminID, workspace.ID, RoleMember, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for _, name := range []string{"pg.first", "pg.second"} {
+		go func() {
+			_, _, err := service.RedeemInvitation(ctx, contested.Token, name, "Contender", []byte("synthetic-invited-password-never-reuse"))
+			results <- err
+		}()
+	}
+	succeeded := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			succeeded++
+		} else if !errors.Is(err, ErrInvitationUnavailable) {
+			t.Fatalf("contested redemption: %v", err)
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("contested invitation redeemed %d times", succeeded)
+	}
+}

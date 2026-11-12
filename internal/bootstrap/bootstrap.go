@@ -241,6 +241,17 @@ func validateAdminInput(input AdminInput) (AdminInput, error) {
 	return input, nil
 }
 
+// ValidateLocalAccount applies the bootstrap rules for a local login name,
+// display name and password to accounts created later, such as by invitation.
+// It returns the normalized login name and trimmed display name.
+func ValidateLocalAccount(loginName, displayName string, passwordValue []byte) (string, string, error) {
+	validated, err := validateAdminInput(AdminInput{LoginName: loginName, DisplayName: displayName, Email: "placeholder@example.invalid", Password: passwordValue, OperatorLabel: "validation"})
+	if err != nil {
+		return "", "", err
+	}
+	return validated.LoginName, validated.DisplayName, nil
+}
+
 func normalizeLoginName(loginName string) string {
 	return loginname.Normalize(loginName)
 }

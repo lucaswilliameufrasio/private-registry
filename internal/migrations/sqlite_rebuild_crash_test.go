@@ -89,6 +89,8 @@ func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
 	delete(old, "sql/postgres/000042_oci_registry.sql")
 	delete(old, "sql/sqlite/000043_oci_policies.sql")
 	delete(old, "sql/postgres/000043_oci_policies.sql")
+	delete(old, "sql/sqlite/000044_invitations_and_oci_review.sql")
+	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != int64(version-1) {
 		t.Fatalf("prepare pre-rebuild fixture: %+v err=%v", report, err)
 	}
@@ -178,7 +180,7 @@ func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
 		}
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 43 {
+	if err != nil || report.CurrentVersion != 44 {
 		t.Fatalf("migration did not resume after synthetic crash: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

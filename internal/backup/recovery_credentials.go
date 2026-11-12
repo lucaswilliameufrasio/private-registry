@@ -19,6 +19,7 @@ type InvalidatedCredentials struct {
 	PubWriteTokens   int64
 	PubNativeUploads int64
 	OCIWriteTokens   int64
+	Invitations      int64
 	DownloadTickets  int64
 }
 
@@ -36,7 +37,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 		return InvalidatedCredentials{}, errors.New("isolated credential recovery requires a deadline")
 	}
 	var count, minimum, maximum int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != 43 || minimum != 1 || maximum != 43 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(version_id), 0), COALESCE(MAX(version_id), 0) FROM registry_migration_checksums`).Scan(&count, &minimum, &maximum); err != nil || count != 44 || minimum != 1 || maximum != 44 {
 		return InvalidatedCredentials{}, errors.New("recovered database schema is not supported for credential invalidation")
 	}
 	// No recovery set captures OCI blobs yet. Promoting a database whose
@@ -74,6 +75,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 		{`UPDATE registry_npm_write_tokens SET revoked_at_ms = ` + bind(1) + ` WHERE revoked_at_ms IS NULL`, []any{now.UTC().UnixMilli()}, &result.NPMWriteTokens},
 		{`UPDATE registry_pub_write_tokens SET revoked_at_ms = ` + bind(1) + ` WHERE revoked_at_ms IS NULL`, []any{now.UTC().UnixMilli()}, &result.PubWriteTokens},
 		{`UPDATE registry_oci_write_tokens SET revoked_at_ms = ` + bind(1) + ` WHERE revoked_at_ms IS NULL`, []any{now.UTC().UnixMilli()}, &result.OCIWriteTokens},
+		{`UPDATE registry_workspace_invitations SET revoked_at_ms = ` + bind(1) + ` WHERE revoked_at_ms IS NULL AND redeemed_at_ms IS NULL`, []any{now.UTC().UnixMilli()}, &result.Invitations},
 		{`UPDATE registry_pub_native_uploads SET recovery_invalidated = 1 WHERE recovery_invalidated = 0`, nil, &result.PubNativeUploads},
 		// Ticket revocations require a human revoked_by value. Delete capability
 		// records in the recovered copy instead of falsely attributing revocation.
@@ -89,7 +91,7 @@ func InvalidateRestoredCredentials(ctx context.Context, tx *sql.Tx, driver confi
 			return InvalidatedCredentials{}, errors.New("recovered credential invalidation could not be counted; rollback required")
 		}
 	}
-	if result.Sessions+result.PersonalTokens+result.CargoWriteTokens+result.NPMWriteTokens+result.PubWriteTokens+result.OCIWriteTokens+result.PubNativeUploads+result.DownloadTickets > 0 {
+	if result.Sessions+result.PersonalTokens+result.CargoWriteTokens+result.NPMWriteTokens+result.PubWriteTokens+result.OCIWriteTokens+result.Invitations+result.PubNativeUploads+result.DownloadTickets > 0 {
 		id, err := uuid.NewV7()
 		if err != nil {
 			return InvalidatedCredentials{}, errors.New("recovery audit identity could not be created; rollback required")

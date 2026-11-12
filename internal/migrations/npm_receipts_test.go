@@ -67,6 +67,8 @@ func exerciseNPMReceiptMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 	delete(old, "sql/postgres/000042_oci_registry.sql")
 	delete(old, "sql/sqlite/000043_oci_policies.sql")
 	delete(old, "sql/postgres/000043_oci_policies.sql")
+	delete(old, "sql/sqlite/000044_invitations_and_oci_review.sql")
+	delete(old, "sql/postgres/000044_invitations_and_oci_review.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != 28 {
 		t.Fatalf("prepare v28 fixture: %+v err=%v", report, err)
 	}
@@ -106,7 +108,7 @@ func exerciseNPMReceiptMigration(t *testing.T, ctx context.Context, db *sql.DB, 
 		}
 	} else {
 		report, err := Migrate(ctx, db, cfg)
-		if err != nil || report.CurrentVersion != 43 || len(report.AppliedVersions) != 15 || report.AppliedVersions[0] != 29 || report.AppliedVersions[1] != 30 || report.AppliedVersions[2] != 31 || report.AppliedVersions[3] != 32 || report.AppliedVersions[4] != 33 || report.AppliedVersions[5] != 34 || report.AppliedVersions[6] != 35 || report.AppliedVersions[7] != 36 || report.AppliedVersions[8] != 37 || report.AppliedVersions[9] != 38 || report.AppliedVersions[10] != 39 || report.AppliedVersions[11] != 40 || report.AppliedVersions[12] != 41 || report.AppliedVersions[13] != 42 || report.AppliedVersions[14] != 43 {
+		if err != nil || report.CurrentVersion != 44 || len(report.AppliedVersions) != 16 || report.AppliedVersions[0] != 29 || report.AppliedVersions[1] != 30 || report.AppliedVersions[2] != 31 || report.AppliedVersions[3] != 32 || report.AppliedVersions[4] != 33 || report.AppliedVersions[5] != 34 || report.AppliedVersions[6] != 35 || report.AppliedVersions[7] != 36 || report.AppliedVersions[8] != 37 || report.AppliedVersions[9] != 38 || report.AppliedVersions[10] != 39 || report.AppliedVersions[11] != 40 || report.AppliedVersions[12] != 41 || report.AppliedVersions[13] != 42 || report.AppliedVersions[14] != 43 || report.AppliedVersions[15] != 44 {
 			t.Fatalf("v29–v30 upgrade failed: %+v err=%v", report, err)
 		}
 		if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {
