@@ -5,11 +5,13 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/base32"
 	"errors"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"private-registry/internal/email"
 )
@@ -185,5 +187,45 @@ func TestEmailVerificationRecoveryAndNotices(t *testing.T) {
 	}
 	if err := f.service.RequestEmailVerification(ctx, limited, "carla@example.com"); !errors.Is(err, ErrVerificationLimit) {
 		t.Fatalf("confirmation limit: %v", err)
+	}
+}
+
+func TestFactorChangesSendNotices(t *testing.T) {
+	ctx := context.Background()
+	f := newSQLiteFixture(t)
+	queue := &recordingQueue{}
+	if err := f.service.EnableEmail(queue, "https://registry.example"); err != nil {
+		t.Fatal(err)
+	}
+	user := f.addAccount(t, "dora", "active", false, "")
+	if _, err := f.db.ExecContext(ctx, `UPDATE registry_users SET email = 'dora@example.com', email_verified = 1 WHERE user_id = ?`, user); err != nil {
+		t.Fatal(err)
+	}
+	login, err := f.service.Login(ctx, "dora", f.password, "192.0.2.71")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := f.service.BeginVoluntaryMFAEnrollment(ctx, login.Credentials.BearerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(started.Enrollment.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.CompleteMFAEnrollment(ctx, started.Credentials.BearerToken, generateTOTPCode(secret, time.Now().Unix()/30), "192.0.2.71"); err != nil {
+		t.Fatal(err)
+	}
+	if notice := queue.last(t, email.TemplateSecurityNotice); notice.To != "dora@example.com" || !strings.Contains(notice.Data["event_label"], "TOTP") {
+		t.Fatalf("TOTP notice: %+v", notice)
+	}
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO registry_webauthn_credentials (credential_id, user_id, name, credential, sign_count, created_at_ms) VALUES ('synthetic-credential-id', ?, 'Key', x'7b7d', 0, 1)`, user); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.DeletePasskey(ctx, user, "synthetic-credential-id"); err != nil {
+		t.Fatal(err)
+	}
+	if notice := queue.last(t, email.TemplateSecurityNotice); !strings.Contains(notice.Data["event_label"], "passkey removida") {
+		t.Fatalf("passkey removal notice: %+v", notice)
 	}
 }

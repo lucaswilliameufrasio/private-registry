@@ -151,6 +151,8 @@ await waitFor(has("MFA recente"), "MFA-level session from the passkey");
 step("administration page");
 await visit("#/admin");
 await waitFor(has("Política atual"), "admin page");
+await waitFor(has("funcionando"), "email delivery panel");
+await waitFor(has("Nenhuma falha"), "no failed emails");
 
 step("confirm an email address from the emailed link");
 await visit("#/account");

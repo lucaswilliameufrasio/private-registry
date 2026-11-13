@@ -61,6 +61,8 @@ type AuthHTTPConfig struct {
 	OCI *oci.Service
 	// Replication reports SQLite replication health when it is enabled.
 	Replication ReplicationStatus
+	// Email reports and resends failed deliveries when email is enabled.
+	Email EmailOutbox
 	// TrustedPublishing enables CI token exchange when set.
 	TrustedPublishing *trustedpub.Service
 }
@@ -86,6 +88,7 @@ type authHTTP struct {
 	pubMetadataSlots       chan struct{}
 	oci                    *oci.Service
 	replication            ReplicationStatus
+	email                  EmailOutbox
 	invitationHashSlots    chan struct{}
 	trustedPublishing      *trustedpub.Service
 	goMetadataSlots        chan struct{}
@@ -332,6 +335,7 @@ func NewHandler(
 		pubMetadataSlots:       make(chan struct{}, 4),
 		oci:                    cfg.OCI,
 		replication:            cfg.Replication,
+		email:                  cfg.Email,
 		invitationHashSlots:    make(chan struct{}, 2),
 		trustedPublishing:      cfg.TrustedPublishing,
 		goMetadataSlots:        make(chan struct{}, 4),
@@ -383,6 +387,7 @@ func (h *authHTTP) registerRoutes(router chi.Router) {
 	h.registerInvitationRoutes(router)
 	h.registerServiceAccountRoutes(router)
 	h.registerRecoveryRoutes(router)
+	h.registerEmailAdminRoutes(router)
 	h.registerSessionInfoRoutes(router)
 	ui := webui.Handler(h.ociCanonical)
 	router.Get("/", ui.ServeHTTP)

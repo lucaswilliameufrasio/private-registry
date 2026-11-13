@@ -114,6 +114,8 @@ Todos exigem `REGISTRY_EMAIL_ALLOWED_NETWORKS` e aceitam `REGISTRY_EMAIL_DNS_SER
 - **Sabiá:** antes do primeiro envio, publique os templates com a chave de deploy: `POST {origem}/v1/template-deployments/plan` e depois `/apply` com o corpo de `sabia/templates.json` (no apply, acrescente `"confirmations": []`). Faça isso no deploy, como uma migration. O arquivo é gerado pelo código: `go test ./internal/email -run TestTemplatesAndSabiaManifest -update-sabia-manifest`.
 - **Desenvolvimento com Mailpit:** `make setup-mailpit`, rode `/tmp/opencode/private-registry-mailpit/mailpit --smtp 127.0.0.1:1025 --listen 127.0.0.1:8025` e use `REGISTRY_EMAIL_PROVIDER=smtp`, `REGISTRY_EMAIL_SMTP_ADDRESS=127.0.0.1:1025`, `REGISTRY_EMAIL_SMTP_SECURITY=none`, `REGISTRY_EMAIL_ALLOWED_NETWORKS=127.0.0.1/32`. As mensagens aparecem em `http://127.0.0.1:8025`.
 
+**Acompanhamento:** `GET /api/v1/admin/email` (administrador) devolve `health`: `ok`, `failing` (há e-mail abandonado) ou `stalled` (mensagem parada há mais de 30 min). Use esse campo no seu monitor. A interface marca o menu Administração enquanto houver problema, e o painel de e-mail lista as falhas com o motivo e o botão **Reenviar**. Corrija a causa antes de reenviar (template não publicado, remetente não verificado, chave errada).
+
 Cada pessoa confirma o próprio e-mail em **Conta** na interface (ou `PUT /api/v1/account/email`). Só um e-mail confirmado recebe links de recuperação e avisos. Detalhes no [ADR 0054](adr/0054-transactional-email.md).
 
 ### Liberando espaço

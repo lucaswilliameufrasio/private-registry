@@ -95,6 +95,8 @@ func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
 	delete(old, "sql/postgres/000045_service_accounts_recovery_passkeys.sql")
 	delete(old, "sql/sqlite/000046_email_delivery.sql")
 	delete(old, "sql/postgres/000046_email_delivery.sql")
+	delete(old, "sql/sqlite/000047_email_failures.sql")
+	delete(old, "sql/postgres/000047_email_failures.sql")
 	if report, err := migrateWithFS(ctx, db, cfg, old); err != nil || report.CurrentVersion != int64(version-1) {
 		t.Fatalf("prepare pre-rebuild fixture: %+v err=%v", report, err)
 	}
@@ -184,7 +186,7 @@ func exerciseSQLiteRebuildProcessCrash(t *testing.T, version int) {
 		}
 	}
 	report, err := Migrate(ctx, db, cfg)
-	if err != nil || report.CurrentVersion != 46 {
+	if err != nil || report.CurrentVersion != 47 {
 		t.Fatalf("migration did not resume after synthetic crash: %+v err=%v", report, err)
 	}
 	if err := VerifyCurrent(ctx, db, cfg.DatabaseDriver, report.InstallationID); err != nil {

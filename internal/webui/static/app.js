@@ -195,8 +195,18 @@ async function loadSession() {
   try { state.session = await api("GET", "/api/v1/auth/session"); } catch { state.session = null; }
   const signedIn = state.session && (state.session.level === "standard" || state.session.level === "mfa");
   document.getElementById("nav").hidden = !signedIn;
-  document.getElementById("nav-admin").hidden = !(signedIn && state.session.instance_admin);
+  const admin = document.getElementById("nav-admin");
+  admin.hidden = !(signedIn && state.session.instance_admin);
+  if (!admin.hidden) refreshEmailAlert();
   return state.session;
+}
+
+// Administrators see a marker on the menu while emails are failing.
+async function refreshEmailAlert() {
+  const admin = document.getElementById("nav-admin");
+  const status = await api("GET", "/api/v1/admin/email").catch(() => null);
+  const failing = status && status.enabled && status.health !== "ok";
+  admin.replaceChildren("Administração", failing ? el("span", { class: "badge alert", title: "Há e-mails com problema" }, " e-mail ") : "");
 }
 
 document.getElementById("logout").addEventListener("click", async () => {
@@ -523,9 +533,27 @@ function emailPanel(address) {
   return el("div", { class: "panel" }, el("h2", {}, "E-mail"), el("p", {}, "Atual: ", status), el("p", { class: "muted" }, "Um e-mail confirmado permite pedir a recuperação da senha e receber avisos de segurança."), pending, change);
 }
 
+const EMAIL_HEALTH = { ok: "funcionando", failing: "há e-mails que não foram entregues", stalled: "há e-mails parados na fila há mais de 30 minutos" };
+const EMAIL_TEMPLATES = { "registry.workspace-invitation": "convite", "registry.account-recovery": "recuperação", "registry.email-verification": "confirmação de e-mail", "registry.security-notice": "aviso de segurança" };
+
+function emailAdminPanel(mail) {
+  if (!mail.enabled) return el("div", { class: "panel" }, el("h2", {}, "E-mail"), el("p", { class: "muted" }, "Desligado. Links são entregues à mão."));
+  const rows = mail.failures.map((f) => el("tr", {}, el("td", {}, EMAIL_TEMPLATES[f.template] || f.template), el("td", {}, f.recipient), el("td", {}, el("code", {}, f.error)), el("td", {}, String(f.attempts)), el("td", {}, formatDate(f.failed_at)),
+    el("td", {}, el("button", { type: "button", class: "secondary", onclick: async () => {
+      await when(api("POST", "/api/v1/admin/email/failures/" + encodeURIComponent(f.job_id) + "/resend"));
+      toast("Reenvio na fila.");
+      await refreshEmailAlert();
+      go("#/admin");
+    } }, "Reenviar"))));
+  return el("div", { class: "panel" }, el("h2", {}, "E-mail"),
+    el("p", {}, "Provedor ", el("code", {}, mail.provider), " · ", el("span", { class: mail.health === "ok" ? "badge" : "badge alert" }, EMAIL_HEALTH[mail.health] || mail.health), " · na fila: ", String(mail.pending), mail.oldest_pending_at ? " (mais antigo de " + formatDate(mail.oldest_pending_at) + ")" : ""),
+    mail.failures.length ? [el("p", { class: "muted" }, "Corrija a causa (template, remetente, chave) antes de reenviar. Links de recuperação e confirmação podem ter expirado: nesse caso, gere um novo."), table(["Tipo", "Para", "Erro", "Tentativas", "Quando", ""], rows)] : el("p", { class: "muted" }, "Nenhuma falha."));
+}
+
 async function adminPage() {
   const policy = await when(api("GET", "/api/v1/admin/signup-policy"));
   const replication = await api("GET", "/api/v1/admin/replication").catch(() => null);
+  const mail = await api("GET", "/api/v1/admin/email").catch(() => null);
   const recovery = el("div");
   return el("div", {}, el("h1", {}, "Administração"),
     el("div", { class: "panel" }, el("h2", {}, "Cadastro"), el("p", {}, "Política atual: ", el("code", {}, policy.policy)),
@@ -534,6 +562,7 @@ async function adminPage() {
         go("#/admin");
       } }, policy.policy === "closed" ? "Permitir cadastro por convite" : "Fechar cadastro")),
     replication ? el("div", { class: "panel" }, el("h2", {}, "Replicação do banco"), replication.enabled ? el("p", {}, "Estado: ", el("strong", {}, replication.health), " · atraso ", String(replication.lag_seconds || 0), " s · último envio ", formatDate(replication.last_synced_at) || "—") : el("p", { class: "muted" }, "Desligada.")) : "",
+    mail ? emailAdminPanel(mail) : "",
     el("div", { class: "panel" }, el("h2", {}, "Recuperar uma conta"), recovery, form("Gerar link", [el("div", { class: "row" }, el("div", {}, field("ID do usuário", input("user", { required: true }))), el("div", {}, el("label", {}, input("reset_mfa", { type: "checkbox" }), " remover TOTP e passkeys")),
       state.methods && state.methods.email_recovery ? el("div", {}, el("label", {}, input("send_email", { type: "checkbox" }), " enviar ao e-mail confirmado da pessoa")) : "")], async (form) => {
       const issued = await when(api("POST", "/api/v1/admin/users/" + encodeURIComponent(form.get("user")) + "/recovery", { reset_mfa: form.get("reset_mfa") === "on", send_email: form.get("send_email") === "on" }));

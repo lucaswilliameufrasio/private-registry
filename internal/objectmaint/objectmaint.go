@@ -19,7 +19,7 @@ import (
 // KnownSchemaVersion is the newest schema whose object references this
 // package knows. A newer schema may reference objects from tables listed
 // nowhere here, so collection refuses to run against it.
-const KnownSchemaVersion = 46
+const KnownSchemaVersion = 47
 
 // referenceQueries list every column that can name a stored object. Rows are
 // counted whatever their state: an object referenced by an expired upload or a

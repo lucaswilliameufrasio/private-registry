@@ -209,7 +209,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		if err != nil {
 			return err
 		}
-		outbox, err = email.NewOutbox(jobQueue, &masterKey, sender)
+		outbox, err = email.NewOutbox(db, cfg.DatabaseDriver, jobQueue, &masterKey, sender)
 		if err != nil {
 			return err
 		}
@@ -243,6 +243,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) (err error) {
 		PublicAssetCORSOrigins: cfg.PublicAssetCORSOrigins,
 		TrustedProxies:         cfg.TrustedProxies,
 		GoModules:              goModules,
+	}
+	if outbox != nil {
+		httpConfig.Email = outbox
 	}
 	var ociCollector *oci.Service
 	// A repository of an opt-in format can only be created while its

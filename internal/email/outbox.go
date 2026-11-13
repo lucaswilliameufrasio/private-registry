@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"private-registry/internal/config"
 	"private-registry/internal/jobs"
 	"private-registry/internal/secrets"
 )
@@ -32,17 +33,19 @@ type Enqueuer interface {
 // they hold recipients and single-use links, and the database (and its
 // backups) must not reveal them.
 type Outbox struct {
+	db     *sql.DB
+	driver config.DatabaseDriver
 	queue  *jobs.Queue
 	key    *secrets.MasterKey
 	sender Sender
 	clock  func() time.Time
 }
 
-func NewOutbox(queue *jobs.Queue, key *secrets.MasterKey, sender Sender) (*Outbox, error) {
-	if queue == nil || key == nil || sender == nil {
+func NewOutbox(db *sql.DB, driver config.DatabaseDriver, queue *jobs.Queue, key *secrets.MasterKey, sender Sender) (*Outbox, error) {
+	if db == nil || (driver != config.SQLite && driver != config.Postgres) || queue == nil || key == nil || sender == nil {
 		return nil, errors.New("email outbox is misconfigured")
 	}
-	return &Outbox{queue: queue, key: key, sender: sender, clock: time.Now}, nil
+	return &Outbox{db: db, driver: driver, queue: queue, key: key, sender: sender, clock: time.Now}, nil
 }
 
 func (o *Outbox) Provider() string { return o.sender.Provider() }
@@ -59,7 +62,10 @@ func (o *Outbox) EnqueueTx(ctx context.Context, tx *sql.Tx, key string, message 
 	if err := message.Validate(); err != nil {
 		return err
 	}
-	key = "email:" + key
+	return o.enqueueKeyTx(ctx, tx, "email:"+key, message)
+}
+
+func (o *Outbox) enqueueKeyTx(ctx context.Context, tx *sql.Tx, key string, message Message) error {
 	if !validKey(key) {
 		return ErrInvalidMessage
 	}
@@ -93,7 +99,11 @@ func (o *Outbox) DeliverOnce(ctx context.Context, logger *slog.Logger) (bool, er
 	message, err := o.open(job)
 	if err != nil {
 		logger.Error("queued email could not be opened and was abandoned", "job_id", job.ID)
-		return true, o.queue.Abandon(ctx, job.ID, job.LeaseToken, o.clock().UTC())
+		if err := o.queue.Abandon(ctx, job.ID, job.LeaseToken, o.clock().UTC()); err != nil {
+			return true, err
+		}
+		o.recordFailure(ctx, logger, job.ID, "unknown", "payload_unreadable")
+		return true, nil
 	}
 	sendErr := o.sender.Send(ctx, message, job.Key)
 	finished := o.clock().UTC()
@@ -103,7 +113,18 @@ func (o *Outbox) DeliverOnce(ctx context.Context, logger *slog.Logger) (bool, er
 		return true, o.queue.Finish(ctx, job.ID, job.LeaseToken, true, finished, time.Time{})
 	case IsPermanent(sendErr):
 		logger.Error("email rejected by provider and abandoned", "provider", o.sender.Provider(), "template", message.Template, "job_id", job.ID, "error", sendErr)
-		return true, o.queue.Abandon(ctx, job.ID, job.LeaseToken, finished)
+		if err := o.queue.Abandon(ctx, job.ID, job.LeaseToken, finished); err != nil {
+			return true, err
+		}
+		o.recordFailure(ctx, logger, job.ID, string(message.Template), failureLabel(sendErr))
+		return true, nil
+	case job.Attempts >= job.MaxAttempts:
+		logger.Error("email delivery failed on its last attempt and was abandoned", "provider", o.sender.Provider(), "template", message.Template, "job_id", job.ID, "attempt", job.Attempts, "error", sendErr)
+		if err := o.queue.Finish(ctx, job.ID, job.LeaseToken, false, finished, finished); err != nil {
+			return true, err
+		}
+		o.recordFailure(ctx, logger, job.ID, string(message.Template), failureLabel(sendErr))
+		return true, nil
 	default:
 		delay := backoff(job.Attempts)
 		if wait := retryAfter(sendErr); wait > delay {

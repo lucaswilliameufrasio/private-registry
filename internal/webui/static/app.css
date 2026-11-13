@@ -42,3 +42,4 @@ code, .secret { font-family: ui-monospace, SFMono-Regular, monospace; font-size:
 .badge { display: inline-block; padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); font-size: .8rem; color: var(--muted); }
 #toast { position: fixed; bottom: 1rem; right: 1rem; max-width: 420px; padding: .75rem 1rem; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); }
 #toast.error { border-color: var(--danger); }
+.badge.alert { border-color: var(--danger); color: var(--danger); }

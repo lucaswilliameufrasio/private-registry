@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -284,6 +285,12 @@ func (s *Service) CompleteMFAEnrollment(
 	if err := s.attempts.CompleteMFA(ctx, session.UserID); err != nil {
 		return EnrollmentCompletion{}, ErrUnavailable
 	}
+	// The factor is already active; a notice that cannot be queued must not
+	// undo the enrollment.
+	now := time.Now().UTC()
+	_ = s.withTransaction(ctx, func(tx *sql.Tx) error {
+		return s.notifyUser(ctx, tx, "totp:"+session.UserID+":"+strconv.FormatInt(now.UnixMilli(), 10), session.UserID, "aplicativo autenticador (TOTP) cadastrado", now)
+	})
 	credentials, err := s.sessions.Rotate(ctx, bearerToken, sessions.LevelMFA)
 	if err != nil {
 		return EnrollmentCompletion{}, ErrUnavailable

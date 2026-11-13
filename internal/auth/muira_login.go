@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
+	"private-registry/internal/database"
 	"private-registry/internal/sessions"
 )
 
@@ -279,6 +280,9 @@ func (s *Service) UnlinkMuira(ctx context.Context, userID string) (retErr error)
 			_ = tx.Rollback()
 		}
 	}()
+	if err := database.ReserveWrite(ctx, tx, s.driver); err != nil {
+		return ErrUnavailable
+	}
 	var hasPassword bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_local_credentials WHERE user_id = `+bind(s.driver, 1)+`)`, userID).Scan(&hasPassword); err != nil {
 		return ErrUnavailable
@@ -332,6 +336,9 @@ func (s *Service) ProvisionMuiraUser(ctx context.Context, actorUserID, subject, 
 			_ = tx.Rollback()
 		}
 	}()
+	if err := database.ReserveWrite(ctx, tx, s.driver); err != nil {
+		return "", ErrUnavailable
+	}
 	var isAdmin bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM registry_instance_admins AS admins JOIN registry_users AS users ON users.user_id = admins.user_id WHERE admins.user_id = `+bind(s.driver, 1)+` AND users.status = 'active')`, actorUserID).Scan(&isAdmin); err != nil {
 		return "", ErrUnavailable

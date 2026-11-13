@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -355,6 +356,11 @@ func (s *Service) DeletePasskey(ctx context.Context, userID, passkeyID string) e
 		}
 		if changed, _ := result.RowsAffected(); changed != 1 {
 			return ErrPasskeyUnknown
+		}
+		now := time.Now().UTC()
+		digest := sha256.Sum256([]byte(passkeyID))
+		if err := s.notifyUser(ctx, tx, "passkey-removed:"+hex.EncodeToString(digest[:16])+":"+strconv.FormatInt(now.UnixMilli(), 10), userID, "passkey removida", now); err != nil {
+			return err
 		}
 		return s.recordRecoveryAudit(ctx, tx, userID, "", "passkey.deleted", userID)
 	})

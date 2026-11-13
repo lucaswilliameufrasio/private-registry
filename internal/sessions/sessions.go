@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"private-registry/internal/config"
+	"private-registry/internal/database"
 )
 
 const (
@@ -447,6 +448,11 @@ func (s *Store) withBearerTransaction(
 		return false, ErrSessionStorage
 	}
 	defer rollbackTransaction(tx, &retErr)
+	// The session is read before the account row is locked; without the
+	// reservation, concurrent requests of one browser fail with SQLITE_BUSY.
+	if err := database.ReserveWrite(ctx, tx, s.driver); err != nil {
+		return false, ErrSessionStorage
+	}
 	userID, err := readSessionUserID(ctx, tx, s.driver, tokenHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

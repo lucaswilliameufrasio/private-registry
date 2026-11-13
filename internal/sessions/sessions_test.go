@@ -240,3 +240,30 @@ func TestMalformedBearerDoesNotExposeSessionState(t *testing.T) {
 		t.Fatalf("logout should be idempotent for an unknown bearer: %v", err)
 	}
 }
+
+// A browser sends several requests with one session at once; none of them
+// may fail because another is updating the session.
+func TestConcurrentValidationOfOneSession(t *testing.T) {
+	fixture := newSQLiteFixture(t)
+	ctx := context.Background()
+	credentials, err := fixture.store.Create(ctx, fixture.userID, LevelStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const requests = 16
+	errs := make(chan error, requests)
+	start := make(chan struct{})
+	for range requests {
+		go func() {
+			<-start
+			_, err := fixture.store.Validate(ctx, credentials.BearerToken)
+			errs <- err
+		}()
+	}
+	close(start)
+	for range requests {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent validation failed: %v", err)
+		}
+	}
+}
