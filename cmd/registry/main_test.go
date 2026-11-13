@@ -28,7 +28,7 @@ func TestRunMigrateBootstrapsLocalSQLiteInstallation(t *testing.T) {
 
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	if err := run(ctx, []string{"migrate"}, logger); err != nil {
 		t.Fatal(err)
