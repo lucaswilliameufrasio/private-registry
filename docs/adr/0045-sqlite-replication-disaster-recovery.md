@@ -19,7 +19,7 @@ Integrar a biblioteca pela API pública, num worker do `serve` (`internal/replic
 
 ## Correções feitas na biblioteca
 
-A integração expôs dois defeitos, corrigidos em [sqlite-replication-go#1](https://github.com/lucaswilliameufrasio/sqlite-replication-go/pull/1); o `go.mod` aponta para o commit desse branch (`34e5695`) até o merge:
+A integração expôs dois defeitos, corrigidos em [sqlite-replication-go#1](https://github.com/lucaswilliameufrasio/sqlite-replication-go/pull/1), incluídos na [v0.1.0](https://github.com/lucaswilliameufrasio/sqlite-replication-go/releases/tag/v0.1.0), a versão fixada no `go.mod`:
 
 1. Com `pierrec/lz4` v4.1.33 (a versão que o grafo de dependências do registry resolve) a biblioteca não decodificava o próprio snapshot: o `lz4.Reader` passou a procurar um frame seguinte e consumia bytes do cabeçalho de página do LTX.
 2. O parser de WAL rejeitava os frames de geração anterior que sobram quando o SQLite reinicia o WAL sem truncar — o que o autocheckpoint padrão faz. A captura falhava em qualquer aplicação que não desligasse o autocheckpoint.

@@ -73,7 +73,7 @@ export REGISTRY_S3_DNS_SERVER=1.1.1.1:53                       # obrigatório pa
 
 ```sh
 export REGISTRY_MUIRA_ENABLED=true
-export REGISTRY_MUIRA_ISSUER=https://auth.lucaswilliameufrasio.com
+export REGISTRY_MUIRA_ISSUER=https://auth.example.com
 export REGISTRY_MUIRA_CLIENT_ID=<client id>
 export REGISTRY_MUIRA_CLIENT_SECRET_FILE=/etc/registry/muira-client-secret
 export REGISTRY_MUIRA_ALLOWED_NETWORKS=<CIDRs do Muira>
@@ -100,7 +100,7 @@ Detalhes no [ADR 0046](adr/0046-workspace-invitations.md).
 
 ### E-mail (opcional)
 
-Sem `REGISTRY_EMAIL_PROVIDER`, nada é enviado e os links continuam sendo entregues à mão. Com ele, o registry envia convites, recuperação de senha, confirmação de e-mail e avisos de segurança (senha redefinida, passkey nova, e-mail trocado).
+Sem `REGISTRY_EMAIL_PROVIDER`, nada é enviado e os links continuam sendo entregues à mão. Com ele, o registry envia convites, recuperação de senha, confirmação de e-mail e avisos de segurança (senha redefinida, TOTP cadastrado, passkey cadastrada ou removida, e-mail trocado).
 
 | Provedor | Variáveis |
 | --- | --- |
