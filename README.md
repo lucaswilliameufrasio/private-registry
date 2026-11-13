@@ -12,6 +12,8 @@ Registry de pacotes self-hosted para equipes pequenas, num único binário Go: C
 
 A documentação está em português.
 
+Licenciado sob a [Apache License 2.0](LICENSE). Copyright 2026 Lucas Eufrasio.
+
 ## Notas de evolução
 
 As notas abaixo registram o estado em cada etapa e podem estar desatualizadas; o guia vigente é [docs/usable-delivery.md](docs/usable-delivery.md).
