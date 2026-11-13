@@ -1,0 +1,126 @@
+package artifacts
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+)
+
+// checkGenericQuota runs under the repository write transaction's shared
+// installation lock. Upload-session insertion is the reservation; rejected or
+// expired sessions release it, while uploaded and published sessions retain it.
+// Workspace accounting also includes the implemented Go, Cargo, npm and Pub
+// catalog entries and their applicable reservations, and OCI blobs and
+// manifests.
+func (s *Service) checkGenericQuota(ctx context.Context, tx *sql.Tx, workspaceID, repositoryID string, size int64) error {
+	if size == 0 {
+		return nil
+	}
+	var workspaceLimit, repositoryLimit sql.NullInt64
+	query := `SELECT w.logical_quota_bytes, r.logical_quota_bytes
+		FROM registry_workspaces w JOIN registry_repositories r ON r.workspace_id = w.workspace_id
+		WHERE w.workspace_id = ` + bind(s.driver, 1) + ` AND r.repository_id = ` + bind(s.driver, 2)
+	if err := tx.QueryRowContext(ctx, query, workspaceID, repositoryID).Scan(&workspaceLimit, &repositoryLimit); err != nil {
+		return errors.New("artifact quota policy could not be read")
+	}
+	// Each published Go version owns its ZIP and separately served go.mod.
+	// Count both logical references, even when physical objects are shared.
+	var goUsage, goReserved, cargoUsage, cargoReserved, npmUsage, npmReserved, pubUsage, pubReserved, ociUsage int64
+	if workspaceLimit.Valid {
+		query = `SELECT COALESCE(SUM(zip_size + LENGTH(mod_bytes)), 0) FROM registry_go_module_versions WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&goUsage); err != nil || goUsage < 0 {
+			return errors.New("workspace quota accounting could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(zip_size + LENGTH(mod_bytes)), 0) FROM registry_go_upload_sessions WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('receiving', 'uploading', 'uploaded')`
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&goReserved); err != nil || goReserved < 0 {
+			return errors.New("workspace quota reservations could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(archive_size), 0) FROM registry_cargo_versions WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&cargoUsage); err != nil || cargoUsage < 0 {
+			return errors.New("workspace Cargo quota usage could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(archive_size), 0) FROM registry_cargo_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_cargo_publications p WHERE p.reservation_id = registry_cargo_reservations.reservation_id)`
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&cargoReserved); err != nil || cargoReserved < 0 {
+			return errors.New("workspace Cargo quota reservations could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_npm_versions WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&npmUsage); err != nil || npmUsage < 0 {
+			return errors.New("workspace npm quota usage could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_npm_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_npm_publications p WHERE p.reservation_id = registry_npm_reservations.reservation_id)`
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&npmReserved); err != nil || npmReserved < 0 {
+			return errors.New("workspace npm quota reservations could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_versions WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubUsage); err != nil || pubUsage < 0 {
+			return errors.New("workspace Pub quota usage could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(tarball_size), 0) FROM registry_pub_reservations WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('reserved', 'uploading', 'uploaded') AND NOT EXISTS (SELECT 1 FROM registry_pub_publications p WHERE p.reservation_id = registry_pub_reservations.reservation_id)`
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&pubReserved); err != nil || pubReserved < 0 {
+			return errors.New("workspace Pub quota reservations could not be checked")
+		}
+		var ociBlobs, ociManifests int64
+		query = `SELECT COALESCE(SUM(size_bytes), 0) FROM registry_oci_blobs WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&ociBlobs); err != nil || ociBlobs < 0 {
+			return errors.New("workspace OCI quota usage could not be checked")
+		}
+		query = `SELECT COALESCE(SUM(LENGTH(content)), 0) FROM registry_oci_manifests WHERE workspace_id = ` + bind(s.driver, 1)
+		if err := tx.QueryRowContext(ctx, query, workspaceID).Scan(&ociManifests); err != nil || ociManifests < 0 || ociManifests > (1<<62)-ociBlobs {
+			return errors.New("workspace OCI quota usage could not be checked")
+		}
+		ociUsage = ociBlobs + ociManifests
+	}
+	for _, limit := range []struct {
+		value      sql.NullInt64
+		repository bool
+	}{{workspaceLimit, false}, {repositoryLimit, true}} {
+		if !limit.value.Valid {
+			continue
+		}
+		if size > limit.value.Int64 {
+			return ErrLogicalQuotaExceeded
+		}
+		query = `SELECT COALESCE(SUM(expected_size), 0) FROM registry_generic_upload_sessions
+			WHERE workspace_id = ` + bind(s.driver, 1) + ` AND status IN ('receiving', 'uploading', 'uploaded', 'published')`
+		args := []any{workspaceID}
+		if limit.repository {
+			query += ` AND repository_id = ` + bind(s.driver, 2)
+			args = append(args, repositoryID)
+		}
+		var used int64
+		if err := tx.QueryRowContext(ctx, query, args...).Scan(&used); err != nil || used < 0 {
+			return errors.New("artifact quota usage could not be read")
+		}
+		if used > limit.value.Int64-size {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && goUsage > limit.value.Int64-size-used {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && goReserved > limit.value.Int64-size-used-goUsage {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && cargoUsage > limit.value.Int64-size-used-goUsage-goReserved {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && cargoReserved > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && npmUsage > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && npmReserved > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && pubUsage > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && pubReserved > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved-pubUsage {
+			return ErrLogicalQuotaExceeded
+		}
+		if !limit.repository && ociUsage > limit.value.Int64-size-used-goUsage-goReserved-cargoUsage-cargoReserved-npmUsage-npmReserved-pubUsage-pubReserved {
+			return ErrLogicalQuotaExceeded
+		}
+	}
+	return nil
+}

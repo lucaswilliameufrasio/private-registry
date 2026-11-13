@@ -1,8 +1,12 @@
 # Plano de desenvolvimento — Registry privado de pacotes e artefatos
 
-**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026
+**Atualização de credenciais:** a fatia inicial de tokens pessoais de leitura, schema v15, restringe cada token a um repositório e ao grant `reader` específico; emissão exige MFA recente e o segredo é exibido uma vez. Manifesto e download genéricos aceitam bearer em origens separadas. Requisições já autenticadas podem concluir após revogação; publicação automatizada, contas de serviço e clientes nativos continuam pendentes. Detalhes e limites: [ADR 0021](adr/0021-personal-read-tokens.md).
 
-**Estado:** especificação revisada; fase 0 em execução, com spikes SQLite local e roundtrip S3/Floci comprovados; atomicidade concorrente do storage ainda pendente
+**Atualização de serving público:** repositórios explicitamente `listed`/`unlisted` podem servir arquivos genéricos publicados por rota limitada na origem de assets, conforme [ADR 0020](adr/0020-public-generic-assets.md). A allowlist CORS global é opcional e restrita; configurações mais granulares, outros formatos, cache público e aceite completo de bundles seguem pendentes. As referências históricas abaixo à ausência total de serving público precedem essa fatia.
+
+**Data original:** 02/10/2026; decisões consolidadas em 04/10/2026; progresso atualizado em 22/10/2026
+
+**Estado:** fases 0 e 1 permanecem abertas. Backups/verificação remotos SQLite/PostgreSQL, fixtures de clientes Pub/Go/Cargo/npm/Hex e OIDC/SCIM básico Authentik foram exercitados com limites registrados. Pub usa HTTP localhost e não prova TLS; sob 503 Authentik, health/freshness não sinalizou a falha e a reconciliação variou, sem prova determinística. Coordenação OCI commit/revogação, aceitação de atomicidade S3 real, contratos restantes e implementação produtiva continuam pendentes. O checkout contém `registry serve`, migrations v1–v10, bootstrap local, chave mestra Linux, auth local/TOTP/sessões e rotas autenticadas de workspace, membership e metadados/configuração de repositório. `GET /api/v1/workspaces` aceita apenas sessões `standard`/`mfa`; escritas exigem CSRF/Origin; criação e mutações sensíveis exigem MFA recente. Owners/administradores podem criar e listar metadados de repositórios; somente owner altera visibilidade, enquanto a policy começa `private_only` e não converte repositórios existentes quando restringida. Gestão de grants explícitos está implementada conforme ADR 0014; o fluxo genérico privado de publicação e download está descrito na seção 7.7, enquanto adapters produtivos e serving público seguem pendentes; visibilidade `listed`/`unlisted` não concede acesso anônimo. Testes locais SQLite/HTTP e integração PostgreSQL `-race` de repositórios, workspaces, server e migrations passaram em execução focada. A revisão anterior a esta fatia passou o `make verify` integral no rerun final: build, format-check, vet normal/integration, sintaxe Bash, testes unitários, integrações `-count=3` (incluindo Authentik, Pub, Go, Cargo, npm, Hex, OCI, PostgreSQL e Floci) e race `-count=1`. O teste Pub usou Dart 3.13.5 via `PUB_TEST_DART_BIN`; a fixture Authentik passou a colocar o `.env` privado no diretório indicado por `TMPDIR` (fallback `/tmp/opencode`). Os quatro containers Authentik stale foram removidos após autorização explícita; nenhum volume, imagem ou outro container foi removido. Grants e migrações v8 passaram também na integração PostgreSQL focada com `-race`. A v1 permanece aberta porque serving de conteúdo, adapters e demais aceites ainda faltam. Passkeys, UI, convites, gestão de conteúdo e adapters produtivos continuam ausentes; não há servidor utilizável, release ou suporte de protocolo anunciado.
 
 **Nome de trabalho:** Private Registry; nome comercial ainda não escolhido  
 **Repositório sugerido:** `artifact-registry` — sugestão técnica, sem pressupor disponibilidade
@@ -437,6 +441,10 @@ O formato interno do storage OCI não se mistura implicitamente ao CAS dos demai
 
 ### 7.7 Artefatos genéricos e assets
 
+**Atualização:** a descrição histórica abaixo precede o worker de expiração periódica de sessões documentado no ADR 0017. Limpeza de staging, reconciliação e GC de objetos órfãos continuam pendentes.
+
+**Implementação parcial em 22/10/2026 — não aceita como feature completa da v1:** migrations v9/v10 e serviço genérico dão identidade imutável `(repositório, coleção, label opaco)`, sessões de upload limitadas, paths relativos validados, verificação de tamanho/SHA-256 e publicação explícita transacional. A sessão faz claim transacional `receiving → uploading` antes de ler o body: PUT concorrente para o mesmo ID falha sem consumir conteúdo; falhas transitórias restauram o claim para retry. Claims abandonadas expiram após 24h e sessões expiradas são reconciliadas lazy em Receive/StartUpload/Publish; não há job periódico nem reconciliação de objetos órfãos. O leitor precisa de grant `reader`; o publicador precisa de `publisher`, e o router exige MFA recente nas mutações de upload/publicação/emissão de link. A API administrativa não entrega bytes. O endpoint de link cria capability aleatória armazenada somente como SHA-256; GET/HEAD na origem `REGISTRY_ASSET_ORIGIN` distinta responde como attachment, `nosniff`, ETag, Range simples e `private, no-store`; default de 5 minutos, máximo de 15. Um ticket já emitido continua utilizável até expirar mesmo após revogação do grant. Cobertura SQLite e PostgreSQL exercita catálogo, publicação, grants, claim concorrente e ticket/range. Permanecem ausentes quotas agregadas/reserva, jobs periódicos de expiração/limpeza, reconciliação/GC de objetos órfãos, métricas, S3, CLI/UI e adapters Pub/Go/Cargo/npm/Hex/OCI. Limites atuais são por processo: 1 GiB por arquivo por default (até 1 GiB configurável) e quatro uploads simultâneos por default; isso não é quota de workspace nem controle distribuído.
+
 - Publicação de coleção versionada com manifest de arquivos: path, tamanho, MIME, digest e política de acesso.
 - Paths relativos normalizados; impedir traversal e colisões; não servir arquivos fora da coleção.
 - Upload de arquivo individual ou archive com extração limitada.
@@ -456,11 +464,13 @@ Downloads privados passam pelo registry por padrão, com autorização vigente. 
 
 ### 8.1 Bootstrap
 
-1. Instalação inicia em modo de configuração, com segredo de bootstrap entregue por canal local.
-2. Primeiro administrador define URL externa, conta inicial, banco e armazenamento.
-3. Criar material de chave e exportar kit de recuperação.
+1. Operador com acesso local aplica migrations explicitamente e provisiona o primeiro administrador pelo terminal interativo, sem segredo de bootstrap nem endpoint HTTP.
+2. Configurar URL externa, banco e armazenamento; concluir a conta inicial conforme o procedimento operacional ainda pendente.
+3. Inicializar a chave mestra local fora do diretório de dados e exportar kit de recuperação. `registry init-master-key` gera o arquivo Linux protegido; migration v4 e serviço interno já persistem seed TOTP cifrado e hashes de códigos de recuperação, mas kit/backup da chave e recuperação operacional ainda não estão implementados.
 4. Testar configuração antes de ativar métodos externos.
 5. Encerrar bootstrap definitivamente; impedir tomada da instalação por nova visita pública.
+
+O primeiro administrador é provisionado com `registry bootstrap-admin` em terminal local interativo. Username é o identificador de login local; email é obrigatório para a conta inicial, mas fica não verificado e não exige transporte de email no bootstrap. Email não é identidade estável nem vincula contas. A credencial é armazenada como hash Argon2id. O comando não aceita senha em argumento/variável de ambiente, não expõe endpoint HTTP e não aplica migrations implicitamente.
 
 Cadastro fechado por padrão. Opções: somente administradores, convites, ou cadastro aberto. Convites têm expiração, escopo, uso único e estado verificável. Convites para workspaces diferentes não concedem acesso à instalação inteira.
 
@@ -472,7 +482,7 @@ Cadastro aberto local, com senha/passkey, exige email verificado e transporte de
 
 | Método | Requisito |
 | --- | --- |
-| Senha local | Opcional; senha forte, hash Argon2id, reset de uso único e rate limit |
+| Senha local | Opcional; username local único para login, senha forte com hash Argon2id, reset de uso único e rate limit; email é contato, não identidade |
 | OIDC próprio | Configuração de issuer, client ID/secret, scopes e mapeamento de claims |
 | Google | Adapter configurável com identidade estável e callbacks registrados |
 | Apple | Adapter com configurações e rotação de credenciais próprias do provedor |
@@ -494,7 +504,7 @@ Fluxos de login: authorization code, PKCE onde suportado, `state`, `nonce` em OI
 - Sessões revogáveis, cookie Secure/HttpOnly/SameSite e defesa CSRF nos endpoints humanos.
 - Rotacionar sessão no login, MFA e mudança de privilégio.
 - Duração padrão: 12 horas absolutas e 1 hora de inatividade; ajustável.
-- Reautenticação recente para alterar IdP, credenciais, permissões, backups, chaves e visibilidade.
+- Reautenticação recente para alterar IdP, credenciais, permissões, backups, chaves e visibilidade. A primeira operação HTTP sensível, criação de workspace com MFA verificada há menos de 5 minutos, está especificada no [ADR 0011](adr/0011-human-authentication-mfa-and-sessions.md); demais ações precisam definir o prazo antes de serem expostas.
 - Banimento/suspensão revoga sessões, tokens pessoais e acessos dependentes. Contas de serviço independentes não são suspensas automaticamente; alertar para designar responsável e avaliar rotação quando o usuário suspenso era o único responsável ativo.
 - Não confiar em logout federado como única revogação local.
 
@@ -502,6 +512,7 @@ Fluxos de login: authorization code, PKCE onde suportado, `state`, `nonce` em OI
 
 - Administrador da instalação pode exigir MFA de todos; por padrão, exigir de administradores da instalação e proprietários/administradores de workspace.
 - TOTP, passkeys e códigos de recuperação entram na v1. Contas de serviço usam políticas de credencial próprias, não MFA humano.
+- O contrato da chave mestra local e do envelope versionado está em [ADR 0010](adr/0010-local-master-key-and-secret-envelopes.md). Login local, enrollment/confirmação TOTP, challenge/recovery e sessões estão conectados a endpoints HTTP limitados; listagem/criação de workspace são as primeiras rotas protegidas e rejeitam sessões em estágios MFA incompletos. Passkeys, recuperação operacional, administração e autorização de conteúdo continuam pendentes. Ver [ADR 0011](adr/0011-human-authentication-mfa-and-sessions.md).
 - Passkey pode substituir senha + segundo fator quando a autenticação exigir e comprovar verificação do usuário pelo autenticador, como PIN/biometria. Presença/toque sem essa verificação não satisfaz MFA.
 - MFA federado só satisfaz a política com evidência verificável do IdP segundo configuração explícita, não por inferência de que qualquer login externo é multifator.
 - Recuperação começa por códigos de uso único. Sem códigos, administrador da instalação pode iniciar reset local de MFA com reautenticação própria, justificativa, auditoria e notificação ao usuário.
@@ -564,7 +575,7 @@ Na v1, papéis predefinidos têm capacidades fixas e são combináveis por escop
 
 Proprietário e administrador do workspace não recebem publicação automaticamente: precisam de concessão própria. Demais membros não recebem leitura só por participar. Permissões por workspace/repositório/pacote são aditivas, sem negação por pacote; conteúdo mais restrito deve ficar em outro repositório.
 
-Usar e delegar uma permissão são capacidades distintas. Gestão de membros não autoriza autoelevação: administrador só concede capacidades explicitamente delegáveis por ele, não qualquer capacidade que possua. Concessões acima disso exigem proprietário. Proprietário pode conceder a si próprio por ação explícita e auditada, sem herança automática de publicação.
+Usar e delegar uma permissão são capacidades distintas. Gestão de membros não autoriza autoelevação: administrador só concede capacidades explicitamente delegáveis por ele, não qualquer capacidade que possua. Na v1, administradores de workspace podem conceder/revogar somente `reader` e `publisher`; `maintainer` e `security` exigem owner. Administrador não pode conceder papel a si próprio. Proprietário pode conceder qualquer papel a si próprio por ação explícita e auditada, sem herança automática de publicação. Toda concessão exige membership ativa; remover/suspender membership revoga grants na mesma transação, e readmissão não os restaura.
 
 ### 9.2 Propriedade e continuidade do workspace
 
@@ -743,6 +754,8 @@ Quando implementados, scanners obrigatórios para um repositório impedem public
 
 ### 13.1 Drivers
 
+**Fatia experimental:** `internal/storage/S3` implementa Put condicional e leitura verificada por staging privado com cliente injetado, testado contra Floci e fixture HTTP local. Não está selecionável no servidor nem aceito para produção: atomicidade em S3 real, configuração de credenciais/egress, multipart, espaço temporário agregado, crash recovery e GC permanecem obrigatórios. Ver [ADR 0019](adr/0019-s3-content-driver.md).
+
 Interface mínima: abrir, escrever staging, finalizar objeto, HEAD/verificar, ler range, listar para reconciliação, apagar autorizado e abortar multipart. Opções específicas de S3 permanecem específicas; não fingir que filesystem e object store têm o mesmo modelo.
 
 - Local: diretório persistente, staging separado, escrita temporária + rename atômico no mesmo filesystem e política de durabilidade.
@@ -754,6 +767,12 @@ Interface mínima: abrir, escrever staging, finalizar objeto, HEAD/verificar, le
 - Revogação de URL assinada depende de TTL/medidas no storage; mostrar essa janela na UI.
 
 ### 13.2 Quotas e contabilização
+
+**Fundação parcial:** as migrations v12/v13 permitem tetos lógicos opcionais versionados por workspace e repositório, e o início de upload genérico reserva o tamanho declarado sob o lock transacional compartilhado. Sessões ativas, recebidas e publicadas contam por referência lógica; expiração ou rejeição libera a reserva. Administrador da instalação pode consultar e alterar as policies pelas rotas autenticadas com controle de revisão, MFA recente para escrita e auditoria. Delegação ao workspace, quota da instalação, medição/limites para outros formatos e reconciliação operacional continuam pendentes; teto não configurado não oferece proteção. Ver [ADR 0018](adr/0018-generic-logical-quota.md).
+
+Administradores da instalação também podem consultar bytes genéricos reservados e publicados agregados por workspace, sem nomes de conteúdo; não há ainda detalhamento para administradores de workspace, medição de tráfego/download ou valores físicos de storage.
+
+O limite de tamanho de upload e a concorrência HTTP configuráveis são apenas guardrails locais por processo (`REGISTRY_MAX_UPLOAD_BYTES`, default 1 GiB; `REGISTRY_MAX_CONCURRENT_UPLOADS`, default 4). Não reservam quota, não limitam uso agregado por workspace/repositório e não coordenam múltiplas instâncias. Cada upload session é reivindicada por um único request; a expiração lazy recupera estados persistidos, mas não substitui job periódico nem remove objetos órfãos.
 
 - Quota de workspace/repositório, upload individual e concorrência.
 - Administrador pode limitar workspaces criados por usuário, membros/repositórios por workspace, armazenamento, upload individual e uploads simultâneos. Tetos da instalação prevalecem; limites de workspace podem ser menores ou receber exceção explicitamente autorizada.
@@ -800,6 +819,8 @@ Mudança de bucket/path não move objetos por mágica. Implementar job de cópia
 - Não prometer rollback por migration down; preferir forward-fix ou restaurar backup compatível.
 - Voltar binário é permitido somente dentro da compatibilidade declarada de schema.
 - Backup pós-upgrade e validação com cliente real completam o procedimento.
+
+**Implementação inicial (atualizada em 22/10/2026; não aceita para produção):** `registry migrate` aplica migrations SQL embutidas e separadas por dialeto; SHA-256, lock local SQLite/advisory PostgreSQL e histórico de tentativas são validados por testes reais. `registry serve` não migra implicitamente. O schema v1–v10 contém identidade singleton, usuários, identidades externas, policies independentes, grants de criação, workspaces, memberships, repositórios/visibilidade, auditoria, credenciais locais, enrollment TOTP cifrado, hashes de códigos de recuperação, sessões com hashes de bearer/CSRF e buckets de tentativas móveis. Um serviço interno aplica policy de workspace; `registry bootstrap-admin` cria uma única conta local interativamente, com username e email de contato e hash Argon2id, usando transação serializada e evento de auditoria. `registry init-master-key` gera uma chave Linux de 32 bytes em arquivo privado fora de `REGISTRY_DATA_DIR`; `internal/password` compartilha Argon2id; `internal/mfa` implementa seed XChaCha20-Poly1305, enrollment limitado, confirmação, prevenção de replay e consumo único de recuperação; `internal/sessions` implementa emissão, validação, expiração absoluta/inativa, contextos de enrollment (10 min), challenges MFA (5 min), CSRF token hash, rotação e revogação; `internal/auth` implementa login local, política MFA para administradores da instalação/workspace e estágios restritos; `internal/authattempts` aplica 5 tentativas por conta e 20 por IP em janela móvel de 15 minutos, limpa buckets expirados, falha fechado no teto de 50 mil buckets e compartilha até duas derivações Argon2 concorrentes sem fila. A autenticação e as rotas administrativas de workspace, membership, metadados de repositório e grants estão conectadas ao router com sessão por request, CSRF/Origin nas escritas e MFA recente nas mutações sensíveis; grants são auditados; o fluxo genérico privado de publicação e download está conectado, mas os adapters de protocolo continuam pendentes. Ainda faltam integração do revoke de identidade com suspensão/SCIM, passkeys, adapters e APIs de conteúdo. Gate de backup para mudanças destrutivas, compatibilidade de binário/schema, kit/rotação da chave, execução em manutenção e procedimento de upgrade continuam pendentes.
 
 ### 14.4 Troca SQLite → PostgreSQL
 
@@ -1082,6 +1103,10 @@ Links usam a URL canônica e levam a telas autenticadas quando apropriado. Token
 
 ### 20.1 Jobs
 
+**Fundação parcial:** a migration v11 e `internal/jobs` persistem jobs idempotentes e claims com token, lease e limite de tentativas em SQLite/PostgreSQL. Um worker iniciado por `serve` processa periodicamente lotes limitados de expiração de sessões de upload, com retry e reagendamento persistidos; objetos órfãos não são apagados. Scheduler genérico, outbox, recuperação operacional, limites, alertas e UI continuam pendentes. Não há garantia exatamente-once para efeitos externos. A decisão e seus limites estão no [ADR 0017](adr/0017-persistent-job-claims.md).
+
+A migration v14 acrescenta revisão por transição e código de falha limitado; administrador da instalação pode listar dead-letters e solicitar retry auditado apenas para expiração genérica, com revisão observada e MFA recente. A interface ainda não substitui uma área operacional completa nem prova segurança para retry de outros tipos de job.
+
 - Job persistente e outbox transacional evitam perda entre commit e notificação.
 - Lease com expiração, heartbeat, retry exponencial limitado e jitter.
 - Workers retomam jobs interrompidos; operações externas não são exatamente-once por promessa.
@@ -1250,7 +1275,13 @@ As fases são entregas internas incrementais. A v1 completa exige os sete format
 
 **Aceite:** reiniciar sem perder dados, isolar dois workspaces e executar migrations nos dois engines.
 
+**Progresso parcial (atualizado em 22/10/2026; fase ainda aberta):** há um esqueleto local `registry serve` com configuração explícita, SQLite persistente, PostgreSQL via pgx, `/livez`, `/readyz`, endpoints restritos de autenticação e shutdown HTTP limitado. `registry migrate` mantém identidade da instalação e instala schema v1–v10 de usuários/identidades, policies, grants de criação, workspaces/memberships, repositórios/visibilidade, auditoria, credenciais locais, MFA TOTP, sessões e buckets de tentativas. Serviço de workspace cria com policy separada do cadastro, slug imutável, owner inicial e auditoria transacional; a listagem usa paginação keyset e filtra membership/workspace/usuário ativos. `registry bootstrap-admin` exige TTY, username, email de contato e senha Argon2id, não migra implicitamente, não expõe endpoint HTTP e recusa segunda execução; atomicidade e corrida estão cobertas para SQLite e PostgreSQL. `registry init-master-key` cria arquivo binário Linux protegido, separado do diretório de dados. Login local, enrollment/challenge TOTP, recovery codes, logout, enrollment voluntário com rotação para sessão restrita, listagem/criação de workspace, gestão limitada de memberships e operações de metadados/configuração de repositórios passam pelo router com validação de sessão por request, cookies host-only `Secure`, CSRF/origem nas escritas e rate limits por peer/proxy confiável. A listagem só aceita sessões `standard`/`mfa`; criação e mutações de membership/repositório exigem MFA recente (menos de 5 minutos). Owners gerem roles, visibilidade e todos os grants; administradores de workspace delegam `member` e apenas grants `reader`/`publisher`, além de gerir metadados de repositórios. A policy global de visibilidade é restrita ao administrador da instalação; começa `private_only`, novos repositórios são privados e restringir opções não converte os existentes. A última membership owner ativa não pode ser removida/rebaixada. Há publicação/download privado de artefatos genéricos via asset-origin; convites, adapters produtivos e serving público continuam pendentes; membership não concede acesso implícito, grants são revogados ao remover membership e readmissão exige concessão nova; visibilidade não autoriza conteúdo. Testes SQLite e HTTP cobrem autorização, CSRF, MFA expirado, delegação, isolamento, último owner e remoção concorrente; integração PostgreSQL com `-race` para repositórios, workspaces, server e migrations passou após esta fatia; `make verify` integral permanece pendente após os últimos edits. Passkeys, UI, convites, grants de conteúdo, APIs de conteúdo e prova de isolamento de conteúdo entre workspaces; backup/kit/rotação da chave, SvelteKit, CI e o aceite da fase continuam pendentes.
+
+**Gate integral da revisão anterior à fatia genérica:** `TMPDIR=/home/lucaseufrasio/.cache/private-registry-race-tmp.ggcqJ3 GOMAXPROCS=4 PUB_TEST_DART_BIN=/home/lucaseufrasio/fvm/versions/3.47.7/bin/cache/dart-sdk/bin/dart make verify` passou. O alvo executou build sem CGO, format-check, vet normal/integration, sintaxe Bash, unitários, integrações repetidas três vezes e race uma vez; Authentik e Pub passaram. A fixture Authentik usa `TMPDIR` para seu diretório temporário privado, com fallback `/tmp/opencode`. A autorização anterior para remover quatro containers stale foi específica àquela execução, não uma permissão de limpeza geral. A fatia genérica tem testes focados SQLite/HTTP e PostgreSQL; o gate integral do checkout atual precisa de nova validação. Nenhum commit, push, deploy ou release desta fatia foi feito. A fase 1 e a v1 ainda não estão concluídas: existe serving genérico privado inicial, mas faltam adapters produtivos Pub/Go/Cargo/npm/Hex/OCI, quotas, recuperação e demais aceites.
+
 ### Fase 2 — conteúdo e artefatos genéricos
+
+**Validação da fatia inicial em 25/10/2026:** `make verify` integral aprovado com build sem CGO, format-check, vet normal/integration, sintaxe Bash, unitários, integrações 3× e race 1×. Inclui filesystem, catálogo genérico, claims de upload e tickets, com PostgreSQL real, além dos contratos existentes Authentik/Hex/Pub/Go/Cargo/npm/OCI. Ambiente exato registrado no README. A fixture Authentik separa bootstrap de identidade do evento de membership; não comprova entrega inicial concorrente, health/freshness nem reconciliação determinística. Esse resultado substitui a pendência de validação do checkout descrita no histórico acima, mas não encerra a fase 2 nem a v1.
 
 - Drivers filesystem/S3, staging, digest, quota, commit idempotente e reconciliação.
 - Assets em origem separada, download e aliases protegidos.
@@ -1396,9 +1427,12 @@ Identidade/segurança pode ser antecipada conforme exposição da instalação. 
 
 | ADR/risco | Decisão a registrar | Como encerrar |
 | --- | --- | --- |
-| Driver SQLite | Modernc ou alternativa com backup comprovado | Spike online + recuperação |
-| Motor OCI | Distribution/gateway ou alternativa | Isolamento, gate, GC e restore demonstrados |
-| Hex publicação | API/CLI primeiro; nativo só com contrato completo | Cliente real e docs sem flags inventadas |
+| Driver SQLite | [ADR 0001](adr/0001-sqlite-driver.md): modernc para implementação inicial; manter comprovação operacional | Spike online + recuperação em volumes representativos; repetir após upgrades |
+| URLs e origens | [ADR 0002](adr/0002-public-url-and-origin-boundaries.md): separar administração, OCI e assets executáveis; domínios concretos configuráveis | Validar proxy confiável, TLS, CSP/CORS/cache e compatibilidade real dos clientes |
+| Backup e restore | [ADR 0003](adr/0003-backup-and-restore-boundaries.md): age, trust separado, manifest de conclusão e restore independente; wire format/operations abertos | Backup completo, verificador isolado, anti-rollback, recovery kit e backend real |
+| Identidade e SCIM | [ADR 0004](adr/0004-authentication-and-scim-identity.md): subject estável, sem auto-link por email, grants por origem e estado ativo vinculante | Health/freshness, bloqueio de todos os métodos, recovery e integração no registry |
+| Motor OCI | [ADR 0005](adr/0005-oci-engine-selection.md): nenhuma escolha de produção aceita; Distribution é só candidato enquanto commit/revogação não tiver contrato seguro | Coordenação durável/resultado incerto, isolamento, Docker, quota/review, GC e restore demonstrados |
+| Hex publicação | [ADR 0006](adr/0006-hex-publication-boundary.md): tarball preparado na fonte e API/CLI explícita; `mix hex.publish` só se comprovado | Cliente real, assinatura/rotação e docs sem flags inventadas |
 | Criptografia | age recipients + gestão de root secrets | Kit recupera instalação nova |
 | Verificador automático | Externo automático + chave offline manual; mecanismo de autenticação/isolamento | Restauração do remoto sem acesso indevido |
 | SCIM e saúde Authentik | Contrato de reconciliação/health verificável, identidade e revogação | Testes de mudança, atraso, canal interrompido e recuperação sem login |
@@ -1433,6 +1467,12 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 ### Primeira sequência concreta de tarefas
 
 - [ ] Criar projeto e contratos de configuração/DB/storage.
+- [x] Registrar decisão inicial do driver SQLite com evidência e limites. [ADR 0001](adr/0001-sqlite-driver.md); suporte PostgreSQL/paridade permanece independente.
+- [x] Registrar fronteiras de URLs/origens sem fixar domínio do produto. [ADR 0002](adr/0002-public-url-and-origin-boundaries.md); configuração/TLS/proxy e compatibilidade continuam pendentes.
+- [x] Registrar direção de backup, separação das chaves e significado de `validated`. [ADR 0003](adr/0003-backup-and-restore-boundaries.md); formato/trust/aceite de produção permanecem abertos.
+- [x] Registrar contrato de identidade OIDC/SCIM e limites de revogação. [ADR 0004](adr/0004-authentication-and-scim-identity.md); saúde, bloqueio e recuperação ainda não aceitos.
+- [x] Registrar decisão explícita de não adoção OCI enquanto a corrida de revogação segue aberta. [ADR 0005](adr/0005-oci-engine-selection.md); requisito OCI continua obrigatório à v1.
+- [x] Registrar fronteira de publicação Hex por tarball/API-CLI, sem inventar suporte nativo. [ADR 0006](adr/0006-hex-publication-boundary.md); implementação, key management e aceite continuam pendentes.
 - [x] Spike SQLite online backup com escritas entre passos e recuperação age local; [evidência e limites](spikes/sqlite-backup.md). Roundtrip remoto é comprovado separadamente na tarefa seguinte; pins/GC e recuperação completa continuam pendentes.
 - [x] Spike age em streaming → multipart S3/Floci → restore sem origem/snapshot, com digests/integridade e falhas; [evidência e limites](spikes/s3-backup.md). Atomicidade de conclusão concorrente, pins/GC e recuperação completa continuam pendentes.
 - [x] Spike PostgreSQL snapshot exportado/dump age/restore sem origem, tools do mesmo major e falhas; [evidência e limites](spikes/postgres-backup.md). Distribuição de tools, matriz de versões e backup completo continuam pendentes.
@@ -1448,6 +1488,14 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [x] Comparação PostgreSQL real: predicado de policy não ordena escritores distintos; lock da linha compartilhada serializa liberação/revogação e preserva rollback. [Evidência](spikes/postgres-release-ordering.md). Schema/recursos limitados; coordenador produtivo e commit remoto seguem pendentes.
 - [x] Mecanismo de verificação SQLite em subprocesso separado: produtor só recebe recipient público; origem removida, chave privada por stdin do verificador, validações/digests e cleanup. [Evidência](spikes/external-backup-verifier.md). Verificador operacional/manifest autenticado/kit e backup completo seguem obrigatórios.
 - [x] Receipt de snapshot assinado/contextualizado e verificado em subprocesso com chave pública confiada separadamente. [Evidência](spikes/signed-backup-receipt.md). Não é manifest completo/trust store/relatório autenticado, freshness ou verificador operacional.
+- [x] Verificador SQLite em subprocesso busca receipt/ciphertext remotos no Floci, valida assinatura/contexto, autentica age e restaura após remoção da cópia local. [Evidência](spikes/remote-signed-backup-verifier.md). Não conclui backup da instalação nem verificador operacional.
+- [x] Verificador PostgreSQL em subprocesso busca dump remoto, valida receipt/age e restaura logical dump em database descartável após remoção da origem. [Evidência](spikes/postgres-remote-external-verifier.md). Não cobre roles/PITR/cluster, sandbox de produção nem backup completo.
+- [x] Mix/Hex real consome registry autenticado/assinado, resolve pacote privado transitivo e rejeita metadata adulterada com gzip válido. [Evidência](spikes/hex-signed-registry.md). Prova só Repository read-only; API/publicação, servidor, trust/key rotation, rebar3/docs continuam obrigatórios.
+- [x] Go real consome módulo privado v2 e dependências transitivas via GOPROXY local, incluindo lista/latest/info/mod/zip, uma path escaping de maiúscula e sem fallback público configurado. [Evidência](spikes/go-module-proxy.md). Um baseline Linux/amd64 e fixture somente leitura; publicação, matrix OS/toolchain, ZIP validation e suporte produtivo continuam obrigatórios.
+- [x] Cargo 1.99.0 publica dois crates pela Web API, consome sparse index autenticado com dependência privada transitiva/features, rejeita token inválido e exerce yank vs. lockfile existente/novo. [Evidência](spikes/cargo-sparse-registry.md). Fixture protocolar Linux/amd64; auth/RBAC/review, concorrência, validação robusta, recovery e suporte produtivo continuam obrigatórios.
+- [x] npm 11.19.0/Node 24.21.0 publica dois pacotes scoped, instala via `npm ci` com transitiva/integrity e atualiza/consulta dist-tag em cliente real. [Evidência](spikes/npm-registry.md). Fixture protocolar Linux/amd64; ACL/review/concorrência, SvelteKit real, recovery e suporte produtivo continuam obrigatórios.
+- [x] Dart Pub 3.13.5 publica dois pacotes e resolve/download parent+transitiva por Hosted Repository v2; token inválido foi rejeitado e removido. [Evidência](spikes/pub-hosted-repository.md). Fixture localhost HTTP sintética; TLS, Flutter CLI, Windows/macOS, RBAC/review/concorrência, recovery e suporte produtivo continuam obrigatórios.
+- [x] Caracterização Authentik OIDC/SCIM: PKCE/RS256/JWKS, subject estável, provisionamento, memberships sequenciais, remoção seletiva, desativação, 503 e retry de evento. [Evidência](spikes/authentik-oidc-scim.md). O health não sinalizou 503; full sync variou entre não atualizar o usuário e atualizar uma vez com drift corrigido, portanto reconciliação determinística não foi comprovada e os critérios de aceite Authentik permanecem pendentes.
 - [ ] Spike Authentik OIDC/SCIM com saúde/reconciliação verificável, grupos, desativação, bloqueio e recuperação.
 - [ ] Migrations de identidade/workspaces/roles nos dois engines.
 - [ ] Bootstrap seguro e sessão local.
@@ -1456,6 +1504,7 @@ Decisões de produto já fechadas não são substituídas pelos spikes: verifica
 - [ ] Backup completo com manifest/pins/criptografia/S3.
 - [ ] Verificador isolado que lê e restaura o backup remoto.
 - [ ] Caminhos de verificação externa automática e manual com chave offline; contratos de saída de rede.
+- [ ] Modelo de ameaças inicial e revisão ligada às fronteiras/controles implementados. [Rascunho atual](threat-model.md) não é evidência de controle.
 
 ### Progresso comprovado — 04/10/2026
 
@@ -1506,6 +1555,22 @@ Fatia 0.13: produtor/verificador SQLite reais em subprocessos distintos; produto
 Fatia0.13 commitada em `7996243`, enviada para `origin/main` após nova verificação completa; ai-memory atualizado após push. Continuação seguinte não está nesse commit.
 
 Fatia0.14: receipt de snapshot com Ed25519/domain/version/contexto/digests/size, chave pública de confiança fora do envelope e validação antes de aceitar archive. Produtor assina com chave distinta da privada age; verificador assinado fail-closed restaura128linhas e rejeita adulteração/unsigned/key não confiada/contextos diferentes. Schema/encoding limitado rejeita duplicatas/desconhecidos/versões/valores/trailing inválidos. Não manifest completo, trust store/rotação, relatório autenticado, anti-replay no mesmo ID ou freshness. Detalhes no [spike0.14](spikes/signed-backup-receipt.md).
+
+Fatia 0.15: subprocesso produtor cria snapshot SQLite, cifra, assina e grava ciphertext + receipt como objetos separados no Floci; remove cópia local. Verificador separado busca primeiro receipt, usa chave/contexto de trust config local fora do envelope, valida assinatura e só então faz GET ciphertext, confere tamanho/hash e restaura/verifica. Testes reais Floci rejeitam receipt ausente/adulterado/malformado/oversized, trust/contexto incorreto, objeto ausente/oversized/digest divergente e age inválido mesmo com digest assinado atualizado. [Evidência](spikes/remote-signed-backup-verifier.md). Ainda sem backup completo, manifest de instalação, DB PostgreSQL/OCI/objetos, trust store gerido, relatório autenticado, recovery kit, scheduler/leases/crash recovery, ambiente isolado, egress denial ou prova de atomicidade real. Floci continua somente fixture de desenvolvimento.
+
+Fatia 0.16: logical dump PostgreSQL 18 por subprocesso separado → age → ciphertext + receipt Ed25519 no Floci; produtor e cópia local removidos, origem dropada antes do verifier. Verificador recebe trust local/contexto esperado e chave age privada, busca/verifica receipt remoto antes do objeto, confere bounded size/digest, autentica age antes do pg_restore em DB descartável e checa 128 rows/262144 bytes, FK/payload/sequence. Negativas incluem signature/contexto/tool major, objetos missing/oversized/digest divergente, age inválido com novo digest assinado e archive não PostgreSQL. [Evidência](spikes/postgres-remote-external-verifier.md). Não é backup completo, roles/PITR, sandbox (worker usa Docker daemon no mesmo host), trust store/kit/scheduler, output autenticado, egress policy ou S3 real. Floci segue fixture.
+
+Fatia 0.17: Mix 1.19.5/Elixir 1.19.5/OTP 28.4/Hex 2.5.1 constrói tarballs e registry estático assinado; consumidor usa repo autenticado em loopback, resolve/compila parent+leaf transitivos e falha especificamente por assinatura quando metadata gzip válida tem payload assinado alterado. [Evidência](spikes/hex-signed-registry.md). Dependência transitiva do fixture precisou declarar explicitamente `repo`; não assumir herança. Repository read-only somente: API/publicação, server, auth/ACL produtivos, rotação/restore de key, Rebar3/docs continuam obrigatórios. `make verify` integral passou depois desta fatia; checkout permanece sem commit/push e nenhuma fase ou release está concluída.
+
+Fatia 0.19: Go 1.27.1 linux/amd64 real consome parent privado `/v2` e dependências transitivas via proxy HTTP local; `go mod tidy/download`, `go run`, `go list -m -versions`, atualização `@latest`, `.info/.mod/.zip`, uppercase path HTTP escaping (`!upper`) e ZIP root sem escaping, isolamento do GOPATH/cache/HOME e fallback público não configurado passaram 3 repetições. [Evidência](spikes/go-module-proxy.md). Isso não é adapter/CLI de publicação; continuam pendentes toolchain/OS matrix, validação ZIP produtiva, pseudo-version/full escaping, configuração mista sem vazamento, storage/auth e suporte de produto. Nenhuma fase ou release concluída.
+
+Fatia 0.20 (13/10/2026): Cargo/rustc 1.99.0 reais publicaram dois crates com `cargo publish` via API fixture, converteram metadata/checksum para sparse index autenticado, compilaram consumer com feature explícita, feature default e dependência privada transitiva, e executaram `cargo yank`. Cargo preservou build do `Cargo.lock` existente, enquanto uma resolução nova recusou a única versão yankada. Repetições 3/3, race e vet focal passaram. [Evidência](spikes/cargo-sparse-registry.md). O server é fixture, não produto; auth/RBAC, review, reserva concorrente, validação adversarial, restore e matriz cross-platform/toolchain permanecem obrigatórios. Nenhuma fase/release está concluída.
+
+Fatia 0.21 (13/10/2026): Node 24.21.0/npm 11.19.0 reais publicaram pacotes scoped pela API npm, geraram packument com tarball/SHA-1/SHA-512, instalaram parent+dependência transitiva por `npm ci` com cache independente e scripts desligados, executaram o pacote e moveram/consultaram dist-tag. Count=3, race e vet focal passaram. [Evidência](spikes/npm-registry.md). A fixture não comprova ACL, protected dist-tag roles, review, corrida/consistência de storage, SvelteKit real, offline/recovery ou suporte de produto. Nenhuma fase/release está concluída.
+
+Fatia 0.22 (13/10/2026): Dart SDK 3.13.5 real publicou leaf+parent sintéticos por Hosted Pub Repository v2 (start, multipart upload, finalize) e resolveu/baixou dependência privada transitiva com verificação de `archive_sha256`; `dart run` verificou o pacote. `dart pub token add --env-var` foi caracterizado: ausência e token inválido deram 401, e o cliente removeu a referência inválida do config. Repetições 3/3 e race passaram; `make verify` integral também passou com Go dependencies em cache e `GOPROXY=off`. [Evidência](spikes/pub-hosted-repository.md). Por limitação de trust da fixture TLS temporária, o teste usa apenas HTTP em `localhost` — exceção local do cliente, não prova HTTPS/TLS e nunca usa segredo real. Flutter CLI, Windows/macOS, 403, ACL/RBAC, concorrência, approval, recovery e suporte produtivo permanecem obrigatórios. Nenhuma fase/release está concluída.
+
+Fatia 0.18 (parcial; **não aceita**, 13/10/2026; caracterização repetida em 15/10): fixture Compose Authentik 2026.8.3 (`sha256:ab9b4e8c…`), PostgreSQL 18.6 e Valkey 9.0.3 fixados por digest, sem portas publicadas e em rede interna; cada repetição usa stack efêmera própria. O teste real percorre authorization-code + PKCE, valida ID token RS256 por JWKS/issuer/audience/nonce/expiry e confirma `sub` estável igual ao SCIM `externalId` e diferente do email. Memberships são exercitadas sequencialmente; as predicates selecionam uma cópia com membership em vez da primeira cópia retornada, e remoção exige limpar todas as cópias do grupo A sem remover a associação do grupo B. No target permissivo, foram reportados 4–6 recursos sintéticos excedentes de Groups; unicidade/409/upsert num servidor SCIM real não foram demonstrados. A full sync normal reportou `info`. No fault test, target respondeu 503, `sync/status` ficou `info`, `last_successful_sync` não avançou, dispatch terminou `done/info`, sync por objeto permaneceu `queued` e não houve warning/error. Sob recovery, execuções repetidas variaram: em algumas, full sync leu Users sem `PUT/PATCH` e deixou drift; numa, houve uma atualização que coincidiu com a correção do drift. Isso não comprova reconciliação determinística. O timeout de idle inicial da fixture CPU-limited foi elevado de 120s para 240s, com diagnóstico das tarefas bloqueadoras. Uma execução race falhou uma vez ao esperar a membership do usuário de recuperação e outra passou; foram ampliados diagnósticos de task com conteúdo sanitizado. A repetição race focalizada e o `make verify` integral posterior passaram, mas a causa-raiz da falha transitória não foi demonstrada. Health/freshness, retry/backoff completo, reconciliação autoritativa, bloqueio/desbloqueio após 1 hora, auto-link por email, bloqueio de métodos/sessões/tokens, área de revisão, preservação de conta local/serviço e respeito aos grants atuais seguem obrigatórios. [Evidência](spikes/authentik-oidc-scim.md). Fase 0/v1 continuam abertas, sem commit/push/deploy/release.
 
 ## 27. Referências técnicas
 

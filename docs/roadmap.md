@@ -1,8 +1,12 @@
 # Roadmap — recursos adiados e gaps conhecidos
 
-**Atualizado:** 04/10/2026
+**Entrega utilizável (atualizado em 12/11/2026):** por decisão do proprietário, a prioridade passou a ser uma entrega reduzida com Cargo, npm, Pub e OCI, storage S3 compatível e login opcional via Muira ([guia e limites](usable-delivery.md)). Ela está implementada e validada localmente, e foi complementada com: disaster recovery do SQLite por replicação com status ([ADR 0045](adr/0045-sqlite-replication-disaster-recovery.md)), convites e cadastro por convite ([ADR 0046](adr/0046-workspace-invitations.md)), migração e coleta física offline de objetos ([ADR 0047](adr/0047-offline-object-maintenance.md)), backups completos cifrados com verificação e restauração para SQLite e PostgreSQL ([ADR 0048](adr/0048-encrypted-installation-backups.md)) e, no OCI, quota, tags imutáveis, exclusão, coleta e revisão humana ([ADR 0044](adr/0044-own-oci-adapter.md)). Depois vieram contas de serviço e trusted publishing (ADR 0049), recuperação de conta (ADR 0050), passkeys (ADR 0051), interface web (ADR 0052), validação arm64 por emulação (ADR 0053) e e-mail transacional por Sabiá, Resend, MillionSend ou SMTP ([ADR 0054](adr/0054-transactional-email.md)). Continuam pendentes da v1, sem adiamento: Hex, SCIM contínuo, egress global negado, matriz de plataformas e benchmarks, e a validação contra provedores reais (R2/B2, Muira, Docker). A coleta física de objetos é offline por decisão; um modo online com leases continua possível.
 
-**Estado:** fase 0 em andamento; spikes SQLite local e roundtrip S3/Floci comprovados, sem servidor/release utilizável
+**Atualização de serving público:** arquivos genéricos publicados em repositórios explicitamente públicos têm rota inicial na origem de assets e allowlist CORS global opcional ([ADR 0020](adr/0020-public-generic-assets.md)). O estado histórico abaixo que afirma ausência total desse serving precede a fatia; CORS granular, cache público e demais formatos continuam pendentes.
+
+**Atualizado:** 22/10/2026
+
+**Estado:** fase 0 em andamento e fase 1 ainda aberta; Authentik OIDC/SCIM 0.18 caracterizado em fixture, health e full-sync reconciliation após 503 não aceitos. Existe esqueleto `registry serve`, migrations v1–v10, serviços internos de workspaces/repositórios, CLI local one-shot de bootstrap do primeiro administrador, inicialização Linux da chave mestra e endpoints HTTP limitados de autenticação, workspace, membership, metadados/configuração de repositórios e grants. Todas as rotas protegidas validam sessão por request; escritas exigem CSRF/origem; criação e mutações sensíveis exigem MFA recente. Owners/administradores gerem metadados de repositórios; grants são explícitos e aditivos, owners podem conceder qualquer papel, administradores delegam apenas `reader`/`publisher`, e grants ativos são revogados ao remover membership, sem restauração na readmissão. Somente owner altera visibilidade; a policy inicial `private_only` restringe mudanças futuras sem converter repositórios existentes. Membership não concede leitura/publicação implícita. Há um fluxo inicial de artefatos genéricos com grants explícitos, publicação e download privado por ticket em origem de assets separada; convites, passkeys, adapters produtivos e serving público continuam ausentes, e listed/unlisted não habilitam acesso anônimo. Testes locais SQLite/HTTP e integração PostgreSQL com `-race` de grants, repositórios, workspaces, server e migrations passaram em execução focada; A revisão anterior a esta fatia passou o `make verify` integral após limpeza autorizada dos quatro containers Authentik stale e configuração de `PUB_TEST_DART_BIN`: build, vet, format-check, unitários, integrações repetidas três vezes e race uma vez. O fixture Authentik usa agora o diretório temporário indicado por `TMPDIR` (fallback `/tmp/opencode`). A fase 1 e a v1 seguem abertas porque adapters produtivos para os sete formatos, quotas/recuperação completas e outros aceites permanecem pendentes. Não há servidor/release utilizável nem suporte de protocolo anunciado.
 
 Spike PostgreSQL lógico com tools do mesmo major também comprovado; [limites](spikes/postgres-backup.md). Distribuição de tools/aceitação das versões suportadas e backup completo continuam obrigatórios; PITR permanece adiamento separado, sem confundir os dois.
 
@@ -26,11 +30,29 @@ Novo limite OCI obrigatório: gate apenas no manifest não oculta blob pendente 
 
 [Spike0.14](spikes/signed-backup-receipt.md) autentica receipt de snapshot via Ed25519/contexto e chave confiada separadamente. Não manifest completo/trust store/rotação, relatório autenticado/freshness/anti-rollback; esses requisitos seguem obrigatórios.
 
+[Spike 0.15](spikes/remote-signed-backup-verifier.md) amplia a prova para GET real via SDK S3/Floci do receipt e ciphertext em subprocesso separado. Isso não fecha verificador externo operacional, backup total, PostgreSQL/OCI, kit, jobs/leases/crash recovery, egress ou atomicidade de S3 real; requisitos continuam obrigatórios.
+
+[Spike 0.16](spikes/postgres-remote-external-verifier.md) repete essa composição para um logical dump PostgreSQL 18 e pg_restore em database descartável. Não cobre roles/PITR/cluster, instalação, trust store operacional, isolação de produção, relatório autenticado, kit ou scheduler; os requisitos de backup/verificador completos continuam obrigatórios.
+
+[Spike 0.17](spikes/hex-signed-registry.md) prova Mix 1.19.5/Hex 2.5.1 consumindo registry read-only assinado, autenticado e transitivo, e rejeitando payload de metadata adulterado. Não implementa API de publicação, servidor Hex, gestão/rotação de chave ou aceite Rebar3/docs; itens da fase Hex permanecem obrigatórios.
+
+[Spike 0.18](spikes/authentik-oidc-scim.md) prova OIDC authorization-code + PKCE/JWKS, provisionamento Authentik 2026.8.3, remoção seletiva de membership e desativação em fixture. Sob HTTP 503, status ficou `info`, `last_successful_sync` permaneceu imóvel, uma task ficou `queued` e não houve log de erro/health. O comportamento após recuperação variou: algumas full syncs leram Users sem `PUT/PATCH` e deixaram drift; numa observação houve uma atualização e o drift foi corrigido, sem causalidade determinística demonstrada. O target SCIM permissivo reportou 4–6 cópias sintéticas excedentes de Groups; a unicidade real e a semântica de duplicatas permanecem sem prova. Health/freshness, reconciliação autoritativa, bloqueio após 1 hora e desbloqueio auditado continuam requisitos obrigatórios, sem adiamento.
+
+[Spike 0.19](spikes/go-module-proxy.md) valida um cliente Go 1.27.1 Linux/amd64 real contra um proxy HTTP privado local, com major v2, dependências transitivas, path escaping e endpoints de leitura. Isso não implementa nem anuncia Go; publicação, validação, toolchain/OS matrix e demais controles da fase Go continuam obrigatórios.
+
+[Spike 0.20](spikes/cargo-sparse-registry.md) valida Cargo 1.99.0 real em publicação via API, consumo de sparse registry autenticado, dependência transitiva/features e yank com preservação do lockfile existente. Não é adapter produtivo nem aceita Cargo; auth/RBAC/review, versão duplicada concorrente, validação robusta, restore, plataformas e credenciais de produção continuam obrigatórios.
+
+[Spike 0.21](spikes/npm-registry.md) valida Node/npm reais em publicação scoped, `npm ci` com dependência privada transitiva, integridade e dist-tag. Não é server npm nem aceite do formato; ACL de publicação/dist-tag, concorrência, revisão, fixture adversarial, restore e matriz dos clientes seguem obrigatórios.
+
+[Spike 0.22](spikes/pub-hosted-repository.md) caracteriza Dart Pub 3.13.5 publicando e consumindo pacotes sintéticos v2, incluindo transitiva e token inválido. Usa a exceção HTTP localhost e não demonstra TLS; Flutter CLI, Windows/macOS, autorização/RBAC, concorrência, aprovação e recuperação seguem obrigatórios. Não é adapter nem aceite de Pub.
+
 Gap da execução (obrigatório antes de produção, não adiamento): Floci 2.1.0 admite corrida com dois vencedores em conclusão multipart `If-None-Match: *`. Desenvolvimento usa Floci por decisão do usuário; atomicidade precisa de aceitação separada contra backend S3 real. Ver [evidência](spikes/s3-backup.md).
 
 O escopo obrigatório e os critérios da v1 estão em [development-plan.md](development-plan.md). Este roadmap registra explicitamente o que não entra na v1, por quê e o que permite retomar a discussão. Não estabelece datas, ordem de entrega nem autorização para implementar recursos futuros.
 
 ## 1. Adiamentos acordados na revisão
+
+Validação atual (25/10/2026): a fatia filesystem/catálogo genérico/download privado passou o `make verify` integral, incluindo integrações 3× e race 1×. O setup Authentik foi ordenado para inicializar a identidade via grupo A antes do evento B; entrega inicial concorrente permanece um gap. Quotas agregadas, jobs periódicos, reconciliação/GC, S3 e adapters produtivos continuam obrigatórios e pendentes; gate verde não representa aceite da v1.
 
 | Recurso ou gap | Na v1 | Motivo do adiamento | Condição de retomada |
 | --- | --- | --- | --- |
@@ -62,7 +84,7 @@ Estas possibilidades continuam fora do escopo ou condicionadas a evidência. Nã
 | Hex: publicação nativa, rebar3 e distribuição de docs | API/CLI recebe tarball preparado; Mix consome registry assinado | API/configuração e clientes reais comprovados; ausência fica declarada, sem flags inventadas |
 | Go: pseudo-versions | Suporte depende de contrato explícito; não fabricar evidência VCS | Empacotamento/validação e clientes reais testados; definir origem e limites |
 | Webhooks de notificação | UI/email com outbox e retry | Necessidade, HMAC, idempotência, política de egress e testes de entrega |
-| Transportes HTTP de email | SMTP genérico inicial | Provedor escolhido, teste de envio/erro, timeout e idempotência |
+| Transportes HTTP de email | Feito: Sabiá, Resend/MillionSend e SMTP ([ADR 0054](adr/0054-transactional-email.md)) | Envio real por cada provedor |
 | Backup dependente de snapshots/version IDs do storage | Backup completo independente do bucket de produção na v1 | Classificação própria, retenção coordenada e dependências externas explícitas |
 | PITR/backup físico PostgreSQL | Backup lógico da aplicação não fornece PITR nem roles globais | Integração operacional do proprietário; não anunciar como cobertura do backup lógico |
 | Migração online entre engines | Export/import controlado com manutenção, inicialmente CLI | Prova de consistência e retomada; não confundir com migrations de schema |

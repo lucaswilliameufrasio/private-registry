@@ -1,0 +1,189 @@
+{
+  "templates": [
+    {
+      "id": "private-registry-workspace-invitation-v1",
+      "application_id": null,
+      "template_key": "registry.workspace-invitation",
+      "name": "Registry · convite para workspace",
+      "channel": "email",
+      "locale": "pt-BR",
+      "editor_mode": "html",
+      "subject_template": "Convite para o workspace {{workspace_name}}",
+      "html_source": "\u003cdiv style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;padding:32px;color:#1d2733\"\u003e\u003cdiv style=\"max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px\"\u003e\u003ch1 style=\"margin:0 0 16px;font-size:20px\"\u003eVocê foi convidado\u003c/h1\u003e\u003cp style=\"margin:0 0 8px;line-height:1.5\"\u003e{{inviter_name}} convidou você para o workspace \u003cstrong\u003e{{workspace_name}}\u003c/strong\u003e como {{role_label}}.\u003c/p\u003e\u003cp style=\"margin:24px 0\"\u003e\u003ca href=\"{{link}}\" style=\"background:#1f5f99;color:#ffffff;padding:12px 20px;border-radius:8px;text-decoration:none;display:inline-block\"\u003eAceitar convite\u003c/a\u003e\u003c/p\u003e\u003cp style=\"margin:0 0 16px;color:#69737d;font-size:13px;word-break:break-all\"\u003eSe o botão não funcionar, copie este endereço: {{link}}\u003c/p\u003e\u003cp style=\"margin:0;color:#69737d;font-size:13px\"\u003eO convite vale até {{expires_at}} (UTC) e só pode ser usado uma vez. Se você não esperava este convite, ignore esta mensagem.\u003c/p\u003e\u003cp style=\"margin:24px 0 0;color:#69737d;font-size:12px\"\u003eMensagem automática do registry privado. Não responda.\u003c/p\u003e\u003c/div\u003e\u003c/div\u003e",
+      "text_source": "{{inviter_name}} convidou você para o workspace {{workspace_name}} como {{role_label}}.\n\nAceite o convite em:\n{{link}}\n\nO convite vale até {{expires_at}} (UTC) e só pode ser usado uma vez. Se você não esperava este convite, ignore esta mensagem.",
+      "variables": [
+        {
+          "key": "workspace_name",
+          "label": "Nome do workspace",
+          "type": "string",
+          "required": true,
+          "example": "Plataforma"
+        },
+        {
+          "key": "inviter_name",
+          "label": "Quem convidou",
+          "type": "string",
+          "required": true,
+          "example": "Ana"
+        },
+        {
+          "key": "role_label",
+          "label": "Papel no workspace",
+          "type": "string",
+          "required": true,
+          "example": "membro"
+        },
+        {
+          "key": "link",
+          "label": "Link do convite",
+          "type": "url",
+          "required": true,
+          "example": "https://registry.example/#/invite?token=prinv_example"
+        },
+        {
+          "key": "expires_at",
+          "label": "Validade (UTC)",
+          "type": "string",
+          "required": true,
+          "example": "2026-11-19 12:00"
+        }
+      ],
+      "preview_data": {
+        "expires_at": "2026-11-19 12:00",
+        "inviter_name": "Ana",
+        "link": "https://registry.example/#/invite?token=prinv_example",
+        "role_label": "membro",
+        "workspace_name": "Plataforma"
+      }
+    },
+    {
+      "id": "private-registry-account-recovery-v1",
+      "application_id": null,
+      "template_key": "registry.account-recovery",
+      "name": "Registry · recuperação de conta",
+      "channel": "email",
+      "locale": "pt-BR",
+      "editor_mode": "html",
+      "subject_template": "Recuperação de acesso ao registry",
+      "html_source": "\u003cdiv style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;padding:32px;color:#1d2733\"\u003e\u003cdiv style=\"max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px\"\u003e\u003ch1 style=\"margin:0 0 16px;font-size:20px\"\u003eRecuperação de acesso\u003c/h1\u003e\u003cp style=\"margin:0 0 8px;line-height:1.5\"\u003eOlá, {{display_name}}. Recebemos um pedido para definir uma nova senha na sua conta.\u003c/p\u003e\u003cp style=\"margin:24px 0\"\u003e\u003ca href=\"{{link}}\" style=\"background:#1f5f99;color:#ffffff;padding:12px 20px;border-radius:8px;text-decoration:none;display:inline-block\"\u003eDefinir nova senha\u003c/a\u003e\u003c/p\u003e\u003cp style=\"margin:0 0 16px;color:#69737d;font-size:13px;word-break:break-all\"\u003eSe o botão não funcionar, copie este endereço: {{link}}\u003c/p\u003e\u003cp style=\"margin:0;color:#69737d;font-size:13px\"\u003eO link vale até {{expires_at}} (UTC) e só pode ser usado uma vez. Se você não fez esse pedido, ignore esta mensagem: sua senha atual continua valendo.\u003c/p\u003e\u003cp style=\"margin:24px 0 0;color:#69737d;font-size:12px\"\u003eMensagem automática do registry privado. Não responda.\u003c/p\u003e\u003c/div\u003e\u003c/div\u003e",
+      "text_source": "Olá, {{display_name}}. Recebemos um pedido para definir uma nova senha na sua conta.\n\nDefina a nova senha em:\n{{link}}\n\nO link vale até {{expires_at}} (UTC) e só pode ser usado uma vez. Se você não fez esse pedido, ignore esta mensagem: sua senha atual continua valendo.",
+      "variables": [
+        {
+          "key": "display_name",
+          "label": "Nome da pessoa",
+          "type": "string",
+          "required": true,
+          "example": "Ana"
+        },
+        {
+          "key": "link",
+          "label": "Link de recuperação",
+          "type": "url",
+          "required": true,
+          "example": "https://registry.example/#/recover?token=prrst_example"
+        },
+        {
+          "key": "expires_at",
+          "label": "Validade (UTC)",
+          "type": "string",
+          "required": true,
+          "example": "2026-11-13 12:00"
+        }
+      ],
+      "preview_data": {
+        "display_name": "Ana",
+        "expires_at": "2026-11-13 12:00",
+        "link": "https://registry.example/#/recover?token=prrst_example"
+      }
+    },
+    {
+      "id": "private-registry-email-verification-v1",
+      "application_id": null,
+      "template_key": "registry.email-verification",
+      "name": "Registry · confirmação de e-mail",
+      "channel": "email",
+      "locale": "pt-BR",
+      "editor_mode": "html",
+      "subject_template": "Confirme seu e-mail no registry",
+      "html_source": "\u003cdiv style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;padding:32px;color:#1d2733\"\u003e\u003cdiv style=\"max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px\"\u003e\u003ch1 style=\"margin:0 0 16px;font-size:20px\"\u003eConfirme seu e-mail\u003c/h1\u003e\u003cp style=\"margin:0 0 8px;line-height:1.5\"\u003eOlá, {{display_name}}. Confirme que este endereço é seu para usá-lo na recuperação de acesso e nos avisos de segurança.\u003c/p\u003e\u003cp style=\"margin:24px 0\"\u003e\u003ca href=\"{{link}}\" style=\"background:#1f5f99;color:#ffffff;padding:12px 20px;border-radius:8px;text-decoration:none;display:inline-block\"\u003eConfirmar e-mail\u003c/a\u003e\u003c/p\u003e\u003cp style=\"margin:0 0 16px;color:#69737d;font-size:13px;word-break:break-all\"\u003eSe o botão não funcionar, copie este endereço: {{link}}\u003c/p\u003e\u003cp style=\"margin:0;color:#69737d;font-size:13px\"\u003eO link vale até {{expires_at}} (UTC). Se você não pediu esta confirmação, ignore esta mensagem.\u003c/p\u003e\u003cp style=\"margin:24px 0 0;color:#69737d;font-size:12px\"\u003eMensagem automática do registry privado. Não responda.\u003c/p\u003e\u003c/div\u003e\u003c/div\u003e",
+      "text_source": "Olá, {{display_name}}. Confirme que este endereço é seu para usá-lo na recuperação de acesso e nos avisos de segurança.\n\nConfirme em:\n{{link}}\n\nO link vale até {{expires_at}} (UTC). Se você não pediu esta confirmação, ignore esta mensagem.",
+      "variables": [
+        {
+          "key": "display_name",
+          "label": "Nome da pessoa",
+          "type": "string",
+          "required": true,
+          "example": "Ana"
+        },
+        {
+          "key": "link",
+          "label": "Link de confirmação",
+          "type": "url",
+          "required": true,
+          "example": "https://registry.example/#/verify-email?token=prver_example"
+        },
+        {
+          "key": "expires_at",
+          "label": "Validade (UTC)",
+          "type": "string",
+          "required": true,
+          "example": "2026-11-13 12:00"
+        }
+      ],
+      "preview_data": {
+        "display_name": "Ana",
+        "expires_at": "2026-11-13 12:00",
+        "link": "https://registry.example/#/verify-email?token=prver_example"
+      }
+    },
+    {
+      "id": "private-registry-security-notice-v1",
+      "application_id": null,
+      "template_key": "registry.security-notice",
+      "name": "Registry · aviso de segurança",
+      "channel": "email",
+      "locale": "pt-BR",
+      "editor_mode": "html",
+      "subject_template": "Aviso de segurança da sua conta",
+      "html_source": "\u003cdiv style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;padding:32px;color:#1d2733\"\u003e\u003cdiv style=\"max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px\"\u003e\u003ch1 style=\"margin:0 0 16px;font-size:20px\"\u003eAviso de segurança\u003c/h1\u003e\u003cp style=\"margin:0 0 8px;line-height:1.5\"\u003eOlá, {{display_name}}. Registramos esta mudança na sua conta: \u003cstrong\u003e{{event_label}}\u003c/strong\u003e, em {{occurred_at}} (UTC).\u003c/p\u003e\u003cp style=\"margin:16px 0 0;line-height:1.5\"\u003eSe foi você, nada a fazer. Se não foi, peça a um administrador do registry para recuperar sua conta: {{registry_url}}\u003c/p\u003e\u003cp style=\"margin:24px 0 0;color:#69737d;font-size:12px\"\u003eMensagem automática do registry privado. Não responda.\u003c/p\u003e\u003c/div\u003e\u003c/div\u003e",
+      "text_source": "Olá, {{display_name}}. Registramos esta mudança na sua conta: {{event_label}}, em {{occurred_at}} (UTC).\n\nSe foi você, nada a fazer. Se não foi, peça a um administrador do registry para recuperar sua conta: {{registry_url}}",
+      "variables": [
+        {
+          "key": "display_name",
+          "label": "Nome da pessoa",
+          "type": "string",
+          "required": true,
+          "example": "Ana"
+        },
+        {
+          "key": "event_label",
+          "label": "Mudança registrada",
+          "type": "string",
+          "required": true,
+          "example": "nova passkey cadastrada"
+        },
+        {
+          "key": "occurred_at",
+          "label": "Quando (UTC)",
+          "type": "string",
+          "required": true,
+          "example": "2026-11-12 12:00"
+        },
+        {
+          "key": "registry_url",
+          "label": "Endereço do registry",
+          "type": "url",
+          "required": true,
+          "example": "https://registry.example"
+        }
+      ],
+      "preview_data": {
+        "display_name": "Ana",
+        "event_label": "nova passkey cadastrada",
+        "occurred_at": "2026-11-12 12:00",
+        "registry_url": "https://registry.example"
+      }
+    }
+  ],
+  "version": 1
+}

@@ -222,6 +222,18 @@ func TestExternalBackupProcessHelper(t *testing.T) {
 					Receipt: externalReceipt{PlainSHA: receipt.PlainSHA, CipherSHA: receipt.CipherSHA, Size: receipt.CipherBytes}})
 			}
 		}
+	case "producer_remote_signed":
+		var input remoteSignedProducerInput
+		err = decoder.Decode(&input)
+		if err == nil {
+			result, err = externalProduceRemoteSigned(ctx, input)
+		}
+	case "verifier_remote_signed":
+		var input remoteSignedVerifierInput
+		err = decoder.Decode(&input)
+		if err == nil {
+			result, err = externalVerifyRemoteSigned(ctx, input)
+		}
 	default:
 		err = errors.New("unknown fixture process")
 	}
